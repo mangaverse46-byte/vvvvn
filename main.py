@@ -78,18 +78,30 @@ async def show_results(client, message, user_id, results, source):
     )
 
 
-@Client.on_message(filters.command("start"))
+@Client.on_message(filters.command("start", prefixes=["/"]))
 async def start_handler(client, message):
     user = message.from_user
     if not user:
+        log.warning("Received /start without from_user; chat_id=%s", message.chat.id if message.chat else None)
         return
-    db.touch_user(user)
 
-    from config import FORCE_SUB_CHANNEL
-    if FORCE_SUB_CHANNEL:
-        try:
+    log.info("Received /start from user_id=%s chat_id=%s", user.id, message.chat.id if message.chat else None)
+
+    # A database error must never prevent the welcome message from being sent.
+    try:
+        db.touch_user(user)
+    except Exception:
+        log.exception("Could not save user %s; continuing with /start", user.id)
+
+    try:
+        from config import FORCE_SUB_CHANNEL
+        if FORCE_SUB_CHANNEL:
             member = await client.get_chat_member(FORCE_SUB_CHANNEL, user.id)
-            if member.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            if member.status not in (
+                ChatMemberStatus.MEMBER,
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.OWNER,
+            ):
                 await message.reply_text(
                     "🔒 يجب الاشتراك بالقناة أولاً ثم أرسل /start مجدداً.",
                     reply_markup=InlineKeyboardMarkup([[
@@ -100,27 +112,34 @@ async def start_handler(client, message):
                     ]]),
                 )
                 return
-        except Exception:
-            await message.reply_text("تعذر التحقق من الاشتراك. تأكد أن البوت مشرف بالقناة.")
-            return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🔎 البحث عن مانجا", callback_data="menu:search"),
-            InlineKeyboardButton("🆕 أحدث المانجا", callback_data="menu:latest"),
-        ],
-        [
-            InlineKeyboardButton("📚 المصادر", callback_data="menu:sources"),
-            InlineKeyboardButton("⭐ المفضلة", callback_data="menu:favorites"),
-        ],
-        [InlineKeyboardButton("❤️ المتابعة", callback_data="menu:follows")],
-    ]
-    await message.reply_text(
-        "🖤 أهلاً بك في Manga Virus 🦠\n"
-        "بوابتك لعالم المانجا والمانهوا.\n\n"
-        "للبحث أرسل: /search اسم المانجا",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+        keyboard = [
+            [
+                InlineKeyboardButton("🔎 البحث عن مانجا", callback_data="menu:search"),
+                InlineKeyboardButton("🆕 أحدث المانجا", callback_data="menu:latest"),
+            ],
+            [
+                InlineKeyboardButton("📚 المصادر", callback_data="menu:sources"),
+                InlineKeyboardButton("⭐ المفضلة", callback_data="menu:favorites"),
+            ],
+            [InlineKeyboardButton("❤️ المتابعة", callback_data="menu:follows")],
+        ]
+        await message.reply_text(
+            "🖤 أهلاً بك في Manga Virus 🦠\n"
+            "بوابتك لعالم المانجا والمانهوا.\n\n"
+            "للبحث أرسل: /search اسم المانجا",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        log.info("Welcome message sent to user_id=%s", user.id)
+    except Exception as exc:
+        log.exception("Start handler failed for user_id=%s", user.id)
+        try:
+            await message.reply_text(
+                "صار خطأ أثناء فتح القائمة. جرّب /start مرة ثانية.\n"
+                f"التفاصيل: {str(exc)[:250]}"
+            )
+        except Exception:
+            log.exception("Could not send /start error reply to user_id=%s", user.id)
 
 
 @Client.on_message(filters.command("sources"))
