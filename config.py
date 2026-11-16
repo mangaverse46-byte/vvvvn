@@ -12,6 +12,8 @@ def _ids(value: str) -> set[int]:
     return result
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+API_ID = int(os.getenv("API_ID", "0") or 0)
+API_HASH = os.getenv("API_HASH", "").strip()
 MANGA_API_BASE = os.getenv("MANGA_API_BASE", "https://pixelflow-callback-harbor.lovable.app/api/public/manga").rstrip("/")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/manga_virus.sqlite3")
 ADMIN_IDS = _ids(os.getenv("ADMIN_IDS", ""))
