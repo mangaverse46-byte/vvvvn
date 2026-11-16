@@ -139,7 +139,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current:
                 table = data.split(":", 1)[1]
                 added = db.toggle(table, q.from_user.id, current["source"], current["url"], current["title"])
-                await q.answer("تمت الإضافة" if added else "تم الحذف", show_alert=True)
+                await q.message.reply_text("تمت الإضافة إلى القائمة." if added else "تم حذفها من القائمة.")
         elif data.startswith("chapter:"):
             index = int(data.split(":", 1)[1])
             chapter = context.user_data["chapters"][index]
@@ -154,8 +154,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bio.name = filename
             await context.bot.send_document(q.message.chat_id, document=bio, caption=f"🖤 Manga Virus\n{chapter['title']}\n📄 {count} صفحة")
             db.add_download(q.from_user.id)
-        elif data.startswith("latest:"):
-            pass
     except Exception as e:
         log.exception("callback failed")
         await q.message.reply_text(f"حدث خطأ أثناء تنفيذ الطلب:\n{str(e)[:700]}")
