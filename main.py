@@ -4,6 +4,7 @@ import time
 from io import BytesIO
 
 from pyrogram import Client, filters, idle
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
@@ -88,7 +89,7 @@ async def start_handler(client, message):
     if FORCE_SUB_CHANNEL:
         try:
             member = await client.get_chat_member(FORCE_SUB_CHANNEL, user.id)
-            if member.status not in ("member", "administrator", "owner"):
+            if member.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
                 await message.reply_text(
                     "🔒 يجب الاشتراك بالقناة أولاً ثم أرسل /start مجدداً.",
                     reply_markup=InlineKeyboardMarkup([[
