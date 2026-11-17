@@ -1396,98 +1396,73 @@ async def unified_callback(client,callback):
 
     if data.startswith("cat_sel_"):
         p=data.split("_"); idx=int(p[2]); i=int(p[3])
-        genres=await asyncio.to_thread(StarzManga.get_genres)
+        genres=await asyncio.to_thread(get_source("mangalik").get_genres)
         if not genres or idx>=len(genres): return
-        mangas=await asyncio.to_thread(StarzManga.get_manga_by_genre, genres[idx][1], 1)
+        mangas=await asyncio.to_thread(get_source("mangalik").get_manga_by_genre, genres[idx][1], 1)
         if i>=len(mangas): return
-        t,u,s=mangas[i]; user_data[uid]['search_results']=[(t,u,s)]; user_data[uid]['source']="mangalik"; data="sel_mangalik_0"
+        user_data.setdefault(uid,{})["search_results"]=[mangas[i]]
+        user_data[uid]["source"]="mangalik"
+        data="sel_mangalik_0"
 
     if data.startswith("sel_") or data.startswith("fav_open_") or data.startswith("latest_"):
+        manga_url = None
         if data.startswith("sel_"):
             _, src, idx = data.split("_"); idx=int(idx)
-            res=user_data[uid].get('search_results',[])
-            if idx>=len(res): return
-            item=res[idx]
-            ident = item[2] if src=="mangalik" else (item.get('id') if src=="mesh" else (item['slug'] if src=="azora" else item.get('slug')))
+            results=user_data.get(uid,{}).get("search_results",[])
+            if idx>=len(results): return
+            item=results[idx]
+            manga_url=item.get("url") or item.get("manga_url")
+            ident=str(item.get("id") or manga_url or "")
         elif data.startswith("fav_open_"):
             idx=int(data.split("_")[2]); favs=get_favorites(uid)
             if idx>=len(favs): return
-            item=favs[idx]; src=item['source']; ident=item['identifier']
-        elif data.startswith("latest_"):
+            item=favs[idx]; src=str(item["source"]); ident=str(item["identifier"])
+            manga_url=item.get("manga_url") or (ident if ident.startswith("http") else None)
+        else:
             idx=int(data.split("_")[1])
             if idx>=len(latest_manga_cache): return
-            item=latest_manga_cache[idx]; src="mangalik"; ident=item[2]
-            user_data.setdefault(uid, {})["search_results"]=[(item[0], item[1], item[2]) ]
-        await callback.answer("⏳"); await safe_edit(msg,"⏳ **جاري التحميل...**")
+            item=latest_manga_cache[idx]
+            src=str(item[4]) if len(item)>4 else "mangalik"
+            manga_url=item[1]
+            ident=str(item[2] or manga_url)
+            user_data.setdefault(uid,{})["search_results"]=[{"title":item[0],"url":manga_url,"id":ident}]
+        if not manga_url:
+            await callback.answer("رابط المانجا غير متوفر",show_alert=True); return
+        await callback.answer("⏳"); await safe_edit(msg,"⏳ **جاري تحميل معلومات المانجا...**")
         try:
-            if src=="mangalik":
-                murl=None
-                for t,u,s in user_data.get(uid,{}).get('search_results',[]):
-                    if s==ident: murl=u; break
-                if not murl:
-                    for f in get_favorites(uid):
-                        if f['identifier']==ident and f['source']=='mangalik': murl=f['manga_url']; break
-                if not murl: murl=f"{StarzManga.BASE}/manga/{ident}/"
-                info=await asyncio.to_thread(StarzManga.get_details, murl)
-                if not info: await safe_edit(msg,"❌"); return
-                chs=await asyncio.to_thread(StarzManga.get_chapters, murl)
-                if not chs: await safe_edit(msg,"❌ لا فصول"); return
-                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-                async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
-                ik=ident; murl_k=murl; ref="https://starzmanga.com/"
-            elif src=="mesh":
-                sid=str(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
-                if not dd: await safe_edit(msg,"❌"); return
-                chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
-                if not chs: await safe_edit(msg,"❌"); return
-                t=clean_manga_title(dd.get('title','?'),str(sid)); d=dd.get('story','')[:300]+"..."
-                cover=MeshManga.get_cover_image(dd); genres=dd.get('_genres',[]); kind=dd.get('_kind','')
-                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch),client=_c)
-                ik=sid; murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
-            elif src=="azora":
-                info=await asyncio.to_thread(AzoraFly.get_details, ident)
-                if not info: await safe_edit(msg,"❌"); return
-                chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
-                if not chs: await safe_edit(msg,"❌"); return
-                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch),client=_c)
-                ik=ident; murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
-            elif src=="lavascans":
-                murl=None
-                for it in user_data.get(uid,{}).get('search_results',[]):
-                    if isinstance(it, dict) and it.get('slug')==ident: murl=it.get('url'); break
-                if not murl:
-                    for f in get_favorites(uid):
-                        if f['identifier']==ident and f['source']=='lavascans': murl=f['manga_url']; break
-                if not murl: murl=f"{LavaScans.BASE}manga/{ident}/"
-                info=await asyncio.to_thread(LavaScans.get_details, murl)
-                if not info: await safe_edit(msg,"❌"); return
-                chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
-                if not chs: await safe_edit(msg,"❌"); return
-                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-                async def pdf(ch,_c=client): return await LavaScans.create_pdf_from_images(await asyncio.to_thread(LavaScans.get_chapter_images, ch['url']),client=_c)
-                ik=ident; murl_k=murl; ref=LavaScans.BASE
+            api=await asyncio.to_thread(get_source,src)
+            info=await asyncio.to_thread(api.get_details,manga_url)
+            if not info: await safe_edit(msg,"❌ تعذر جلب المعلومات"); return
+            chs=info.get("chapters",[])
+            if not chs: await safe_edit(msg,"❌ لا توجد فصول"); return
+            title=clean_manga_title(info.get("name") or info.get("title") or ident,ident)
+            description=(info.get("description") or "")[:300]
+            cover=info.get("cover_url")
+            genres=info.get("genres") or []
+            kind=info.get("kind") or ""
+            async def pdf(ch,_api=api,_client=client):
+                image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
+                return await download_images_parallel(image_urls,client=_client)
+            user_data[uid]={"chapters":chs,"title":title,"identifier":ident,"page":0,"source":src,
+                "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind}
+            parts=[f"**{title}**"]
+            if kind: parts.append(f"📚 **{kind}**")
+            if genres: parts.append("🏷️ " + " | ".join(map(str,genres[:8])))
+            if description: parts.extend(["",description])
+            parts.extend(["",f"📖 **{len(chs)} فصل**"])
+            if chs:
+                latest=chs[0]
+                label=latest.get("display_text") or latest.get("number") or latest.get("num_str") or latest.get("title","")
+                if label: parts.append(f"📌 آخر فصل: `{label}`")
+            cap="\n".join(parts); user_data[uid]["base_caption"]=cap
+            markup,_,_=create_chapters_markup(chs,0,ident,src,uid)
+            try: await msg.delete()
+            except: pass
+            await send_cover_message(msg,cover,cap,markup,referer=api.BASE)
         except Exception as e:
-            print(f"❌ {e}"); await safe_edit(msg,f"❌ {str(e)[:100]}"); return
-        user_data[uid]={'chapters':chs,'title':t,'identifier':ik,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover,'genres':genres,'kind':kind}
-        parts=[f"**{t}**"]
-        if kind: parts.append(f"📚 **{kind}**")
-        if genres: parts.append(f"🏷️ {' | '.join(genres)}")
-        parts.extend(["",d,"",f"📖 **{len(chs)} فصل**"])
-        if chs:
-            last=chs[-1]; lc=""
-            if src in ("mangalik","lavascans"): lc=str(last.get('num_str',''))
-            elif src=="mesh": lc=str(last.get('display_text',''))
-            elif src=="azora": lc=str(last.get('number',''))
-            if lc: parts.append(f"📌 آخر: `{lc}`")
-        cap="\n".join(parts); user_data[uid]['base_caption']=cap
-        m,_,_=create_chapters_markup(chs,0,ik,src,uid)
-        try: await msg.delete()
-        except: pass
-        await send_cover_message(msg,cover,cap,m,referer=ref); return
+            print(f"[manga:{src}] {e}")
+            await safe_edit(msg,f"❌ {str(e)[:180]}")
+        return
 
     if data.startswith("share_manga_"):
         src_short = data.replace("share_manga_", "")
