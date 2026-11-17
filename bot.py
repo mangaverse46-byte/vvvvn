@@ -1543,7 +1543,7 @@ async def unified_callback(client,callback):
         p=data.split("_")
         if len(p)<3: return
         src_short, idx_str = p[1], p[2]; idx=int(idx_str)
-        src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        src = source_from_code(src_short)
         if not src: await callback.answer("⚠️"); return
         if uid not in user_data: await callback.answer("⚠️",show_alert=True); return
         parallel_allowed = settings.get("allow_parallel_downloads", False); locked = False
@@ -1557,10 +1557,7 @@ async def unified_callback(client,callback):
             pdf_func=user_data[uid].get('create_pdf_func')
             if not pdf_func: await callback.answer("⚠️"); return
             target=chs[idx]; disp='?'
-            if src=="mangalik": disp=target['num_str'] if target.get('is_numeric') else target['title'][:4]
-            elif src=="mesh": disp=target.get('display_text','?')
-            elif src=="azora": disp=target['number']
-            elif src=="lavascans": disp=target['num_str'] if target.get('is_numeric') else target['title'][:4]
+            disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]
             success,rem=try_deduct_chapter(uid,1)
             if not success:
                 await callback.answer("❌ لا رصيد",show_alert=True)
@@ -1589,7 +1586,7 @@ async def unified_callback(client,callback):
     if data.startswith(("fav_add_","fav_remove_","toggle_notify_")):
         if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
         src_short = data.split("_")[-1] if data.startswith("toggle_notify_") else data.split("_")[2]
-        src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        src = source_from_code(src_short)
         ident=user_data.get(uid, {}).get('identifier')
         if not src or not ident: return
         if data.startswith("fav_add_"):
@@ -1610,7 +1607,7 @@ async def unified_callback(client,callback):
         return
 
     if data.startswith("mrg_"):
-        src_short=data.split("_")[1]; src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        src_short=data.split("_")[1]; src=source_from_code(src_short)
         if not src: await callback.answer("⚠️"); return
         if uid not in user_data: await callback.answer("⚠️", show_alert=True); return
         ident=user_data[uid].get('identifier'); chs=user_data[uid].get('chapters',[])
@@ -1627,27 +1624,20 @@ async def unified_callback(client,callback):
         await callback.answer("⏳"); await safe_edit(msg,f"🔍 **{q}**")
         res=[]
         try:
-            if src=="mangalik": res=await asyncio.to_thread(StarzManga.search, q)
-            elif src=="mesh": res=await asyncio.to_thread(MeshManga.search, q)
-            elif src=="azora": res=await asyncio.to_thread(AzoraFly.search, q)
-            elif src=="lavascans": res=await asyncio.to_thread(LavaScans.search, q)
-        except Exception as e: print(f"❌ {e}")
+            api=await asyncio.to_thread(get_source,src)
+            res=await asyncio.to_thread(api.search,q)
+        except Exception as e: print(f"❌ [{src}] {e}")
         if not res:
-            kb=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖", callback_data="src_mangalik")],[InlineKeyboardButton("📚", callback_data="src_mesh")],
-                [InlineKeyboardButton("✨", callback_data="src_azora")],[InlineKeyboardButton("🌋", callback_data="src_lavascans")],
-                [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
             try: await msg.delete()
             except: pass
-            await client.send_message(cid, f"❌ **لا نتائج**\n`{q}`", reply_markup=kb, parse_mode=ParseMode.MARKDOWN); return
-        user_data[uid]['search_results']=res; user_data[uid]['source']=src
+            await client.send_message(cid, f"❌ **لا نتائج أو المصدر غير متاح**\\n`{q}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),
+                parse_mode=ParseMode.MARKDOWN); return
+        user_data[uid]["search_results"]=res; user_data[uid]["source"]=src
         kb=[]
-        for i, item in enumerate(res):
-            if src=="mangalik": t=item[0]
-            elif src=="mesh": t=item.get('title','')
-            elif src=="azora": t=item['title']
-            elif src=="lavascans": t=item.get('title','')
-            kb.append([InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"sel_{src}_{i}")])
+        for i,item in enumerate(res):
+            title=str(item.get("title") or "Manga")
+            kb.append([InlineKeyboardButton(f"📖 {title[:45]}",callback_data=f"sel_{src}_{i}")])
         kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
         await safe_edit(msg,f"✅ **{len(res)} نتيجة**\n`{q}`",InlineKeyboardMarkup(kb)); return
 
@@ -2130,11 +2120,9 @@ async def handle_all_text(client,message):
         for ch in chs:
             num = None
             try:
-                if src in ("mangalik","lavascans") and ch.get('is_numeric'): num = float(ch['num_str'])
-                elif src == "mesh":
-                    m2 = re.search(r'(\d+(?:\.\d+)?)', ch.get('display_text', ''))
-                    if m2: num = float(m2.group(1))
-                elif src == "azora": num = float(ch.get('number', ''))
+                raw_num = str(ch.get("number") or ch.get("num_str") or ch.get("display_text") or ch.get("title") or "")
+                m2 = re.search(r"(\\d+(?:\\.\\d+)?)", raw_num)
+                if m2: num = float(m2.group(1))
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
         if not selected: await message.reply_text(f"❌ لا فصول"); return
@@ -2153,24 +2141,16 @@ async def handle_all_text(client,message):
             title = user_data[uid].get('title', 'مانجا')
             lm = await message.reply_text(f"🧩 `{start_num:g} → {end_num:g}` ({count})\n⏳")
             all_urls = []
-            for idx, ch in enumerate(selected, 1):
+            api = await asyncio.to_thread(get_source,src)
+            for idx,ch in enumerate(selected,1):
                 try:
-                    urls = []
-                    if src == "mangalik": urls = await asyncio.to_thread(StarzManga.get_chapter_images, ch['url'])
-                    elif src == "mesh": urls = await asyncio.to_thread(MeshManga.get_chapter_images, ch)
-                    elif src == "azora": urls = await asyncio.to_thread(AzoraFly.get_chapter_images, ch)
-                    elif src == "lavascans": urls = await asyncio.to_thread(LavaScans.get_chapter_images, ch['url'])
+                    urls=await asyncio.to_thread(api.get_chapter_images,ch)
                     if urls: all_urls.extend(urls)
                     if idx % 2 == 0 or idx == count: await lm.edit_text(f"🧩 `{idx}/{count}` — `{len(all_urls)}` صورة")
-                except Exception as e: print(f"⚠️ {e}")
-            if not all_urls: refund_merge(uid, count); await lm.edit_text("❌"); return
-            await lm.edit_text(f"🧩 تحويل `{len(all_urls)}`...")
-            headers = None
-            if src == "mangalik": headers = StarzManga.H
-            elif src == "mesh": headers = MeshManga.H
-            elif src == "azora": headers = {"User-Agent":AzoraFly.H["User-Agent"],"Referer":AzoraFly.BASE+"/"}
-            elif src == "lavascans": headers = LavaScans.H
-            buf = await download_images_parallel(all_urls, client=client, headers=headers)
+                except Exception as e: print(f"⚠️ [{src}] {e}")
+            if not all_urls: refund_merge(uid,count); await lm.edit_text("❌ لم يستخرج المحرك صور الفصول"); return
+            await lm.edit_text(f"🧩 إنشاء PDF من `{len(all_urls)}` صورة...")
+            buf = await download_images_parallel(all_urls,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌"); return
             increment_download_count(uid); await lm.edit_text("📤")
             safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()[:50] or "manga"
@@ -2468,18 +2448,15 @@ async def handle_documents(client,message):
     user_data.pop(uid, None)
 
 async def check_new_chapters():
-    source_classes = {"mangalik": StarzManga, "mesh": MeshManga, "azora": AzoraFly, "lavascans": LavaScans}
     for uid in get_all_user_ids():
         if not is_notifications_enabled(uid):
             continue
         for fav in get_fav_items(uid):
             if not fav.get("notify", True):
                 continue
-            cls = source_classes.get(fav.get("source"))
-            if not cls:
-                continue
             try:
-                info = await asyncio.to_thread(cls.get_details, fav.get("manga_url") or fav.get("identifier"))
+                api = await asyncio.to_thread(get_source, fav.get("source"))
+                info = await asyncio.to_thread(api.get_details, fav.get("manga_url") or fav.get("identifier"))
                 chapters = (info or {}).get("chapters") or []
                 if not chapters:
                     continue
