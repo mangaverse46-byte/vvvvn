@@ -229,6 +229,9 @@ class _Source:
 class StarzManga(_Source):
     SOURCE = "mangalik"
     BASE = "https://mangalik.net"
+    @classmethod
+    def search(cls, query):
+        return [(x["title"], x.get("url") or "", x.get("id") or "") for x in _search(cls.SOURCE, query)]
 
 class MeshManga(_Source):
     SOURCE = "mesh"
