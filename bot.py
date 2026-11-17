@@ -926,7 +926,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         info = await asyncio.to_thread(api.get_details, manga_url)
         if not info:
             await client.send_message(cid, "❌ تعذر جلب معلومات المانجا."); return
-        chapters = info.get("chapters", [])
+        chapters = list(reversed(info.get("chapters", [])))
         if not chapters:
             await client.send_message(cid, "❌ لا توجد فصول."); return
         title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
@@ -1449,7 +1449,7 @@ async def unified_callback(client,callback):
             api=await asyncio.to_thread(get_source,src)
             info=await asyncio.to_thread(api.get_details,manga_url)
             if not info: await safe_edit(msg,"❌ تعذر جلب المعلومات"); return
-            chs=info.get("chapters",[])
+            chs=list(reversed(info.get("chapters",[])))
             if not chs: await safe_edit(msg,"❌ لا توجد فصول"); return
             title=clean_manga_title(info.get("name") or info.get("title") or ident,ident)
             description=(info.get("description") or "")[:300]
@@ -1467,7 +1467,7 @@ async def unified_callback(client,callback):
             if description: parts.extend(["",description])
             parts.extend(["",f"📖 **{len(chs)} فصل**"])
             if chs:
-                latest=chs[0]
+                latest=chs[-1]
                 label=latest.get("display_text") or latest.get("number") or latest.get("num_str") or latest.get("title","")
                 if label: parts.append(f"📌 آخر فصل: `{label}`")
             cap="\n".join(parts); user_data[uid]["base_caption"]=cap
@@ -1536,7 +1536,7 @@ async def unified_callback(client,callback):
             api=await asyncio.to_thread(get_source,src)
             info=await asyncio.to_thread(api.get_details,murl_k)
             if not info: await safe_edit(msg,"❌"); return
-            chs=info.get("chapters",[])
+            chs=list(reversed(info.get("chapters",[])))
             if not chs: await safe_edit(msg,"❌ لا فصول"); return
             t=clean_manga_title(info.get("name") or info.get("title") or ident,ident)
             d=(info.get("description") or "")[:300]
