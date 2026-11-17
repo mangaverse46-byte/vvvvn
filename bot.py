@@ -336,9 +336,13 @@ def chapter_page_markup(mid, page, total, murl, extra_top=None):
         if len(row) == 4: btns.append(row); row = []
     if row: btns.append(row)
     nav = []
-    if page > 1: nav.append(InlineKeyboardButton("⬅️", callback_data=f"cp:{mid}:{page-1}"))
+    if page > 1:
+        nav.append(InlineKeyboardButton("⏮ أول صفحة", callback_data=f"cp:{mid}:1"))
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"cp:{mid}:{page-1}"))
     nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="noop"))
-    if page < pages: nav.append(InlineKeyboardButton("➡️", callback_data=f"cp:{mid}:{page+1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"cp:{mid}:{page+1}"))
+        nav.append(InlineKeyboardButton("آخر صفحة ⏭", callback_data=f"cp:{mid}:{pages}"))
     if nav: btns.append(nav)
     btns.append([InlineKeyboardButton("🔙", callback_data="m")])
     return InlineKeyboardMarkup(btns)
@@ -612,16 +616,11 @@ async def on_cb(c, q: CallbackQuery):
         total = len(sorted_chs)
 
         prog = get_progress(uid, murl)
-        progress_btn = [
-            [
-                InlineKeyboardButton("⏮ أول فصل", callback_data=f"p:{mid}:0"),
-                InlineKeyboardButton("⏭ آخر فصل", callback_data=f"p:{mid}:{total-1}")
-            ]
-        ]
+        progress_btn = []
         if prog is not None and prog < total:
             ch = get_chapter(murl, prog)
             if ch:
-                progress_btn.append([InlineKeyboardButton(f"▶️ متابعة {ch[0]}", callback_data=f"p:{mid}:{prog}")])
+                progress_btn.append([InlineKeyboardButton(f"▶️ {ch[0]}", callback_data=f"p:{mid}:{prog}")])
         progress_btn.append([InlineKeyboardButton("📚 كل الفصول PDF", callback_data=f"pdfmenu:{mid}")])
 
         pages_count = max(1, (total + 19)//20)
