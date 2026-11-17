@@ -1372,10 +1372,11 @@ async def unified_callback(client,callback):
             except: pass
         if not latest_manga_cache: await safe_edit(msg,"❌"); return
         kb=[]
+        source_names={str(x["id"]):str(x.get("name") or x["id"]) for x in get_sources()}
         for i,item in enumerate(latest_manga_cache):
             t,u,slug=item[:3]
             ch=item[3] if len(item)>3 else ""
-            source_name=next((x.get("name",x["id"]) for x in get_sources() if x["id"]==(item[4] if len(item)>4 else "mangalik")),"")
+            source_name=source_names.get(str(item[4] if len(item)>4 else "mangalik"),"")
             label=f"📖 {t[:24]} · {source_name[:12]}" + (f" — {str(ch)[:10]}" if ch else "")
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
         kb.append([InlineKeyboardButton("🔄 تحديث",callback_data="latest_manga_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
