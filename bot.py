@@ -1610,6 +1610,15 @@ async def _start_cmd_impl(client,message):
     await send_message_with_image(client,message.chat.id,wt,"welcome_image",kb)
 
 
+@app.on_message(filters.private, group=-1)
+async def debug_incoming(client, message):
+    print(
+        f"📩 INCOMING: user={message.from_user.id if message.from_user else None} "
+        f"text={message.text!r}",
+        flush=True
+    )
+
+
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     try:
