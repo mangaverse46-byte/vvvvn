@@ -175,7 +175,7 @@ class MangaSource:
     def get_cover_image(self, info):
         return (info or {}).get("cover_url")
 
-    async def create_pdf_from_images(urls, client=None, headers=None):
+async def create_pdf_from_images(urls, client=None, headers=None):
     import aiohttp
     import fitz
 
@@ -185,20 +185,24 @@ class MangaSource:
     else:
         chapter_groups = [list(urls or [])]
 
-    # Flatten requests while retaining their chapter/image positions.
+    # Flatten while preserving the original chapter and page order.
     indexed_urls = [
         (chapter_index, image_index, url)
         for chapter_index, group in enumerate(chapter_groups)
         for image_index, url in enumerate(group)
+        if url
     ]
     if not indexed_urls:
         return None
 
-    timeout = aiohttp.ClientTimeout(total=60, connect=15)
+    timeout = aiohttp.ClientTimeout(total=90, connect=20)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
     connector = aiohttp.TCPConnector(
-        limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
-        keepalive_timeout=30, enable_cleanup_closed=True
+        limit=WORKERS,
+        limit_per_host=WORKERS,
+        ttl_dns_cache=300,
+        keepalive_timeout=30,
+        enable_cleanup_closed=True,
     )
     semaphore = asyncio.Semaphore(WORKERS)
     downloaded = [None] * len(indexed_urls)
@@ -225,8 +229,9 @@ class MangaSource:
                                 if data and len(data) > 100:
                                     downloaded[position] = data
                                     return
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        if attempt == 3:
+                            print(f"⚠️ image download failed ({position + 1}): {exc}")
                     if attempt < 3:
                         await asyncio.sleep(0.5 * (attempt + 1))
 
@@ -234,33 +239,34 @@ class MangaSource:
             *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
         )
 
-    # gather writes results by original flat index, preserving chapter and page order.
     doc = fitz.open()
-    for blob in downloaded:
+    for position, blob in enumerate(downloaded):
         if not blob:
             continue
         try:
-            pix = fitz.Pixmap(blob)
+            pix = fitz.Pixmap(stream=blob)
             iw, ih = pix.width, pix.height
+            pix = None
             if iw <= 0 or ih <= 0:
                 continue
             page_w, page_h = (842.0, 595.0) if iw > ih else (595.0, 842.0)
             scale = min(page_w / iw, page_h / ih)
             w, h = iw * scale, ih * scale
             page = doc.new_page(width=page_w, height=page_h)
-            rect = fitz.Rect((page_w-w)/2, (page_h-h)/2, (page_w+w)/2, (page_h+h)/2)
+            rect = fitz.Rect(
+                (page_w - w) / 2,
+                (page_h - h) / 2,
+                (page_w + w) / 2,
+                (page_h + h) / 2,
+            )
             page.insert_image(rect, stream=blob, keep_proportion=True)
-        except Exception:
-            try:
-                page = doc.new_page(width=595.0, height=842.0)
-                page.insert_image(page.rect, stream=blob, keep_proportion=True)
-            except Exception:
-                pass
+        except Exception as exc:
+            print(f"⚠️ skipped invalid image {position + 1}: {exc}")
 
     if not doc.page_count:
         doc.close()
         return None
-    # Source images are already compressed; avoid expensive PDF deflate recompression.
+
     result = doc.tobytes(garbage=3, deflate=False)
     doc.close()
     buf = BytesIO(result)
@@ -270,6 +276,38 @@ class MangaSource:
 
 async def download_images_parallel(urls, client=None, headers=None):
     return await create_pdf_from_images(urls, client=client, headers=headers)
+
+def get_source(source_id):
+    """Return the API-backed adapter for one enabled manga source."""
+    return MangaSource(source_id)
+
+
+def get_all_latest():
+    """Return latest manga rows in the tuple format expected by bot.py."""
+    rows = []
+    for source in get_sources():
+        source_id = str(source.get("id") or "")
+        if not source_id:
+            continue
+        try:
+            api = MangaSource(source_id)
+            for item in api.get_latest_updates():
+                title = str(item.get("title") or item.get("name") or "Manga")
+                url = item.get("url") or item.get("manga_url") or item.get("link")
+                if not url:
+                    continue
+                ident = str(item.get("id") or url)
+                latest_chapter = (
+                    item.get("latest_chapter")
+                    or item.get("last_chapter")
+                    or item.get("chapter")
+                    or ""
+                )
+                rows.append((title, str(url), ident, str(latest_chapter), source_id))
+        except Exception as exc:
+            print(f"⚠️ latest source {source_id}: {exc}")
+    return rows
+
 
 # Backward-compatible class names; source discovery remains API-driven.
 class StarzManga(MangaSource):
