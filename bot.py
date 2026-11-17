@@ -618,7 +618,6 @@ async def on_cb(c, q: CallbackQuery):
             ch = get_chapter(murl, prog)
             if ch:
                 progress_btn.append([InlineKeyboardButton(f"▶️ {ch[0]}", callback_data=f"p:{mid}:{prog}")])
-        progress_btn.append([InlineKeyboardButton("🔀 دمج الكل PDF", callback_data=f"merge:{mid}")])
         progress_btn.append([InlineKeyboardButton("📚 كل الفصول PDF", callback_data=f"pdfmenu:{mid}")])
 
         pages_count = max(1, (total + 19)//20)
