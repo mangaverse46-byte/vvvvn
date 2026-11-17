@@ -12,6 +12,8 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQ
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import MessageNotModified
 import gc
+from manga_api import StarzManga, MeshManga, AzoraFly, LavaScans, download_images_parallel
+PDF_MAX_CHAPTERS = 10
 
 def install_package(p):
     try: subprocess.check_call([sys.executable,"-m","pip","install",p,"--quiet"]); return True
@@ -19,7 +21,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         print(f"📦 {p}..."); install_package(p)
-for pkg in ["pyrogram","aiohttp"]:
+for pkg in ["pyrogram","aiohttp","pymupdf"]:
     ensure_installed(pkg)
 
 API_ID = 5442915
@@ -1100,7 +1102,14 @@ async def auto_backup_task():
         await asyncio.sleep(600)
 
 async def latest_manga_refresh_task():
-    return
+    global latest_manga_cache
+    while True:
+        try:
+            latest_manga_cache = await asyncio.to_thread(StarzManga.get_latest_updates)
+            print("🔥 تم تحديث قائمة أحدث المانجا:", len(latest_manga_cache))
+        except Exception as e:
+            print("⚠️ latest refresh:", e)
+        await asyncio.sleep(CHECK_INTERVAL)
 
 async def gift_channel_publisher_task():
     await asyncio.sleep(90)
@@ -1197,7 +1206,18 @@ async def _try_reward_referral(client,new_uid):
 
 @app.on_message(filters.command("search"))
 async def search_cmd(client,message):
-    await message.reply_text("⚠️ تم تعطيل البحث عن المانجا وإزالة مصادر وواجهات API.")
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    query = parts[1].strip() if len(parts) > 1 else ""
+    if not query:
+        await message.reply_text("🔍 اكتب اسم المانجا بعد الأمر، مثال:\n/search Solo Leveling")
+        return
+    user_data.setdefault(uid, {})["search_query"] = query
+    rows = [[InlineKeyboardButton("📚 MangaLik", callback_data="src_mangalik")],
+            [InlineKeyboardButton("📖 Mesh", callback_data="src_mesh"), InlineKeyboardButton("✨ Azora", callback_data="src_azora")],
+            [InlineKeyboardButton("🌋 Lava", callback_data="src_lavascans")],
+            [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
+    await message.reply_text("🔍 اختر المصدر للبحث عن:\n" + query, reply_markup=InlineKeyboardMarkup(rows))
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
@@ -1384,7 +1404,7 @@ async def unified_callback(client,callback):
                 if not chs: await safe_edit(msg,"❌"); return
                 t=clean_manga_title(dd.get('title','?'),str(sid)); d=dd.get('story','')[:300]+"..."
                 cover=MeshManga.get_cover_image(dd); genres=dd.get('_genres',[]); kind=dd.get('_kind','')
-                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
+                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch),client=_c)
                 ik=sid; murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
             elif src=="azora":
                 info=await asyncio.to_thread(AzoraFly.get_details, ident)
@@ -1603,7 +1623,7 @@ async def unified_callback(client,callback):
         if not chs: await callback.answer("لا فصول", show_alert=True); return
         user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
         mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
-        mmax = settings.get("merge_max_per_file", 10)
+        mmax = PDF_MAX_CHAPTERS
         await msg.reply_text(f"🧩 **دمج الفصول**\n\n📚 `{len(chs)}` فصل\n🔢 `{mmax}` حد أقصى\n💳 رصيد: `{mr}`\n\n📝 أرسل: `البداية-النهاية`\nمثال: `1-{mmax}`\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
         await callback.answer("⏳"); return
 
@@ -2125,7 +2145,7 @@ async def handle_all_text(client,message):
             if num is not None and start_num <= num <= end_num: selected.append(ch)
         if not selected: await message.reply_text(f"❌ لا فصول"); return
         count = len(selected); mmax = settings.get("merge_max_per_file", 10)
-        if count > mmax: await message.reply_text(f"❌ {mmax} كحد أقصى"); return
+        if count > mmax: await message.reply_text("❌ الحد الأقصى 10 فصول في ملف PDF واحد"); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
             if remaining < count: await message.reply_text(f"❌ المطلوب `{count}` المتاح `{int(remaining)}`", parse_mode=ParseMode.MARKDOWN); return
@@ -2144,7 +2164,7 @@ async def handle_all_text(client,message):
                     urls = []
                     if src == "mangalik": urls = await asyncio.to_thread(StarzManga.get_chapter_images, ch['url'])
                     elif src == "mesh": urls = await asyncio.to_thread(MeshManga.get_chapter_images, ch['id'])
-                    elif src == "azora": urls = await asyncio.to_thread(AzoraFly.get_chapter_images, ch['id'])
+                    elif src == "azora": urls = await asyncio.to_thread(AzoraFly.get_chapter_images, ch)
                     elif src == "lavascans": urls = await asyncio.to_thread(LavaScans.get_chapter_images, ch['url'])
                     if urls: all_urls.extend(urls)
                     if idx % 2 == 0 or idx == count: await lm.edit_text(f"🧩 `{idx}/{count}` — `{len(all_urls)}` صورة")
