@@ -60,9 +60,9 @@ def _chapter(x, i):
     if not isinstance(x, dict):
         return None
     title = str(x.get("title") or x.get("name") or x.get("chapter") or x.get("number") or ("Chapter " + str(i + 1)))
-    number = x.get("number") or x.get("chapter_number") or x.get("num")
-    if number is None:
-        m = re.search(r"(\d+(?:\.\d+)?)", title)
+    number = x.get("number") or x.get("chapter_number") or x.get("num") or ""
+    if not re.fullmatch(r"\d+(?:\.\d+)?", str(number)):
+        m = re.search(r"(\d+(?:\.\d+)?)", str(number) + " " + title)
         number = m.group(1) if m else ""
     return dict(x, url=x.get("url") or x.get("chapter_url") or x.get("link") or x.get("href"),
                 id=str(x.get("id") or x.get("chapter_id") or x.get("url") or i),
