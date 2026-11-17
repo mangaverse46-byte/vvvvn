@@ -497,8 +497,7 @@ def save_settings():
         c = _conn()
         for k, v in settings.items():
             c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v, ensure_ascii=False)))
-        c.commit()
-settings = load_settings()
+        c.commit()settings = load_settings()
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
 save_settings()
@@ -997,8 +996,7 @@ async def publish_gift_now(client, admin_uid, code):
                     [InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{new_code}")],
                     [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
                 parse_mode=ParseMode.MARKDOWN)
-            return True, None, new_code
-        except Exception as e: return False, f'فشل: {e}', None
+            return True, None, new_code        except Exception as e: return False, f'فشل: {e}', None
     if not old_channel:
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, '📢 لم تحدد قناة', None
@@ -1300,9 +1298,14 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         if not chapters:
             await client.send_message(cid, "❌ لا توجد فصول."); return
         title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
-        async def pdf(ch):
+        async def pdf(ch, progress=None):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
-            return await download_images_parallel(urls, client=client)
+            if progress:
+                await progress("extract", len(urls))
+            result = await download_images_parallel(urls, client=client)
+            if progress:
+                await progress("pdf", len(urls))
+            return result
         user_data[uid] = {"chapters": chapters, "title": title, "identifier": info.get("id") or manga_url,
             "page": 0, "source": src, "create_pdf_func": pdf, "manga_url": manga_url,
             "cover_url": info.get("cover_url"), "genres": info.get("genres", []), "kind": info.get("kind", "")}
@@ -1497,8 +1500,7 @@ async def send_zip_via_added_bots(manual=False):
 
 async def auto_backup_task():
     await asyncio.sleep(60)
-    while True:
-        try:
+    while True:        try:
             bots=get_all_bots()
             if not bots: await asyncio.sleep(3600); continue
             now=time.time(); need=any((now-info.get("last_sent",0))>=BACKUP_INTERVAL for info in bots.values())
@@ -1879,9 +1881,14 @@ async def unified_callback(client,callback):
             cover=info.get("cover_url")
             genres=info.get("genres") or []
             kind=info.get("kind") or ""
-            async def pdf(ch,_api=api,_client=client):
+            async def pdf(ch,_api=api,_client=client,progress=None):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                return await download_images_parallel(image_urls,client=_client)
+                if progress:
+                    await progress("extract", len(image_urls))
+                result=await download_images_parallel(image_urls,client=_client)
+                if progress:
+                    await progress("pdf", len(image_urls))
+                return result
             user_data[uid]={"chapters":chs,"title":title,"identifier":ident,"page":0,"source":src,
                 "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind,
                 "latest_mode":data.startswith("latest_"),"latest_source_id":src}
@@ -1965,9 +1972,14 @@ async def unified_callback(client,callback):
             t=clean_manga_title(info.get("name") or info.get("title") or ident,ident)
             d=(info.get("description") or "")[:300]
             cover=info.get("cover_url")
-            async def pdf(ch,_api=api,_c=client):
+            async def pdf(ch,_api=api,_c=client,progress=None):
                 urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                return await download_images_parallel(urls,client=_c)
+                if progress:
+                    await progress("extract", len(urls))
+                result=await download_images_parallel(urls,client=_c)
+                if progress:
+                    await progress("pdf", len(urls))
+                return result
             ref=api.BASE
         except Exception as e: await safe_edit(msg,f"❌ {e}"); return
         if not chs: await safe_edit(msg,"❌"); return
@@ -1997,8 +2009,7 @@ async def unified_callback(client,callback):
             pdf_func=user_data[uid].get('create_pdf_func')
             if not pdf_func: await callback.answer("⚠️"); return
             target=chs[idx]; disp='?'
-            disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]
-            disp=re.sub(r"_+", " ", disp).strip() or "?"
+            disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]            disp=re.sub(r"_+", " ", disp).strip() or "?"
             success,rem=try_deduct_chapter(uid,1)
             if not success:
                 await callback.answer("❌ لا رصيد",show_alert=True)
@@ -2008,7 +2019,13 @@ async def unified_callback(client,callback):
             lt = f"⏳ **جاري تحميل الفصل {disp}...**"
             if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
             lm=await msg.reply_text(lt)
-            try: buf=await pdf_func(target)
+            async def single_progress(stage, image_count):
+                if stage == "extract":
+                    status = f"📖 **الفصل 1/1 — {disp}**\\n🔗 تم استخراج `{image_count}` صورة"
+                else:
+                    status = f"📖 **الفصل 1/1 — {disp}**\\n📦 تجهيز PDF من `{image_count}` صورة..."
+                await lm.edit_text(status)
+            try: buf=await pdf_func(target, progress=single_progress)
             except Exception as e: print(f"⚠️ {e}"); buf=None
             if not buf:
                 refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
@@ -2497,8 +2514,7 @@ async def unified_callback(client,callback):
             await callback.answer("✅"); return
         if data=="admin_set_sub_message":
             await msg.delete(); await msg.reply_text("📝\n\n/cancel")
-            user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return
-        if data=="admin_set_sub_image":
+            user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return        if data=="admin_set_sub_image":
             await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
             user_data[uid]={'awaiting_sub_image':True}; await callback.answer("🖼️"); return
         if data=="admin_add_bdf":
@@ -2585,18 +2601,35 @@ async def handle_all_text(client,message):
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
 
-            # Extract chapter image lists concurrently, but limit pressure on the source API.
+            # Extract chapter image lists concurrently, while showing completed chapter counts.
             extract_sem = asyncio.Semaphore(4)
+            progress_lock = asyncio.Lock()
+            progress = {"done": 0, "ok": 0, "images": 0}
+
             async def extract_chapter(index, chapter):
+                urls = None
                 async with extract_sem:
                     try:
                         urls = await asyncio.to_thread(api.get_chapter_images, chapter)
-                        return index, urls or None
                     except Exception as exc:
-                        print(f"⚠️ [{src}] chapter {index}: {exc}")
-                        return index, None
+                        print(f"⚠️ [{src}] chapter {index + 1}: {exc}")
+                async with progress_lock:
+                    progress["done"] += 1
+                    if urls:
+                        progress["ok"] += 1
+                        progress["images"] += len(urls)
+                    await lm.edit_text(
+                        f"🧩 **استخراج الفصول**\\n"
+                        f"📚 المكتمل: `{progress['done']}/{count}`\\n"
+                        f"✅ الناجح: `{progress['ok']}`\\n"
+                        f"🖼️ الصور المستخرجة: `{progress['images']}`"
+                    )
+                return index, urls or None
 
-            await lm.edit_text(f"🧩 استخراج روابط {count} فصول بالتوازي...")
+            await lm.edit_text(
+                f"🧩 **استخراج الفصول**\\n📚 المكتمل: `0/{count}`\\n"
+                f"✅ الناجح: `0`\\n🖼️ الصور المستخرجة: `0`"
+            )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
             )
