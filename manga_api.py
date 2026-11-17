@@ -51,7 +51,7 @@ def _manga(x):
     title = x.get("title") or x.get("name") or x.get("manga_name") or "Manga"
     url = x.get("url") or x.get("manga_url") or x.get("link") or x.get("href")
     ident = x.get("id") or x.get("slug") or x.get("manga_id") or url
-    return dict(x, title=str(title), url=url, id=str(ident or url or title),
+    return dict(x, title=str(title), url=url, id=str(ident or url or title), slug=str(x.get("slug") or ident or ""),
                 cover_url=x.get("cover_url") or x.get("cover") or x.get("image") or x.get("thumbnail"))
 
 def _chapter(x, i):
@@ -66,7 +66,7 @@ def _chapter(x, i):
         number = m.group(1) if m else ""
     return dict(x, url=x.get("url") or x.get("chapter_url") or x.get("link") or x.get("href"),
                 id=str(x.get("id") or x.get("chapter_id") or x.get("url") or i),
-                title=title, number=str(number), num_str=str(number),
+                title=title, number=str(number), num_str=str(number), display_text=str(number or title),
                 is_numeric=bool(re.fullmatch(r"\d+(?:\.\d+)?", str(number))))
 
 def _search(source, query):
@@ -128,8 +128,19 @@ def _image_urls(raw):
     return out
 
 def _chapter_images(source, chapter):
-    url = chapter.get("url") if isinstance(chapter, dict) else str(chapter)
-    raw = _request("convert", payload={"source": source, "chapter_url": url})
+    if isinstance(chapter, dict):
+        url = chapter.get("url") or chapter.get("chapter_url")
+        chapter_id = chapter.get("id") or chapter.get("chapter_id")
+    else:
+        value = str(chapter)
+        url = value if value.startswith("http") else None
+        chapter_id = None if url else value
+    if url:
+        raw = _request("convert", payload={"source": source, "chapter_url": url})
+    elif chapter_id:
+        raw = _request("pages", {"source": source, "id": chapter_id})
+    else:
+        raise RuntimeError("Chapter URL/ID missing")
     urls = _image_urls(raw)
     if not urls:
         raise RuntimeError("No images returned from Manga API")
