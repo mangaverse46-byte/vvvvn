@@ -1953,6 +1953,7 @@ async def unified_callback(client,callback):
             if not pdf_func: await callback.answer("⚠️"); return
             target=chs[idx]; disp='?'
             disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]
+            disp=re.sub(r"_+", " ", disp).strip() or "?"
             success,rem=try_deduct_chapter(uid,1)
             if not success:
                 await callback.answer("❌ لا رصيد",show_alert=True)
@@ -1970,7 +1971,7 @@ async def unified_callback(client,callback):
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
-                safe_title=re.sub(r'[\\/:*?"<>|]','',title_for_caption).strip()[:60] or "manga"
+                safe_title=re.sub(r"\\s+", " ", re.sub(r"_+", " ", re.sub(r'[\\\\/:*?"<>|]', '', title_for_caption))).strip()[:60] or "manga"
                 await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
                 await lm.delete()
             except Exception as e: await lm.edit_text(f"❌ {e}")
@@ -2569,7 +2570,7 @@ async def handle_all_text(client,message):
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌"); return
             increment_download_count(uid); await lm.edit_text("📤")
-            safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()[:50] or "manga"
+            safe_title = re.sub(r"\\s+", " ", re.sub(r"_+", " ", re.sub(r'[\\\\/:*?"<>|]', '', title))).strip()[:50] or "manga"
             await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
                 caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
             try: await lm.delete()
