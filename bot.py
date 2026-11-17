@@ -21,6 +21,8 @@ import json
 import re
 import urllib.parse
 import urllib.request
+import urllib.error
+import random
 from io import BytesIO
 
 API = "https://pixelflow-callback-harbor.lovable.app/api/public/manga"
@@ -34,18 +36,36 @@ def _request(action, params=None, payload=None):
         q = {"action": action}
         q.update(params or {})
         url = API + "?" + urllib.parse.urlencode(q)
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MangaVirus"})
+        data = None
+        headers = {"User-Agent": "Mozilla/5.0 MangaVirus", "Accept": "application/json"}
     else:
         body = {"action": action}
         body.update(payload)
-        req = urllib.request.Request(API, data=json.dumps(body).encode("utf-8"),
-            headers={"User-Agent": "Mozilla/5.0 MangaVirus", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=90) as response:
-        raw = response.read()
-    result = json.loads(raw.decode("utf-8"))
-    if isinstance(result, dict) and result.get("error"):
-        raise RuntimeError(str(result.get("error"))[:250])
-    return result
+        url = API
+        data = json.dumps(body).encode("utf-8")
+        headers = {"User-Agent": "Mozilla/5.0 MangaVirus", "Content-Type": "application/json", "Accept": "application/json"}
+
+    # Retry only temporary gateway/rate-limit/network failures. Do not hide permanent 4xx errors.
+    last_error = None
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                raw = response.read()
+            result = json.loads(raw.decode("utf-8"))
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(str(result.get("error"))[:250])
+            return result
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            if attempt == 3:
+                raise
+        time.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.5))
+    raise RuntimeError(f"API request failed: {last_error}")
 
 def get_sources(force=False):
     global _SOURCE_CACHE
@@ -298,9 +318,14 @@ def get_source(source_id):
 
 
 def get_all_latest():
-    """Return latest manga rows in the tuple format expected by bot.py."""
+    """Return latest manga rows; one unavailable source must not block others."""
     rows = []
-    for source in get_sources():
+    try:
+        sources = get_sources()
+    except Exception as exc:
+        print(f"⚠️ latest: تعذر جلب قائمة المصادر مؤقتاً: {exc}")
+        raise
+    for source in sources:
         source_id = str(source.get("id") or "")
         if not source_id:
             continue
@@ -1485,10 +1510,15 @@ async def latest_manga_refresh_task():
     global latest_manga_cache
     while True:
         try:
-            latest_manga_cache = await asyncio.to_thread(get_all_latest)
-            print("🔥 تم تحديث قائمة أحدث المانجا:", len(latest_manga_cache))
+            fresh_latest = await asyncio.to_thread(get_all_latest)
+            # Keep the last good cache if the API temporarily returns an empty/failed result.
+            if fresh_latest:
+                latest_manga_cache = fresh_latest
+                print("🔥 تم تحديث قائمة أحدث المانجا:", len(latest_manga_cache))
+            else:
+                print("⚠️ latest refresh: لا توجد نتائج جديدة؛ تم الاحتفاظ بالقائمة السابقة")
         except Exception as e:
-            print("⚠️ latest refresh:", e)
+            print("⚠️ latest refresh: تعذر التحديث مؤقتاً؛ القائمة السابقة محفوظة:", e)
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def gift_channel_publisher_task():
