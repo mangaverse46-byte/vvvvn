@@ -2009,7 +2009,8 @@ async def unified_callback(client,callback):
             pdf_func=user_data[uid].get('create_pdf_func')
             if not pdf_func: await callback.answer("⚠️"); return
             target=chs[idx]; disp='?'
-            disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]            disp=re.sub(r"_+", " ", disp).strip() or "?"
+            disp=str(target.get("display_text") or target.get("number") or target.get("num_str") or target.get("title") or "?")[:30]
+            disp=re.sub(r"_+", " ", disp).strip() or "?"
             success,rem=try_deduct_chapter(uid,1)
             if not success:
                 await callback.answer("❌ لا رصيد",show_alert=True)
@@ -2021,9 +2022,9 @@ async def unified_callback(client,callback):
             lm=await msg.reply_text(lt)
             async def single_progress(stage, image_count):
                 if stage == "extract":
-                    status = f"📖 **الفصل 1/1 — {disp}**\\n🔗 تم استخراج `{image_count}` صورة"
+                    status = f"📖 **الفصل 1/1 — {disp}**\n🔗 تم استخراج `{image_count}` صورة"
                 else:
-                    status = f"📖 **الفصل 1/1 — {disp}**\\n📦 تجهيز PDF من `{image_count}` صورة..."
+                    status = f"📖 **الفصل 1/1 — {disp}**\n📦 تجهيز PDF من `{image_count}` صورة..."
                 await lm.edit_text(status)
             try: buf=await pdf_func(target, progress=single_progress)
             except Exception as e: print(f"⚠️ {e}"); buf=None
@@ -2088,7 +2089,7 @@ async def unified_callback(client,callback):
         if not res:
             try: await msg.delete()
             except: pass
-            await client.send_message(cid, f"❌ **لا نتائج أو المصدر غير متاح**\\n`{q}`",
+            await client.send_message(cid, f"❌ **لا نتائج أو المصدر غير متاح**\n`{q}`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),
                 parse_mode=ParseMode.MARKDOWN); return
         user_data[uid]["search_results"]=res; user_data[uid]["source"]=src
@@ -2619,16 +2620,16 @@ async def handle_all_text(client,message):
                         progress["ok"] += 1
                         progress["images"] += len(urls)
                     await lm.edit_text(
-                        f"🧩 **استخراج الفصول**\\n"
-                        f"📚 المكتمل: `{progress['done']}/{count}`\\n"
-                        f"✅ الناجح: `{progress['ok']}`\\n"
+                        f"🧩 **استخراج الفصول**\n"
+                        f"📚 المكتمل: `{progress['done']}/{count}`\n"
+                        f"✅ الناجح: `{progress['ok']}`\n"
                         f"🖼️ الصور المستخرجة: `{progress['images']}`"
                     )
                 return index, urls or None
 
             await lm.edit_text(
-                f"🧩 **استخراج الفصول**\\n📚 المكتمل: `0/{count}`\\n"
-                f"✅ الناجح: `0`\\n🖼️ الصور المستخرجة: `0`"
+                f"🧩 **استخراج الفصول**\n📚 المكتمل: `0/{count}`\n"
+                f"✅ الناجح: `0`\n🖼️ الصور المستخرجة: `0`"
             )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
@@ -2961,7 +2962,7 @@ async def check_new_chapters():
                     continue
                 if previous and previous != "0" and latest != previous:
                     try:
-                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\n\n📚 " + fav.get("title", "مانجا") + "\\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
+                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\n\n📚 " + fav.get("title", "مانجا") + "\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
                     except Exception:
                         pass
                 if latest != previous:
@@ -2998,6 +2999,3 @@ if __name__ == "__main__":
         asyncio.create_task(periodic_check())
         asyncio.create_task(auto_backup_task())
         asyncio.create_task(latest_manga_refresh_task())
-        asyncio.create_task(gift_channel_publisher_task())
-        await idle()
-    app.run(_bootstrap())
