@@ -736,33 +736,8 @@ def build_caption(template_key,**kwargs):
         return template.format(**kwargs)
     except Exception as e: print(f"⚠️ cap: {e}"); return ""
 def get_latest_chapter_info(source,ident,murl):
-    try:
-        if source=="mangalik": c=StarzManga.get_latest_chapter(murl); return c.get('num_str','?') if c else '?'
-        elif source=="mesh": c=MeshManga.get_latest_chapter(int(ident)); return c.get('display_text','?') if c else '?'
-        elif source=="azora": c=AzoraFly.get_latest_chapter(ident); return str(c.get('number','?')) if c else '?'
-        elif source=="lavascans": c=LavaScans.get_latest_chapter(murl); return c.get('num_str','?') if c else '?'
-    except: pass
     return "0"
 def get_latest_chapter_number(source,ident,murl):
-    try:
-        if source=="mangalik":
-            c=StarzManga.get_latest_chapter(murl)
-            if c:
-                m=re.search(r'(\d+(?:\.\d+)?)',c.get('num_str','')); return float(m.group(1)) if m else 0
-        elif source=="mesh":
-            c=MeshManga.get_latest_chapter(int(ident))
-            if c:
-                m=re.search(r'(\d+(?:\.\d+)?)',c.get('display_text','')); return float(m.group(1)) if m else 0
-        elif source=="azora":
-            c=AzoraFly.get_latest_chapter(ident)
-            if c:
-                try: return float(c['number'])
-                except: pass
-        elif source=="lavascans":
-            c=LavaScans.get_latest_chapter(murl)
-            if c:
-                m=re.search(r'(\d+(?:\.\d+)?)',c.get('num_str','')); return float(m.group(1)) if m else 0
-    except: pass
     return 0
 
 _notify_callback = None
@@ -929,75 +904,7 @@ async def check_subscription_and_continue(client,cb,pending=None):
 app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
 
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
-    src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}
-    src = src_map.get(src_short)
-    if not src:
-        await client.send_message(cid, "❌ رابط غير صالح", parse_mode=ParseMode.MARKDOWN); return
-    loading = await client.send_message(cid, "⏳ **جاري جلب المانجا...**", parse_mode=ParseMode.MARKDOWN)
-    try:
-        if src=="mangalik":
-            murl = f"{StarzManga.BASE}/manga/{ident}/"
-            info = await asyncio.to_thread(StarzManga.get_details, murl)
-            if not info: await loading.edit_text("❌ فشل الجلب"); return
-            chs = await asyncio.to_thread(StarzManga.get_chapters, murl)
-            if not chs: await loading.edit_text("❌ لا فصول"); return
-            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-            async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
-            ik=ident; murl_k=murl; ref="https://starzmanga.com/"
-        elif src=="mesh":
-            sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
-            if not dd: await loading.edit_text("❌"); return
-            chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
-            if not chs: await loading.edit_text("❌"); return
-            t=clean_manga_title(dd.get('title','?'),str(sid)); d=dd.get('story','')[:300]+"..."
-            cover=MeshManga.get_cover_image(dd); genres=dd.get('_genres',[]); kind=dd.get('_kind','')
-            async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
-            ik=sid; murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
-        elif src=="azora":
-            info=await asyncio.to_thread(AzoraFly.get_details, ident)
-            if not info: await loading.edit_text("❌"); return
-            chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
-            if not chs: await loading.edit_text("❌"); return
-            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-            async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
-            ik=ident; murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
-        elif src=="lavascans":
-            murl=f"{LavaScans.BASE}manga/{ident}/"
-            info=await asyncio.to_thread(LavaScans.get_details, murl)
-            if not info: await loading.edit_text("❌"); return
-            chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
-            if not chs: await loading.edit_text("❌"); return
-            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
-            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-            async def pdf(ch,_c=client): return await LavaScans.create_pdf_from_images(await asyncio.to_thread(LavaScans.get_chapter_images, ch['url']),client=_c)
-            ik=ident; murl_k=murl; ref=LavaScans.BASE
-        else:
-            await loading.edit_text("❌"); return
-    except Exception as e:
-        print(f"❌ deeplink: {e}"); await loading.edit_text(f"❌ خطأ\n{str(e)[:100]}"); return
-    user_data[uid]={'chapters':chs,'title':t,'identifier':ik,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover,'genres':genres,'kind':kind}
-    parts=[f"**{t}**"]
-    if kind: parts.append(f"📚 **{kind}**")
-    if genres: parts.append(f"🏷️ {' | '.join(genres)}")
-    parts.extend(["",d,"",f"📖 **{len(chs)} فصل**"])
-    if chs:
-        last=chs[-1]; lc=""
-        if src in ("mangalik","lavascans"): lc=str(last.get('num_str',''))
-        elif src=="mesh": lc=str(last.get('display_text',''))
-        elif src=="azora": lc=str(last.get('number',''))
-        if lc: parts.append(f"📌 آخر: `{lc}`")
-    cap="\n".join(parts); user_data[uid]['base_caption']=cap
-    m,_,_=create_chapters_markup(chs,0,ik,src,uid)
-    try: await loading.delete()
-    except: pass
-    class DummyMsg:
-        def __init__(s,c,ci): s._c=c; s.chat=type('C',(),{'id':ci})()
-        async def reply_photo(s,photo,caption,reply_markup,parse_mode): return await s._c.send_photo(s.chat.id,photo=photo,caption=caption,reply_markup=reply_markup,parse_mode=parse_mode)
-        async def reply_text(s,text,reply_markup,parse_mode): return await s._c.send_message(s.chat.id,text=text,reply_markup=reply_markup,parse_mode=parse_mode)
-    dm = DummyMsg(client, cid)
-    await send_cover_message(dm,cover,cap,m,referer=ref)
+    await client.send_message(cid, "⚠️ روابط المانجا معطلة بعد إزالة مصادر وواجهات API.")
 
 async def send_message_with_image(client,cid,text,key,markup=None):
     img=settings.get(key)
@@ -1294,30 +1201,7 @@ async def search_cmd(client,message):
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
-    uid=message.from_user.id
-    if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
-    if is_banned(uid) and uid not in OWNER_IDS: return
-    is_sub,_=await is_user_subscribed(client,uid)
-    if not is_sub: await send_subscription_prompt(client,uid,message.chat.id,{'type':'check'}); return
-    await message.reply_text("🔄 **جاري التحقق...**")
-    favs=get_favorites(uid)
-    if not favs: await message.reply_text("📭 **لا يوجد مفضلة**"); return
-    found=False
-    for f in favs:
-        s,i,m=f['source'],f['identifier'],f['manga_url']; ti=clean_manga_title(f.get('title',''),i)
-        lc=f.get('last_chapter',"0"); ln=get_latest_chapter_number(s,i,m)
-        try: lnum=float(re.search(r'(\d+(?:\.\d+)?)',str(lc)).group(1)) if re.search(r'(\d+(?:\.\d+)?)',str(lc)) else 0
-        except: lnum=0
-        if ln>lnum:
-            found=True
-            if s=="mangalik": c=StarzManga.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
-            elif s=="mesh": c=MeshManga.get_latest_chapter(int(i)); d=c.get('display_text','?') if c else '?'
-            elif s=="azora": c=AzoraFly.get_latest_chapter(i); d=str(c.get('number','?')) if c else '?'
-            elif s=="lavascans": c=LavaScans.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
-            else: continue
-            set_fav_last_chapter(uid, i, s, d)
-            await message.reply_text(f"📢 **{ti}**\n📌 `{d}`",parse_mode=ParseMode.MARKDOWN)
-    if not found: await message.reply_text("✅ **لا جديد**")
+    await message.reply_text("⚠️ تم تعطيل فحص الفصول وإشعارات تحديث المانجا.")
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client,message):
@@ -1343,6 +1227,8 @@ async def admin_panel(client,message):
 async def unified_callback(client,callback):
     data=callback.data; uid=callback.from_user.id
     cid=callback.message.chat.id; msg=callback.message
+    if data.startswith(("src_","sel_","latest_","cat_","pdfmenu","cp:","p:","fav_open_","merge_")) or data in ("main_categories","latest_manga_list"):
+        await callback.answer("⚠️ تم تعطيل مصادر المانجا وواجهات API.", show_alert=True); return
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
         await callback.answer("⚠️ صيانة", show_alert=True); return
     if data=="check_sub":
