@@ -8,9 +8,9 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQ
 from pyrogram.enums import ParseMode
 
 # ============ إعداداتك ============
-API_ID = 5442915
-API_HASH = "b6a556aba92ae96f271b936cacd930a6"
-BOT_TOKEN = "8812455288:AAEZkr2bmYziv53JfDZkWI-EpwNUBmeY47g"
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 API_MANGA = "https://pixelflow-callback-harbor.lovable.app/api/public/manga"
 API_IMAGE = "https://pixelflow-callback-harbor.lovable.app/api/public/image"
@@ -387,7 +387,43 @@ async def cmd_search(c, m):
     u = get_user(m.from_user.id)
     set_user(m.from_user.id, query=q)
     msg = await m.reply(f"🔎 {html.escape(q)}...")
-    await render_search(c, msg, u["source"], q, 1)
+    await render_source_choices(c, msg, q)
+
+@app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
+async def search_text(c, m):
+    q = (m.text or "").strip()
+    if not q or len(q) > 100:
+        return
+    set_user(m.from_user.id, query=q)
+    msg = await m.reply(f"🔎 {html.escape(q)}...")
+    await render_source_choices(c, msg, q)
+
+async def render_source_choices(c, msg, q):
+    async with aiohttp.ClientSession() as s:
+        data = await api_sources(s)
+    sources = [
+        x.get("id") for x in (data.get("sources", []) if isinstance(data, dict) else [])
+        if x.get("enabled") and x.get("id")
+    ]
+    if not sources:
+        try:
+            await msg.edit_text("❌ تعذر جلب قائمة المصادر حالياً.")
+        except: pass
+        return
+    set_user(msg.from_user.id, query=q)
+    rows = [
+        [InlineKeyboardButton(f"📚 {source}", callback_data=f"ss:{source}")]
+        for source in sources
+    ]
+    rows.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="m")])
+    try:
+        await msg.edit_text(
+            f"🔍 <b>نتائج البحث عن:</b> {html.escape(q)}\\n\\nاختر مصدر البحث:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+    except Exception as e:
+        log.warning(f"source choices: {e}")
 
 async def render_search(c, msg, src, q, page):
     if page < 1: page = 1
@@ -502,6 +538,17 @@ async def on_cb(c, q: CallbackQuery):
         await q.answer(f"✅ {new}")
         try: await q.message.edit_text(_main_text(new), parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
         except: pass
+        return
+
+    if d.startswith("ss:"):
+        new_source = d.split(":", 1)[1]
+        query = u.get("query")
+        if not query:
+            await q.answer("أرسل اسم المانجا من جديد", show_alert=True)
+            return
+        set_user(uid, source=new_source)
+        await q.answer(f"🔎 البحث في {new_source}")
+        await render_search(c, q.message, new_source, query, 1)
         return
 
     if d.startswith("s:"):
