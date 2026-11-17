@@ -321,7 +321,7 @@ def nav_row(page, prefix):
     ]
 
 def chapter_page_markup(mid, page, total, murl, extra_top=None):
-    per = 20
+    per = 10
     pages = max(1, (total + per - 1) // per)
     page = max(1, min(page, pages))
     start = (page-1)*per
@@ -623,7 +623,7 @@ async def on_cb(c, q: CallbackQuery):
                 progress_btn.append([InlineKeyboardButton(f"▶️ {ch[0]}", callback_data=f"p:{mid}:{prog}")])
         progress_btn.append([InlineKeyboardButton("📚 كل الفصول PDF", callback_data=f"pdfmenu:{mid}")])
 
-        pages_count = max(1, (total + 19)//20)
+        pages_count = max(1, (total + 9)//10)
         text = f"📚 <b>{html.escape(title)}</b>\n\n{html.escape(desc)}\n\n📖 {total} | 1/{pages_count}"
         markup = chapter_page_markup(mid, 1, total, murl, progress_btn)
 
@@ -709,7 +709,7 @@ async def on_cb(c, q: CallbackQuery):
         row = []
         if idx > 0:
             row.append(InlineKeyboardButton("⬅️", callback_data=f"p:{mid}:{idx-1}"))
-        row.append(InlineKeyboardButton("📖", callback_data=f"cp:{mid}:{(idx//20)+1}"))
+        row.append(InlineKeyboardButton("📖", callback_data=f"cp:{mid}:{(idx//10)+1}"))
         if idx < total_ch - 1:
             row.append(InlineKeyboardButton("➡️", callback_data=f"p:{mid}:{idx+1}"))
         nav_btns = [row, [InlineKeyboardButton("🔙", callback_data=f"d:{mid}")]]
