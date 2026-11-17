@@ -164,8 +164,7 @@ def register_handlers(app, cfg, db, manga_api, pdf_engine, state):
                 await query.answer("استخدم: /search اسم المانجا", show_alert=True)
                 return
             if data == "menu:latest":
-                await query.answer()
-                await latest_handler(client, query.message)
+                await query.answer("استخدم الأمر /latest لجلب أحدث الإضافات", show_alert=True)
                 return
             if data == "menu:favs":
                 await query.answer()
