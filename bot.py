@@ -12,6 +12,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQ
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import MessageNotModified
 import gc
+import cloudscraper
 
 # ===== BEGIN MERGED MANGA API MODULE =====
 # -*- coding: utf-8 -*-
@@ -271,36 +272,45 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
         )
 
-    # Manga engine image URLs are expected to be JPEG. img2pdf also supports
-    # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
-    candidates = []
-    for position, blob in enumerate(downloaded):
-        if not blob:
-            continue
-        supported = (
-            blob.startswith(b"\xff\xd8\xff")
-            or blob.startswith(b"\x89PNG\r\n\x1a\n")
-            or blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
-            or blob.startswith((b"II*\x00", b"MM\x00*"))
-        )
-        if supported:
-            candidates.append((position, blob))
-        else:
-            print(f"⚠️ skipped unsupported image format {position + 1}")
-
-    if not candidates:
+    # Never create a partial chapter: every extracted image must download and decode.
+    missing = [position + 1 for position, blob in enumerate(downloaded) if not blob]
+    if missing:
+        print(f"❌ PDF aborted: {len(missing)}/{len(indexed_urls)} images failed to download; first: {missing[:20]}")
         return None
 
-    # Validate each candidate separately; a corrupt page will not cancel the chapter.
+    from PIL import Image, ImageOps
     valid = []
-    for position, blob in candidates:
+    for position, blob in enumerate(downloaded):
         try:
-            img2pdf.convert(BytesIO(blob))
-            valid.append(blob)
-        except Exception as exc:
-            print(f"⚠️ skipped invalid image {position + 1}: {exc}")
+            with Image.open(BytesIO(blob)) as source_image:
+                source_image.seek(0)
+                image_format = (source_image.format or "").upper()
+                # Keep JPEG/PNG/JPEG2000/TIFF bytes untouched for lossless PDF embedding.
+                # Pillow converts formats such as WEBP, GIF and BMP only when necessary.
+                if image_format in ("JPEG", "PNG", "JPEG2000", "TIFF"):
+                    img2pdf.convert(BytesIO(blob))
+                    valid.append(blob)
+                    continue
 
-    if not valid:
+                image = ImageOps.exif_transpose(source_image).copy()
+                if "A" in image.getbands() or "transparency" in image.info:
+                    rgba = image.convert("RGBA")
+                    background = Image.new("RGB", rgba.size, (255, 255, 255))
+                    background.paste(rgba, mask=rgba.getchannel("A"))
+                    image = background
+                else:
+                    image = image.convert("RGB")
+                output = BytesIO()
+                image.save(output, format="JPEG", quality=95, optimize=True)
+                converted = output.getvalue()
+                img2pdf.convert(BytesIO(converted))
+                valid.append(converted)
+        except Exception as exc:
+            print(f"❌ PDF aborted: invalid image {position + 1}: {exc}")
+            return None
+
+    if len(valid) != len(indexed_urls):
+        print(f"❌ PDF aborted: pages mismatch {len(valid)}/{len(indexed_urls)}")
         return None
 
     result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
@@ -1239,9 +1249,17 @@ async def is_user_subscribed(client,uid):
     for ch in chs:
         try:
             m=await client.get_chat_member(chat_id=ch,user_id=uid)
-            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.BANNED]: unsub.append(ch)
+            if (m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.BANNED]
+                    or (m.status == ChatMemberStatus.RESTRICTED and not getattr(m, "is_member", True))):
+                unsub.append(ch)
         except Exception as e:
-            if "user_not_participant" in str(e).lower(): unsub.append(ch)
+            error_text=str(e).lower()
+            if "user_not_participant" in error_text or "user not participant" in error_text:
+                unsub.append(ch)
+            else:
+                # Fail closed: an API/permission error must never grant access.
+                print(f"⚠️ subscription check failed for {ch}, user {uid}: {e}")
+                unsub.append(ch)
     return (len(unsub)==0),(unsub if unsub else None)
 
 async def send_subscription_prompt(client,uid,cid,pending=None):
@@ -2659,11 +2677,25 @@ async def handle_all_text(client,message):
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
             )
+            # A merged PDF must contain every selected chapter; never silently omit failures.
+            failed_chapters = [index for index, urls in extracted if not urls]
+            if failed_chapters:
+                refund_merge(uid, count)
+                failed_labels = []
+                for failed_index in failed_chapters[:8]:
+                    ch = selected[failed_index]
+                    failed_labels.append(str(ch.get("display_text") or ch.get("number") or ch.get("title") or (failed_index + 1)))
+                await lm.edit_text(
+                    "❌ تعذر استخراج بعض الفصول، لذلك لم يتم إنشاء ملف ناقص.\n"
+                    "💳 تمت إعادة الرصيد.\n"
+                    "الفصول المتعذرة: " + ", ".join(failed_labels)
+                )
+                return
+
             # Rebuild groups in the original selected-chapter order.
             for _, urls in sorted(extracted, key=lambda item: item[0]):
-                if urls:
-                    chapter_groups.append(urls)
-                    total_images += len(urls)
+                chapter_groups.append(urls)
+                total_images += len(urls)
 
             if not chapter_groups:
                 refund_merge(uid,count)
@@ -3003,8 +3035,16 @@ async def check_vip_expiry():
 
 async def periodic_check():
     while True:
-        await asyncio.sleep(CHECK_INTERVAL); print("🔄...")
-        await check_new_chapters(); await check_vip_expiry()
+        await asyncio.sleep(CHECK_INTERVAL)
+        print("🔄 فحص الإشعارات وانتهاء VIP...")
+        try:
+            await check_new_chapters()
+        except Exception as e:
+            print(f"⚠️ check_new_chapters task: {e}")
+        try:
+            await check_vip_expiry()
+        except Exception as e:
+            print(f"⚠️ check_vip_expiry task: {e}")
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -3021,8 +3061,11 @@ if __name__ == "__main__":
                 print(f"🤖 @{BOT_USERNAME}"); break
             except Exception as e:
                 print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
-        asyncio.create_task(periodic_check())
-        asyncio.create_task(auto_backup_task())
+        asyncio.create_task(periodic_check(), name="periodic_check")
+        asyncio.create_task(auto_backup_task(), name="auto_backup")
+        asyncio.create_task(latest_manga_refresh_task(), name="latest_manga_refresh")
+        asyncio.create_task(gift_channel_publisher_task(), name="gift_channel_publisher")
+        print("✅ تم تشغيل المهام الخلفية: الفحص الدوري، النسخ الاحتياطي، أحدث الفصول، نشر الهدايا")
         await idle()
 
     asyncio.run(_bootstrap())
