@@ -1083,8 +1083,14 @@ set_notify_callback(_send_renewal_notify)
 
 # ============ المصادر ============
 def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
-    per=10; total=math.ceil(len(chs)/per) if len(chs)>0 else 1; s=page*per
-    cur=chs[s:s+per]; kb,row=[],[]
+    latest_mode = bool(uid is not None and user_data.get(uid,{}).get("latest_mode"))
+    per=10
+    if latest_mode:
+        s=max(0,len(chs)-10); cur=chs[s:s+10]; page=0; total=1
+    else:
+        total=math.ceil(len(chs)/per) if len(chs)>0 else 1; s=page*per
+        cur=chs[s:s+per]
+    kb,row=[],[]
     src_short = source_code(src)
     for i,ch in enumerate(cur):
         idx=s+i
@@ -1092,24 +1098,27 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
         row.append(InlineKeyboardButton(f"📖 {d}",callback_data=f"ch_{src_short}_{idx}"))
         if len(row)==4: kb.append(row); row=[]
     if row: kb.append(row)
-    nav=[]
-    if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"pg_{src_short}_{page-1}"))
-    if page<total-1: nav.append(InlineKeyboardButton("التالي ➡️",callback_data=f"pg_{src_short}_{page+1}"))
-    if nav: kb.append(nav)
-    qk=[]
-    if page>0: qk.append(InlineKeyboardButton("🏠 الأول",callback_data=f"f_{src_short}"))
-    if page<total-1: qk.append(InlineKeyboardButton("🔝 الأخير",callback_data=f"l_{src_short}"))
-    if qk: kb.append(qk)
+    if not latest_mode:
+        nav=[]
+        if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"pg_{src_short}_{page-1}"))
+        if page<total-1: nav.append(InlineKeyboardButton("التالي ➡️",callback_data=f"pg_{src_short}_{page+1}"))
+        if nav: kb.append(nav)
+        qk=[]
+        if page>0: qk.append(InlineKeyboardButton("🏠 الأول",callback_data=f"f_{src_short}"))
+        if page<total-1: qk.append(InlineKeyboardButton("🔝 الأخير",callback_data=f"l_{src_short}"))
+        if qk: kb.append(qk)
     if uid is not None and is_vip(uid):
         if is_favorite(uid,ident,src):
             kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة",callback_data=f"fav_remove_{src_short}")])
             kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid,ident,src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
         else: kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة",callback_data=f"fav_add_{src_short}")])
     kb.append([InlineKeyboardButton("🧩 دمج الفصول",callback_data=f"mrg_{src_short}")])
-    
     if ident and BOT_USERNAME:
         kb.append([InlineKeyboardButton("🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
-        
+    if latest_mode:
+        latest_source = str(user_data.get(uid,{}).get("latest_source_id") or src)
+        kb.append([InlineKeyboardButton("⬅️ مصادر أحدث الفصول",callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
     kb.append([InlineKeyboardButton("🔄 تحديث",callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
     return InlineKeyboardMarkup(kb),page,total
 
@@ -1687,21 +1696,69 @@ async def unified_callback(client,callback):
         await callback.answer("✅" if not cur else "❌"); return
 
     if data=="latest_manga_list":
-        await callback.answer("🔥"); global latest_manga_cache
-        if not latest_manga_cache:
-            try: latest_manga_cache = await asyncio.to_thread(get_all_latest)
-            except: pass
-        if not latest_manga_cache: await safe_edit(msg,"❌"); return
+        await callback.answer("📚")
+        try:
+            sources = await asyncio.to_thread(get_sources)
+        except Exception as e:
+            print("⚠️ latest sources:", e); sources = []
+        if not sources:
+            await safe_edit(msg,"❌ تعذر تحميل قائمة المصادر")
+            return
         kb=[]
-        source_names={str(x["id"]):str(x.get("name") or x["id"]) for x in get_sources()}
-        for i,item in enumerate(latest_manga_cache):
-            t,u,slug=item[:3]
-            ch=item[3] if len(item)>3 else ""
-            source_name=source_names.get(str(item[4] if len(item)>4 else "mangalik"),"")
-            label=f"📖 {t[:24]} · {source_name[:12]}" + (f" — {str(ch)[:10]}" if ch else "")
+        for source in sources:
+            sid=str(source.get("id") or "")
+            if not sid: continue
+            name=str(source.get("name") or sid)
+            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}")])
+        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+        await safe_edit(msg,"📚 **اختر مصدر أحدث الفصول:**",InlineKeyboardMarkup(kb)); return
+
+    if data.startswith("latest_src_"):
+        await callback.answer("⏳")
+        src=data[len("latest_src_"):]
+        global latest_manga_cache
+        try:
+            if not latest_manga_cache:
+                latest_manga_cache = await asyncio.to_thread(get_all_latest)
+            selected=[(i,item) for i,item in enumerate(latest_manga_cache)
+                      if len(item)>4 and str(item[4])==src]
+            if not selected:
+                fresh = await asyncio.to_thread(get_source(src).get_latest_updates)
+                refreshed=[]
+                for item in fresh:
+                    title=str(item.get("title") or item.get("name") or "Manga")
+                    url=item.get("url") or item.get("manga_url") or item.get("link")
+                    if not url: continue
+                    ident=str(item.get("id") or url)
+                    chapter=str(item.get("latest_chapter") or item.get("last_chapter") or item.get("chapter") or "")
+                    refreshed.append((title,str(url),ident,chapter,src))
+                latest_manga_cache=[x for x in latest_manga_cache if len(x)<=4 or str(x[4])!=src]+refreshed
+                selected=[(i,item) for i,item in enumerate(latest_manga_cache)
+                          if len(item)>4 and str(item[4])==src]
+        except Exception as e:
+            print(f"⚠️ latest source {src}:",e)
+            await safe_edit(msg,"❌ تعذر تحميل أحدث الفصول من هذا المصدر")
+            return
+        if not selected:
+            await safe_edit(msg,"❌ لا توجد مانجا حديثة في هذا المصدر",
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")],
+                                      [InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")]]))
+            return
+        kb=[]
+        for i,item in selected:
+            title,url,ident=item[:3]
+            chapter=item[3] if len(item)>3 else ""
+            label=f"📖 {str(title)[:32]}" + (f" — {str(chapter)[:12]}" if chapter else "")
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
-        kb.append([InlineKeyboardButton("🔄 تحديث",callback_data="latest_manga_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-        await safe_edit(msg,"🔥 **أحدث الفصول والمانجا:**",InlineKeyboardMarkup(kb)); return
+        kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")])
+        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+        await safe_edit(msg,"🔥 **أحدث الفصول في المصدر المحدد:**",InlineKeyboardMarkup(kb)); return
+
+    if data=="latest_home":
+        await callback.answer("🏠")
+        welcome=settings.get("welcome_message","🌟 **مرحباً بك في بوت المانجا**")
+        await safe_edit(msg,welcome,await build_main_keyboard(uid))
+        return
 
     if data=="main_categories" or data.startswith("cat_pg_"):
         page=0 if data=="main_categories" else int(data.replace("cat_pg_",""))
@@ -1781,7 +1838,8 @@ async def unified_callback(client,callback):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
                 return await download_images_parallel(image_urls,client=_client)
             user_data[uid]={"chapters":chs,"title":title,"identifier":ident,"page":0,"source":src,
-                "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind}
+                "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind,
+                "latest_mode":data.startswith("latest_"),"latest_source_id":src}
             parts=[f"**{title}**"]
             if kind: parts.append(f"📚 **{kind}**")
             if genres: parts.append("🏷️ " + " | ".join(map(str,genres[:8])))
