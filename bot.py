@@ -2159,18 +2159,34 @@ async def handle_all_text(client,message):
             chapter_groups = []
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
-            for idx,ch in enumerate(selected,1):
-                try:
-                    urls=await asyncio.to_thread(api.get_chapter_images,ch)
-                    if urls:
-                        chapter_groups.append(urls)
-                        total_images += len(urls)
-                    if idx % 2 == 0 or idx == count:
-                        await lm.edit_text(f"🧩 `{idx}/{count}` — `{total_images}` صورة")
-                except Exception as e: print(f"⚠️ [{src}] {e}")
-            if not chapter_groups: refund_merge(uid,count); await lm.edit_text("❌ لم يستخرج المحرك صور الفصول"); return
-            await lm.edit_text(f"🧩 إنشاء PDF من `{total_images}` صورة...")
-            # Nested lists preserve chapter boundaries: one HTTP session per chapter.
+
+            # Extract chapter image lists concurrently, but limit pressure on the source API.
+            extract_sem = asyncio.Semaphore(4)
+            async def extract_chapter(index, chapter):
+                async with extract_sem:
+                    try:
+                        urls = await asyncio.to_thread(api.get_chapter_images, chapter)
+                        return index, urls or None
+                    except Exception as exc:
+                        print(f"⚠️ [{src}] chapter {index}: {exc}")
+                        return index, None
+
+            await lm.edit_text(f"🧩 استخراج روابط {count} فصول بالتوازي...")
+            extracted = await asyncio.gather(
+                *(extract_chapter(i, ch) for i, ch in enumerate(selected))
+            )
+            # Rebuild groups in the original selected-chapter order.
+            for _, urls in sorted(extracted, key=lambda item: item[0]):
+                if urls:
+                    chapter_groups.append(urls)
+                    total_images += len(urls)
+
+            if not chapter_groups:
+                refund_merge(uid,count)
+                await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
+                return
+            await lm.edit_text(f"🧩 تنزيل {total_images} صورة بالتوازي...")
+            # One shared HTTP session; global image concurrency is capped at 24.
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌"); return
             increment_download_count(uid); await lm.edit_text("📤")
