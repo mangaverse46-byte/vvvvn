@@ -373,11 +373,18 @@ async def cmd_start(c, m):
 async def cmd_help(c, m): await cmd_start(c, m)
 
 @app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
+WAITING_SEARCH = set()
+
 async def search_text(c, m):
+    uid = m.from_user.id
+    if uid not in WAITING_SEARCH:
+        return
     q = (m.text or "").strip()
     if not q or len(q) > 100:
+        await m.reply_text("⚠️ اكتب اسم مانجا صحيح (حتى 100 حرف).")
         return
-    set_user(m.from_user.id, query=q)
+    WAITING_SEARCH.discard(uid)
+    set_user(uid, query=q)
     msg = await m.reply(f"🔎 {html.escape(q)}...")
     await render_source_choices(c, msg, q)
 
@@ -486,7 +493,22 @@ async def on_cb(c, q: CallbackQuery):
 
     if d == "noop": await q.answer(); return
     if d == "hlp":
-        await q.answer("أرسل اسم المانجا هنا في المحادثة 🔍", show_alert=True)
+        WAITING_SEARCH.add(uid)
+        await q.answer()
+        await q.message.reply_text(
+            "🔍 <b>البحث عن مانجا</b>\\n\\nاكتب اسم المانجا أو المانهوا التي تريد البحث عنها:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ إلغاء البحث", callback_data="cancel_search")]
+            ])
+        )
+        return
+
+    if d == "cancel_search":
+        WAITING_SEARCH.discard(uid)
+        await q.answer("تم إلغاء البحث")
+        try: await q.message.edit_text("❌ تم إلغاء البحث.")
+        except: pass
         return
 
     if d == "m":
