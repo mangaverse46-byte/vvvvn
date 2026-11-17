@@ -291,19 +291,22 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not candidates:
         return None
 
-    # Validate each candidate separately; a corrupt page will not cancel the chapter.
-    valid = []
-    for position, blob in candidates:
-        try:
-            img2pdf.convert(BytesIO(blob))
-            valid.append(blob)
-        except Exception as exc:
-            print(f"⚠️ skipped invalid image {position + 1}: {exc}")
-
-    if not valid:
-        return None
-
-    result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+    # Fast path: convert all pages once. Per-image validation is only used
+    # as a recovery path when one damaged page breaks the combined conversion.
+    try:
+        result = img2pdf.convert(*(BytesIO(blob) for _, blob in candidates))
+    except Exception as batch_error:
+        print(f"⚠️ combined PDF conversion failed; isolating bad pages: {batch_error}", flush=True)
+        valid = []
+        for position, blob in candidates:
+            try:
+                img2pdf.convert(BytesIO(blob))
+                valid.append(blob)
+            except Exception as exc:
+                print(f"⚠️ skipped invalid image {position + 1}: {exc}", flush=True)
+        if not valid:
+            return None
+        result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
     buf = BytesIO(result)
     buf.name = "manga.pdf"
     buf.seek(0)
@@ -1188,28 +1191,49 @@ def create_fav_list_markup(uid):
     kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
     return InlineKeyboardMarkup(kb),"مفعلة" if n else "معطلة",len(favs)
 
-async def download_image_bytesio(url,referer=None):
-    if not url: return None
-    url=clean_url(url)
-    base_h={"User-Agent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36", "Accept":"image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
-    for ref in [referer,None]:
-        hh=dict(base_h)
-        if ref: hh["Referer"]=ref
-        try:
-            async with aiohttp.ClientSession(headers=hh) as s:
-                async with s.get(url,timeout=15,allow_redirects=True) as r:
-                    if r.status!=200: continue
-                    d=await r.read()
-                    if d and len(d)>=200: return io.BytesIO(d)
-        except: pass
-    try:
-        cs=cloudscraper.create_scraper(); hd=dict(base_h)
-        if referer: hd["Referer"]=referer
-        cs.headers.update(hd)
-        r=cs.get(url,timeout=20,allow_redirects=True)
-        if r.status_code==200 and len(r.content)>=200: return io.BytesIO(r.content)
-    except: pass
+def _download_image_cloudscraper(url, referer, base_headers):
+    """Synchronous fallback; always call this through asyncio.to_thread."""
+    cs = cloudscraper.create_scraper()
+    headers = dict(base_headers)
+    if referer:
+        headers["Referer"] = referer
+    cs.headers.update(headers)
+    response = cs.get(url, timeout=20, allow_redirects=True)
+    if response.status_code == 200 and len(response.content) >= 200:
+        return io.BytesIO(response.content)
     return None
+
+
+async def download_image_bytesio(url, referer=None):
+    if not url:
+        return None
+    url = clean_url(url)
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    for ref in (referer, None):
+        headers = dict(base_headers)
+        if ref:
+            headers["Referer"] = ref
+        try:
+            timeout = aiohttp.ClientTimeout(total=15, connect=8)
+            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                async with session.get(url, allow_redirects=True) as response:
+                    if response.status != 200:
+                        continue
+                    data = await response.read()
+                    if data and len(data) >= 200:
+                        return io.BytesIO(data)
+        except Exception:
+            continue
+    try:
+        return await asyncio.to_thread(
+            _download_image_cloudscraper, url, referer, base_headers
+        )
+    except Exception as exc:
+        print(f"⚠️ cloudscraper cover fallback failed: {exc}", flush=True)
+        return None
 
 async def send_cover_message(msg,cover,text,markup,referer=None):
     if cover:
@@ -1628,13 +1652,13 @@ async def start_cmd(client, message):
     except Exception as exc:
         import traceback
         details = traceback.format_exc()
-        print("❌ /start handler failed:\\n" + details, flush=True)
+        print("❌ /start handler failed:\n" + details, flush=True)
         try:
             await message.reply_text("⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.")
         except Exception as send_exc:
             print(f"❌ failed to notify /start user: {send_exc}", flush=True)
         try:
-            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\\n" + details[-3000:])
+            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\n" + details[-3000:])
         except Exception:
             pass
 
@@ -3016,22 +3040,60 @@ async def periodic_check():
         await check_new_chapters(); await check_vip_expiry()
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🚀 بوت المانجا — النسخة النهائية المصححة")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("🚀 بوت المانجا — بدء التشغيل", flush=True)
+    print("=" * 60, flush=True)
+
     async def _bootstrap():
         global BOT_USERNAME
+        background_tasks = []
         try:
-            if not app.is_connected: await app.start()
-        except Exception as e: print(f"❌ {e}"); return
-        for attempt in range(3):
-            try:
-                me = await app.get_me(); BOT_USERNAME = me.username
-                print(f"🤖 @{BOT_USERNAME}"); break
-            except Exception as e:
-                print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
-        asyncio.create_task(periodic_check())
-        asyncio.create_task(auto_backup_task())
-        await idle()
+            print("🔌 جاري الاتصال بتيليجرام...", flush=True)
+            await app.start()
 
-    asyncio.run(_bootstrap())
+            me = None
+            for attempt in range(1, 4):
+                try:
+                    me = await app.get_me()
+                    break
+                except Exception as exc:
+                    print(f"⚠️ فشل get_me ({attempt}/3): {exc}", flush=True)
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(2)
+
+            BOT_USERNAME = me.username
+            print(f"✅ تم الاتصال بنجاح: @{BOT_USERNAME}", flush=True)
+
+            task_factories = (
+                ("periodic_check", periodic_check),
+                ("auto_backup", auto_backup_task),
+                ("latest_manga_refresh", latest_manga_refresh_task),
+                ("gift_channel_publisher", gift_channel_publisher_task),
+            )
+            for task_name, task_factory in task_factories:
+                task = asyncio.create_task(task_factory(), name=task_name)
+                background_tasks.append(task)
+                print(f"▶️ بدأت المهمة: {task_name}", flush=True)
+
+            print("👂 البوت الآن يستقبل الرسائل. أرسل /start للاختبار.", flush=True)
+            await idle()
+
+        except Exception:
+            import traceback
+            print("❌ فشل تشغيل البوت:", flush=True)
+            traceback.print_exc()
+            raise
+        finally:
+            for task in background_tasks:
+                task.cancel()
+            if background_tasks:
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+            if app.is_connected:
+                await app.stop()
+                print("🛑 تم إيقاف اتصال تيليجرام بأمان.", flush=True)
+
+    try:
+        asyncio.run(_bootstrap())
+    except KeyboardInterrupt:
+        print("🛑 تم إيقاف البوت بواسطة المستخدم.", flush=True)
