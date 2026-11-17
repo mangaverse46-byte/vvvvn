@@ -75,7 +75,7 @@ def _search(source, query):
 
 def _latest(source):
     raw = _request("latest", {"source": source, "page": 1})
-    return [_manga(x) for x in _items(raw, ("mangas", "results", "items", "chapters"))]
+    return [_manga(x) for x in _items(raw, ("mangas", "results", "items", "chapters", "latest"))]
 
 def _genres(source):
     raw = _request("genres", {"source": source})
@@ -159,7 +159,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                 return None
         blobs = await asyncio.gather(*(fetch(u) for u in urls))
     doc = fitz.open()
-    page_w, page_h = 595.0, 842.0
     for blob in blobs:
         if not blob:
             continue
@@ -168,6 +167,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             iw, ih = pix.width, pix.height
             if iw <= 0 or ih <= 0:
                 continue
+            page_w, page_h = (842.0, 595.0) if iw > ih else (595.0, 842.0)
             scale = min(page_w / iw, page_h / ih)
             w, h = iw * scale, ih * scale
             page = doc.new_page(width=page_w, height=page_h)
@@ -175,7 +175,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             page.insert_image(rect, stream=blob, keep_proportion=True)
         except Exception:
             try:
-                page = doc.new_page(width=page_w, height=page_h)
+                page = doc.new_page(width=595.0, height=842.0)
                 page.insert_image(page.rect, stream=blob, keep_proportion=True)
             except Exception:
                 pass
@@ -238,7 +238,10 @@ class MeshManga(_Source):
     BASE = "https://meshmanga.com"
     @classmethod
     def get_details(cls, ident):
-        return _details(cls.SOURCE, str(ident))
+        value = str(ident)
+        if not value.startswith("http"):
+            value = cls.BASE.rstrip("/") + "/series/" + value
+        return _details(cls.SOURCE, value)
     @classmethod
     def get_chapters(cls, ident):
         d = cls.get_details(ident)
@@ -253,6 +256,16 @@ class MeshManga(_Source):
 class AzoraFly(_Source):
     SOURCE = "azora"
     BASE = "https://azorafly.com"
+    @classmethod
+    def get_details(cls, ident):
+        value = str(ident)
+        if not value.startswith("http"):
+            value = cls.BASE.rstrip("/") + "/series/" + value
+        return _details(cls.SOURCE, value)
+    @classmethod
+    def get_chapters(cls, ident):
+        d = cls.get_details(ident)
+        return (d or {}).get("chapters", [])
     @classmethod
     def get_chapter_images(cls, chapter):
         return _chapter_images(cls.SOURCE, chapter)
