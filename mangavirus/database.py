@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -45,7 +46,7 @@ class Database:
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        with self.connect() as db:
+        with self.session() as db:
             db.executescript(SCHEMA)
 
     def connect(self):
@@ -53,6 +54,18 @@ class Database:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=30000")
         return db
+
+    @contextmanager
+    def session(self):
+        db = self.connect()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def touch_user(self, user):
         now = time.time()
@@ -63,7 +76,7 @@ class Database:
                 (user.id, user.username, user.first_name or "", now, now))
 
     def is_banned(self, user_id: int) -> bool:
-        with self.connect() as db:
+        with self.session() as db:
             row = db.execute("SELECT is_banned FROM users WHERE user_id=?", (user_id,)).fetchone()
             return bool(row and row["is_banned"])
 
@@ -80,7 +93,7 @@ class Database:
             return cur.rowcount > 0
 
     def favorites(self, user_id):
-        with self.connect() as db:
+        with self.session() as db:
             return [dict(x) for x in db.execute(
                 "SELECT * FROM favorites WHERE user_id=? ORDER BY added_at DESC", (user_id,))]
 
@@ -91,7 +104,7 @@ class Database:
             return cur.rowcount > 0
 
     def stats(self):
-        with self.connect() as db:
+        with self.session() as db:
             return {
                 "users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
                 "favorites": db.execute("SELECT COUNT(*) FROM favorites").fetchone()[0],
