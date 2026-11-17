@@ -372,9 +372,9 @@ async def cmd_start(c, m):
 @app.on_message(filters.command("help"))
 async def cmd_help(c, m): await cmd_start(c, m)
 
-@app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
 WAITING_SEARCH = set()
 
+@app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
 async def search_text(c, m):
     uid = m.from_user.id
     if uid not in WAITING_SEARCH:
