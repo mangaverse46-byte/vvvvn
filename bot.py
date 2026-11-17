@@ -1221,7 +1221,9 @@ async def search_cmd(client,message):
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
-    await message.reply_text("⚠️ تم تعطيل فحص الفصول وإشعارات تحديث المانجا.")
+    await message.reply_text("🔄 جاري فحص الفصول الجديدة...")
+    await check_new_chapters()
+    await message.reply_text("✅ انتهى فحص المفضلات.")
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client,message):
@@ -2501,7 +2503,7 @@ async def check_new_chapters():
                     continue
                 if previous and previous != "0" and latest != previous:
                     try:
-                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\\n\\n📚 " + fav.get("title", "مانجا") + "\\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
+                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\n\n📚 " + fav.get("title", "مانجا") + "\\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
                     except Exception:
                         pass
                 if latest != previous:
