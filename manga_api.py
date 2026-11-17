@@ -71,16 +71,16 @@ def _chapter(x, i):
 
 def _search(source, query):
     raw = _request("search", {"source": source, "q": query, "page": 1})
-    return [_manga(x) for x in _items(raw, ("mangas", "results", "items"))]
+    return [_manga(x) for x in _items(raw, ("mangas", "manga", "results", "items"))]
 
 def _latest(source):
     raw = _request("latest", {"source": source, "page": 1})
-    return [_manga(x) for x in _items(raw, ("mangas", "results", "items", "chapters", "latest"))]
+    return [_manga(x) for x in _items(raw, ("mangas", "manga", "results", "items", "chapters", "latest", "latest_chapters"))]
 
 def _genres(source):
     raw = _request("genres", {"source": source})
     out = []
-    for x in _items(raw, ("genres", "items")):
+    for x in _items(raw, ("genres", "categories", "items")):
         if isinstance(x, str):
             out.append((x, x))
         elif isinstance(x, dict):
@@ -92,7 +92,7 @@ def _genres(source):
 
 def _by_genre(source, slug, page=1):
     raw = _request("genre-manga", {"source": source, "genre_url": slug, "page": page})
-    return [_manga(x) for x in _items(raw, ("mangas", "results", "items"))]
+    return [_manga(x) for x in _items(raw, ("mangas", "manga", "results", "items"))]
 
 def _details(source, manga_url):
     raw = _request("details", {"source": source, "url": manga_url})
