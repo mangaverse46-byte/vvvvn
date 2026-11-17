@@ -1567,8 +1567,7 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("❌ إغلاق اللوحة",callback_data="close_list")]])
 
 # ============ Handlers ============
-@app.on_message(filters.command("start"))
-async def start_cmd(client,message):
+async def _start_cmd_impl(client,message):
     uid=message.from_user.id
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
         await message.reply_text("⚠️ **البوت في وضع الصيانة**\n\nيرجى المحاولة لاحقاً", parse_mode=ParseMode.MARKDOWN); return
@@ -1609,6 +1608,27 @@ async def start_cmd(client,message):
     kb=await build_main_keyboard(uid); wt=settings.get("welcome_message","🌟 **مرحباً!**")
     if is_vip(uid): wt+="\n\n👑 **أنت VIP!**"
     await send_message_with_image(client,message.chat.id,wt,"welcome_image",kb)
+
+
+@app.on_message(filters.command("start"))
+async def start_cmd(client, message):
+    try:
+        if not message.from_user:
+            return
+        await _start_cmd_impl(client, message)
+    except Exception as exc:
+        import traceback
+        details = traceback.format_exc()
+        print("❌ /start handler failed:\\n" + details, flush=True)
+        try:
+            await message.reply_text("⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.")
+        except Exception as send_exc:
+            print(f"❌ failed to notify /start user: {send_exc}", flush=True)
+        try:
+            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\\n" + details[-3000:])
+        except Exception:
+            pass
+
 
 async def _try_reward_referral(client,new_uid):
     po=user_data.get(new_uid,{}).get("pending_referral_owner")
