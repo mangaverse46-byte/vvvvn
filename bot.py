@@ -348,18 +348,17 @@ app = Client("MangaBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 MAIN_TEXT = """📚 <b>بوت المانجا</b>
 
-<b>المصدر:</b> <code>{src}</code>
+<b>المصدر الافتراضي:</b> <code>{src}</code>
 
 اختر الخدمة من الأزرار بالأسفل 👇
 
 🔍 البحث عن مانجا
-📖 أحدث الإصدارات
-🏷️ تصفح التصنيفات
-⚙️ تغيير المصدر"""
+📖 أحدث الفصول
+🏷️ تصفح التصنيفات"""
 
 MAIN_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔍 البحث", callback_data="hlp"), InlineKeyboardButton("📖 الأحدث", callback_data="l:1")],
-    [InlineKeyboardButton("🏷️ التصنيفات", callback_data="g:1"), InlineKeyboardButton("⚙️ المصدر", callback_data="m_src")],
+    [InlineKeyboardButton("🔍 البحث", callback_data="hlp"), InlineKeyboardButton("📖 أحدث الفصول", callback_data="ls")],
+    [InlineKeyboardButton("🏷️ التصنيفات", callback_data="g:1")],
 ])
 
 def _main_text(src):
@@ -495,25 +494,6 @@ async def on_cb(c, q: CallbackQuery):
         except: pass
         return
 
-    if d == "m_src":
-        await q.answer()
-        async with aiohttp.ClientSession() as s:
-            dd = await api_sources(s)
-        btns = [[InlineKeyboardButton(f"📚 {x['id']}", callback_data=f"src:{x['id']}")]
-                for x in dd.get("sources", []) if x.get("enabled")]
-        btns.append([InlineKeyboardButton("🔙", callback_data="m")])
-        try: await q.message.edit_text("⚙️", reply_markup=InlineKeyboardMarkup(btns))
-        except: pass
-        return
-
-    if d.startswith("src:"):
-        new = d.split(":", 1)[1]
-        set_user(uid, source=new)
-        await q.answer(f"✅ {new}")
-        try: await q.message.edit_text(_main_text(new), parse_mode=ParseMode.HTML, reply_markup=MAIN_KB)
-        except: pass
-        return
-
     if d.startswith("ss:"):
         new_source = d.split(":", 1)[1]
         query = u.get("query")
@@ -529,6 +509,32 @@ async def on_cb(c, q: CallbackQuery):
         page = int(d.split(":")[1]); await q.answer()
         if not u["query"]: return
         await render_search(c, q.message, src, u["query"], page); return
+
+    if d == "ls":
+        await q.answer()
+        async with aiohttp.ClientSession() as session:
+            data = await api_sources(session)
+        sources = [
+            item.get("id") for item in (data.get("sources", []) if isinstance(data, dict) else [])
+            if item.get("enabled") and item.get("id")
+        ]
+        if not sources:
+            await q.message.edit_text("❌ تعذر جلب المصادر حالياً.")
+            return
+        rows = [[InlineKeyboardButton(f"📚 {source}", callback_data=f"ll:{source}")]
+                for source in sources]
+        rows.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="m")])
+        await q.message.edit_text("📖 <b>اختر مصدر أحدث الفصول:</b>",
+                                  parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if d.startswith("ll:"):
+        selected_source = d.split(":", 1)[1]
+        set_user(uid, source=selected_source)
+        await q.answer(f"📖 أحدث فصول {selected_source}")
+        await render_latest(c, q.message, selected_source, 1)
+        return
 
     if d.startswith("l:"):
         page = int(d.split(":")[1]); await q.answer()
