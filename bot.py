@@ -1406,7 +1406,7 @@ async def unified_callback(client,callback):
                 async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
                 ik=ident; murl_k=murl; ref="https://starzmanga.com/"
             elif src=="mesh":
-                sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
+                sid=str(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
                 if not dd: await safe_edit(msg,"❌"); return
                 chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
                 if not chs: await safe_edit(msg,"❌"); return
@@ -1519,7 +1519,7 @@ async def unified_callback(client,callback):
                 async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
                 murl_k=murl; ref="https://starzmanga.com/"
             elif src=="mesh":
-                sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
+                sid=str(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
                 chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
                 t=clean_manga_title(dd.get('title',''),str(sid)) if dd else '?'
                 d=dd.get('story','')[:300]+"..." if dd else ''
