@@ -908,7 +908,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         return
     try:
         api = await asyncio.to_thread(get_source, src)
-        manga_url = unquote(str(ident))
+        manga_url = str(ident)
         info = await asyncio.to_thread(api.get_details, manga_url)
         if not info:
             await client.send_message(cid, "❌ تعذر جلب معلومات المانجا."); return
@@ -2121,7 +2121,7 @@ async def handle_all_text(client,message):
             num = None
             try:
                 raw_num = str(ch.get("number") or ch.get("num_str") or ch.get("display_text") or ch.get("title") or "")
-                m2 = re.search(r"(\\d+(?:\\.\\d+)?)", raw_num)
+                m2 = re.search(r"(\d+(?:\.\d+)?)", raw_num)
                 if m2: num = float(m2.group(1))
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
