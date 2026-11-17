@@ -350,14 +350,16 @@ MAIN_TEXT = """📚 <b>بوت المانجا</b>
 
 <b>المصدر:</b> <code>{src}</code>
 
-🔍 /search <code>اسم</code>
-📖 /latest
-🏷️ /genres
-⚙️ /source"""
+اختر الخدمة من الأزرار بالأسفل 👇
+
+🔍 البحث عن مانجا
+📖 أحدث الإصدارات
+🏷️ تصفح التصنيفات
+⚙️ تغيير المصدر"""
 
 MAIN_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔍", callback_data="hlp"), InlineKeyboardButton("📖", callback_data="l:1")],
-    [InlineKeyboardButton("🏷️", callback_data="g:1"), InlineKeyboardButton("⚙️", callback_data="m_src")],
+    [InlineKeyboardButton("🔍 البحث", callback_data="hlp"), InlineKeyboardButton("📖 الأحدث", callback_data="l:1")],
+    [InlineKeyboardButton("🏷️ التصنيفات", callback_data="g:1"), InlineKeyboardButton("⚙️ المصدر", callback_data="m_src")],
 ])
 
 def _main_text(src):
@@ -370,24 +372,6 @@ async def cmd_start(c, m):
 
 @app.on_message(filters.command("help"))
 async def cmd_help(c, m): await cmd_start(c, m)
-
-@app.on_message(filters.command("source"))
-async def cmd_source(c, m):
-    async with aiohttp.ClientSession() as s:
-        d = await api_sources(s)
-    srcs = [x["id"] for x in d.get("sources", []) if x.get("enabled")]
-    btns = [[InlineKeyboardButton(f"📚 {x}", callback_data=f"src:{x}")] for x in srcs]
-    await m.reply("⚙️", reply_markup=InlineKeyboardMarkup(btns))
-
-@app.on_message(filters.command("search"))
-async def cmd_search(c, m):
-    if len(m.command) < 2:
-        await m.reply("❗ /search <اسم>"); return
-    q = " ".join(m.command[1:])
-    u = get_user(m.from_user.id)
-    set_user(m.from_user.id, query=q)
-    msg = await m.reply(f"🔎 {html.escape(q)}...")
-    await render_source_choices(c, msg, q)
 
 @app.on_message(filters.private & filters.text & ~filters.regex(r"^/"))
 async def search_text(c, m):
@@ -410,7 +394,7 @@ async def render_source_choices(c, msg, q):
             await msg.edit_text("❌ تعذر جلب قائمة المصادر حالياً.")
         except: pass
         return
-    set_user(msg.from_user.id, query=q)
+    set_user(msg.chat.id, query=q)
     rows = [
         [InlineKeyboardButton(f"📚 {source}", callback_data=f"ss:{source}")]
         for source in sources
@@ -442,12 +426,6 @@ async def render_search(c, msg, src, q, page):
             parse_mode=ParseMode.HTML)
     except Exception as e: log.warning(f"search: {e}")
 
-@app.on_message(filters.command("latest"))
-async def cmd_latest(c, m):
-    u = get_user(m.from_user.id)
-    msg = await m.reply("📖...")
-    await render_latest(c, msg, u["source"], 1)
-
 async def render_latest(c, msg, src, page):
     async with aiohttp.ClientSession() as s:
         d = await api_latest(s, src, page)
@@ -463,12 +441,6 @@ async def render_latest(c, msg, src, page):
             reply_markup=buttons_manga(items, extra),
             parse_mode=ParseMode.HTML)
     except: pass
-
-@app.on_message(filters.command("genres"))
-async def cmd_genres(c, m):
-    u = get_user(m.from_user.id)
-    msg = await m.reply("🏷️...")
-    await render_genres(c, msg, u["source"], 1)
 
 async def render_genres(c, msg, src, page, per=20):
     async with aiohttp.ClientSession() as s:
@@ -513,7 +485,9 @@ async def on_cb(c, q: CallbackQuery):
     src = u["source"]
 
     if d == "noop": await q.answer(); return
-    if d == "hlp": await q.answer("/search <اسم>", show_alert=True); return
+    if d == "hlp":
+        await q.answer("أرسل اسم المانجا هنا في المحادثة 🔍", show_alert=True)
+        return
 
     if d == "m":
         await q.answer()
