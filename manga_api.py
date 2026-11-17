@@ -175,6 +175,9 @@ class MangaSource:
     def get_cover_image(self, info):
         return (info or {}).get("cover_url")
 
+    async def create_pdf_from_images(self, urls, client=None):
+        return await create_pdf_from_images(urls, client=client)
+
 def get_source(source_id):
     return MangaSource(source_id)
 
