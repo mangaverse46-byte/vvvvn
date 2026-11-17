@@ -213,7 +213,7 @@ class _Source:
         return _search(cls.SOURCE, query)
     @classmethod
     def get_latest_updates(cls):
-        return [(x["title"], x.get("url") or "", x.get("id") or "") for x in _latest(cls.SOURCE)]
+        return [(x["title"], x.get("url") or "", x.get("id") or "", x.get("latest_chapter") or "") for x in _latest(cls.SOURCE)]
     @classmethod
     def get_genres(cls):
         return _genres(cls.SOURCE)
