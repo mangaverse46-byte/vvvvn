@@ -1644,8 +1644,9 @@ async def debug_incoming(client, message):
     )
 
 
-@app.on_message(filters.command("start"))
+@app.on_message(filters.private & filters.command("start"))
 async def start_cmd(client, message):
+    print(f"🔥 START COMMAND RECEIVED: user={message.from_user.id if message.from_user else None}", flush=True)
     try:
         if not message.from_user:
             return
@@ -3049,7 +3050,12 @@ if __name__ == "__main__":
         global BOT_USERNAME
         background_tasks = []
         try:
+            # Pyrogram may capture an event loop when Client is created at import time.
+            # asyncio.run() creates a new loop, so bind the client to this active loop
+            # before starting its dispatcher workers.
+            app.loop = asyncio.get_running_loop()
             print("🔌 جاري الاتصال بتيليجرام...", flush=True)
+            print("🔧 تم ربط Pyrogram بحلقة التشغيل الحالية.", flush=True)
             await app.start()
 
             me = None
