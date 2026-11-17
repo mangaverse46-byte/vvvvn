@@ -997,7 +997,9 @@ async def publish_gift_now(client, admin_uid, code):
                     [InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{new_code}")],
                     [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
                 parse_mode=ParseMode.MARKDOWN)
-            return True, None, new_code        except Exception as e: return False, f'فشل: {e}', None
+            return True, None, new_code
+        except Exception as e:
+            return False, f'فشل: {e}', None
     if not old_channel:
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, '📢 لم تحدد قناة', None
