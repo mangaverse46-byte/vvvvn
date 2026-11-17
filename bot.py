@@ -367,7 +367,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         print(f"📦 {p}..."); install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf"]:
+for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper"]:
     ensure_installed(pkg)
 
 API_ID = 5442915
