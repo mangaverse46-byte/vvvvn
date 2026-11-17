@@ -2192,7 +2192,7 @@ async def handle_all_text(client,message):
             increment_download_count(uid); await lm.edit_text("📤")
             safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()[:50] or "manga"
             await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{len(all_urls)}`", parse_mode=ParseMode.MARKDOWN)
+                caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
             try: await lm.delete()
             except: pass
             del buf; gc.collect()
