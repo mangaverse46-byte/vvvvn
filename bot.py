@@ -425,18 +425,19 @@ async def render_search(c, msg, src, q, page):
             parse_mode=ParseMode.HTML)
     except Exception as e: log.warning(f"search: {e}")
 
-async def render_latest(c, msg, src, page):
+async def render_latest(c, msg, src, page=1):
+    # أحدث الفصول: عرض أول 10 فقط بدون ترقيم صفحات
     async with aiohttp.ClientSession() as s:
-        d = await api_latest(s, src, page)
-    items = list_of(d)
+        d = await api_latest(s, src, 1)
+    items = list_of(d)[:10]
     if not items:
-        try: await msg.edit_text("❌")
+        try: await msg.edit_text("❌ لا توجد فصول حديثة حالياً.")
         except: pass
         return
-    extra = [nav_row(page, "l"), [InlineKeyboardButton("🔙", callback_data="m")]]
+    extra = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="m")]]
     try:
         await msg.edit_text(
-            f"📖 <code>{html.escape(src)}</code> | {page}",
+            f"📖 <b>أحدث 10 فصول</b> | <code>{html.escape(src)}</code>",
             reply_markup=buttons_manga(items, extra),
             parse_mode=ParseMode.HTML)
     except: pass
@@ -535,10 +536,6 @@ async def on_cb(c, q: CallbackQuery):
         await q.answer(f"📖 أحدث فصول {selected_source}")
         await render_latest(c, q.message, selected_source, 1)
         return
-
-    if d.startswith("l:"):
-        page = int(d.split(":")[1]); await q.answer()
-        await render_latest(c, q.message, src, page); return
 
     if d.startswith("g:"):
         page = int(d.split(":")[1]); await q.answer()
