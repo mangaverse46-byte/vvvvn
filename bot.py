@@ -1501,7 +1501,8 @@ async def send_zip_via_added_bots(manual=False):
 
 async def auto_backup_task():
     await asyncio.sleep(60)
-    while True:        try:
+    while True:
+        try:
             bots=get_all_bots()
             if not bots: await asyncio.sleep(3600); continue
             now=time.time(); need=any((now-info.get("last_sent",0))>=BACKUP_INTERVAL for info in bots.values())
