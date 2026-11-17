@@ -3,10 +3,9 @@
 """🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
 import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets
-import asyncio, aiohttp, cloudscraper, requests
+import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
-from bs4 import BeautifulSoup
 from urllib.parse import quote, urljoin, unquote
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -20,9 +19,8 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         print(f"📦 {p}..."); install_package(p)
-for pkg in ["pyrogram","cloudscraper","beautifulsoup4","requests","aiohttp","img2pdf"]:
+for pkg in ["pyrogram","aiohttp"]:
     ensure_installed(pkg)
-import img2pdf
 
 API_ID = 5442915
 API_HASH = "b6a556aba92ae96f271b936cacd930a6"
@@ -34,8 +32,6 @@ CHECK_INTERVAL = 15*60
 BACKUP_INTERVAL = 24*3600
 VIP_PLANS = {"weekly":7*24*3600,"monthly":30*24*3600,"yearly":365*24*3600}
 VIP_PLAN_NAMES = {"weekly":"أسبوعي","monthly":"شهري","yearly":"سنوي"}
-IMAGE_API_URL = "https://pixelflow-callback-harbor.lovable.app/api/public/convert"
-PDF_WIDTH = 600; JPEG_QUALITY = 80; API_BATCH_SIZE = 10; API_TIMEOUT = 120; API_CONCURRENCY = 3
 
 BACKUP_DIR="backups"; os.makedirs(BACKUP_DIR,exist_ok=True)
 user_data={}; BOT_USERNAME=None; latest_manga_cache=[]
@@ -785,83 +781,7 @@ async def _send_renewal_notify(uid, kind="both"):
     except: pass
 set_notify_callback(_send_renewal_notify)
 
-# ============ محرك pixelflow ============
-def _is_jpeg(b): return len(b) >= 3 and b[:3] == b'\xff\xd8\xff'
-def _is_png(b): return len(b) >= 8 and b[:8] == b'\x89PNG\r\n\x1a\n'
-async def _api_send_batch(session, batch, mapping):
-    try:
-        async with session.post(IMAGE_API_URL, json={"urls": batch, "width": PDF_WIDTH, "quality": JPEG_QUALITY}, headers={"Accept": "application/json"}, timeout=aiohttp.ClientTimeout(total=API_TIMEOUT)) as r:
-            if r.status != 200: return
-            data = await r.json()
-            for orig, img in zip(batch, data.get("images", [])):
-                if isinstance(img, dict) and img.get("ok") is True and img.get("url"): mapping[orig] = img["url"]
-    except: pass
-async def convert_via_api(urls):
-    if not urls: return {}
-    mapping = {}
-    batches = [urls[i:i+API_BATCH_SIZE] for i in range(0, len(urls), API_BATCH_SIZE)]
-    sem = asyncio.Semaphore(API_CONCURRENCY)
-    async def worker(batch):
-        async with sem: await _api_send_batch(session, batch, mapping)
-    async with aiohttp.ClientSession() as session:
-        await asyncio.gather(*[worker(b) for b in batches])
-    return mapping
-async def get_bdf_image_bytes(client):
-    bid = settings.get("bdf_image")
-    if not bid: return None
-    try:
-        tf = await client.download_media(bid)
-        if not tf: return None
-        with open(tf, 'rb') as f: data = f.read()
-        try: os.remove(tf)
-        except: pass
-        if _is_jpeg(data) or _is_png(data): return data
-        return None
-    except: return None
-async def fetch_chapter_jpegs(urls, headers=None):
-    if not urls: return []
-    seen, uq = set(), []
-    for u in urls:
-        if u not in seen: seen.add(u); uq.append(u)
-    urls = uq
-    mapping = await convert_via_api(urls)
-    if not mapping: return []
-    hdr = headers or {"User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36"}
-    sem = asyncio.Semaphore(MAX_WORKERS)
-    async def dl_one(orig_url, session):
-        jurl = mapping.get(orig_url)
-        if not jurl: return None
-        async with sem:
-            for _ in range(3):
-                try:
-                    async with session.get(jurl, timeout=30) as r:
-                        if r.status == 200:
-                            d = await r.read()
-                            if d and _is_jpeg(d): return d
-                except: pass
-                await asyncio.sleep(1)
-            return None
-    async with aiohttp.ClientSession(headers=hdr) as s:
-        results = await asyncio.gather(*[dl_one(u, s) for u in urls if u in mapping])
-    return [d for d in results if d]
-async def download_images_parallel(urls, client=None, headers=None):
-    if not urls: return None
-    ch_jpegs = await fetch_chapter_jpegs(urls, headers=headers)
-    if not ch_jpegs: return None
-    jpegs = []
-    if client:
-        bb = await get_bdf_image_bytes(client)
-        if bb: jpegs.append(bb)
-    jpegs.extend(ch_jpegs)
-    valid = [j for j in jpegs if _is_jpeg(j)]
-    if not valid: return None
-    try:
-        pdf_bytes = await asyncio.to_thread(img2pdf.convert, valid, layout_fun=img2pdf.get_layout_fun(None))
-        if pdf_bytes and len(pdf_bytes) > 1000:
-            buf = io.BytesIO(pdf_bytes); buf.seek(0)
-            del jpegs, valid, pdf_bytes; gc.collect(); return buf
-        return None
-    except Exception as e: print(f"  ❌ img2pdf: {e}"); return None
+# تم حذف محرك تحويل الصور وواجهات PDF الخارجية.
 
 # ============ المصادر ============
 def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
@@ -1273,13 +1193,7 @@ async def auto_backup_task():
         await asyncio.sleep(600)
 
 async def latest_manga_refresh_task():
-    global latest_manga_cache
-    while True:
-        try:
-            res = await asyncio.to_thread(StarzManga.get_latest_updates)
-            if res: latest_manga_cache = res
-        except Exception as e: print(f"⚠️ {e}")
-        await asyncio.sleep(5 * 60)
+    return
 
 async def gift_channel_publisher_task():
     await asyncio.sleep(90)
@@ -1376,25 +1290,7 @@ async def _try_reward_referral(client,new_uid):
 
 @app.on_message(filters.command("search"))
 async def search_cmd(client,message):
-    uid=message.from_user.id
-    if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
-    if is_banned(uid) and uid not in OWNER_IDS: return
-    is_sub,_=await is_user_subscribed(client,uid)
-    if not is_sub:
-        args=message.text.split(maxsplit=1); pa={'type':'search'}
-        if len(args)>1: pa['query']=args[1]
-        await send_subscription_prompt(client,uid,message.chat.id,pa); return
-    args=message.text.split(maxsplit=1)
-    if len(args)<2:
-        await message.reply_text("⚠️ **الاستخدام:**\n`/search اسم المانجا`", parse_mode=ParseMode.MARKDOWN); return
-    q=args[1].strip(); user_data.setdefault(uid,{})['search_query']=q
-    kb=InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 مانجا و مانهوا",callback_data="src_mangalik")],
-        [InlineKeyboardButton("📚 فقط مانهوا",callback_data="src_mesh")],
-        [InlineKeyboardButton("✨ مانهوا متميزة",callback_data="src_azora")],
-        [InlineKeyboardButton("🌋 Lava Scans",callback_data="src_lavascans")],
-        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
-    await send_message_with_image(client,message.chat.id, f"🔍 **بحث**\n\n`{q}`\n\n👇 اختر المصدر:","sources_image",kb)
+    await message.reply_text("⚠️ تم تعطيل البحث عن المانجا وإزالة مصادر وواجهات API.")
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
@@ -2671,25 +2567,7 @@ async def handle_documents(client,message):
     user_data.pop(uid, None)
 
 async def check_new_chapters():
-    for uid in get_all_user_ids():
-        if not is_notifications_enabled(uid): continue
-        for f in get_fav_items(uid):
-            try:
-                if not f.get('notify',True): continue
-                s,i,m=f['source'],f['identifier'],f['manga_url']; ti=clean_manga_title(f.get('title',''),i)
-                lc=f.get('last_chapter',"0"); ln=get_latest_chapter_number(s,i,m)
-                try: lnum=float(re.search(r'(\d+(?:\.\d+)?)',str(lc)).group(1)) if re.search(r'(\d+(?:\.\d+)?)',str(lc)) else 0
-                except: lnum=0
-                if ln>lnum:
-                    if s=="mangalik": c=StarzManga.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
-                    elif s=="mesh": c=MeshManga.get_latest_chapter(int(i)); d=c.get('display_text','?') if c else '?'
-                    elif s=="azora": c=AzoraFly.get_latest_chapter(i); d=str(c.get('number','?')) if c else '?'
-                    elif s=="lavascans": c=LavaScans.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
-                    else: continue
-                    set_fav_last_chapter(uid, i, s, d)
-                    try: await app.send_message(uid,f"📢 **{ti}**\n📌 `{d}`",parse_mode=ParseMode.MARKDOWN)
-                    except: pass
-            except: pass
+    return
 
 async def check_vip_expiry():
     for u in get_expired_vips():
