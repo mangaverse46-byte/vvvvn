@@ -426,18 +426,18 @@ async def render_search(c, msg, src, q, page):
     except Exception as e: log.warning(f"search: {e}")
 
 async def render_latest(c, msg, src, page=1):
-    # أحدث الفصول: عرض أول 10 فقط بدون ترقيم صفحات
+    # جلب أول 10 مانجات من API فقط، بدون صفحات
     async with aiohttp.ClientSession() as s:
         d = await api_latest(s, src, 1)
     items = list_of(d)[:10]
     if not items:
-        try: await msg.edit_text("❌ لا توجد فصول حديثة حالياً.")
+        try: await msg.edit_text("❌ لا توجد مانجات حديثة حالياً.")
         except: pass
         return
     extra = [[InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="m")]]
     try:
         await msg.edit_text(
-            f"📖 <b>أحدث 10 فصول</b> | <code>{html.escape(src)}</code>",
+            f"📚 <b>أحدث 10 مانجات ومانهوا</b> | <code>{html.escape(src)}</code>",
             reply_markup=buttons_manga(items, extra),
             parse_mode=ParseMode.HTML)
     except: pass
@@ -533,7 +533,7 @@ async def on_cb(c, q: CallbackQuery):
     if d.startswith("ll:"):
         selected_source = d.split(":", 1)[1]
         set_user(uid, source=selected_source)
-        await q.answer(f"📖 أحدث فصول {selected_source}")
+        await q.answer(f"📚 أحدث المانجات من {selected_source}")
         await render_latest(c, q.message, selected_source, 1)
         return
 
