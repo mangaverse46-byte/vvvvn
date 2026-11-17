@@ -339,7 +339,6 @@ def chapter_page_markup(mid, page, total, murl, extra_top=None):
     if page > 1:
         nav.append(InlineKeyboardButton("⏮ أول صفحة", callback_data=f"cp:{mid}:1"))
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"cp:{mid}:{page-1}"))
-    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="noop"))
     if page < pages:
         nav.append(InlineKeyboardButton("➡️", callback_data=f"cp:{mid}:{page+1}"))
         nav.append(InlineKeyboardButton("آخر صفحة ⏭", callback_data=f"cp:{mid}:{pages}"))
