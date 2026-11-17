@@ -176,16 +176,15 @@ class MangaSource:
         return (info or {}).get("cover_url")
 
 async def create_pdf_from_images(urls, client=None, headers=None):
+    """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
-    import fitz
+    import img2pdf
 
-    # Accept either a flat list (one chapter) or nested lists (multiple chapters).
     if urls and isinstance(urls[0], (list, tuple)):
         chapter_groups = [list(group) for group in urls if group]
     else:
         chapter_groups = [list(urls or [])]
 
-    # Flatten while preserving the original chapter and page order.
     indexed_urls = [
         (chapter_index, image_index, url)
         for chapter_index, group in enumerate(chapter_groups)
@@ -198,11 +197,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     timeout = aiohttp.ClientTimeout(total=90, connect=20)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
     connector = aiohttp.TCPConnector(
-        limit=WORKERS,
-        limit_per_host=WORKERS,
-        ttl_dns_cache=300,
-        keepalive_timeout=30,
-        enable_cleanup_closed=True,
+        limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
+        keepalive_timeout=30, enable_cleanup_closed=True,
     )
     semaphore = asyncio.Semaphore(WORKERS)
     downloaded = [None] * len(indexed_urls)
@@ -239,36 +235,39 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
         )
 
-    doc = fitz.open()
+    # Manga engine image URLs are expected to be JPEG. img2pdf also supports
+    # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
+    candidates = []
     for position, blob in enumerate(downloaded):
         if not blob:
             continue
+        supported = (
+            blob.startswith(b"\xff\xd8\xff")
+            or blob.startswith(b"\x89PNG\r\n\x1a\n")
+            or blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+            or blob.startswith((b"II*\x00", b"MM\x00*"))
+        )
+        if supported:
+            candidates.append((position, blob))
+        else:
+            print(f"⚠️ skipped unsupported image format {position + 1}")
+
+    if not candidates:
+        return None
+
+    # Validate each candidate separately; a corrupt page will not cancel the chapter.
+    valid = []
+    for position, blob in candidates:
         try:
-            pix = fitz.Pixmap(stream=blob)
-            iw, ih = pix.width, pix.height
-            pix = None
-            if iw <= 0 or ih <= 0:
-                continue
-            page_w, page_h = (842.0, 595.0) if iw > ih else (595.0, 842.0)
-            scale = min(page_w / iw, page_h / ih)
-            w, h = iw * scale, ih * scale
-            page = doc.new_page(width=page_w, height=page_h)
-            rect = fitz.Rect(
-                (page_w - w) / 2,
-                (page_h - h) / 2,
-                (page_w + w) / 2,
-                (page_h + h) / 2,
-            )
-            page.insert_image(rect, stream=blob, keep_proportion=True)
+            img2pdf.convert(BytesIO(blob))
+            valid.append(blob)
         except Exception as exc:
             print(f"⚠️ skipped invalid image {position + 1}: {exc}")
 
-    if not doc.page_count:
-        doc.close()
+    if not valid:
         return None
 
-    result = doc.tobytes(garbage=3, deflate=False)
-    doc.close()
+    result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
     buf = BytesIO(result)
     buf.name = "manga.pdf"
     buf.seek(0)
