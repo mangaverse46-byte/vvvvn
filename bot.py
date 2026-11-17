@@ -3003,3 +3003,6 @@ if __name__ == "__main__":
                 print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
         asyncio.create_task(periodic_check())
         asyncio.create_task(auto_backup_task())
+        await idle()
+
+    asyncio.run(_bootstrap())
