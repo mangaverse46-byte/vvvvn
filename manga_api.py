@@ -196,30 +196,59 @@ def get_all_latest():
 async def create_pdf_from_images(urls, client=None, headers=None):
     import aiohttp
     import fitz
-    sem = asyncio.Semaphore(WORKERS)
+
+    # A flat URL list means one chapter. A nested list means one URL group
+    # (chapter) per ClientSession, reusing that session for every image.
+    if urls and isinstance(urls[0], (list, tuple)):
+        chapter_groups = [list(group) for group in urls if group]
+    else:
+        chapter_groups = [list(urls or [])]
+
     timeout = aiohttp.ClientTimeout(total=60, connect=15)
-    connector = aiohttp.TCPConnector(limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300, keepalive_timeout=30, enable_cleanup_closed=True)
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}) as session:
-        async def fetch(url):
-            async with sem:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 429:
-                                retry = response.headers.get("Retry-After", "2")
-                                try: delay = min(20, max(1, int(retry)))
-                                except Exception: delay = 2
-                                await asyncio.sleep(delay)
-                                continue
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    return data
-                    except Exception:
-                        if attempt < 3:
-                            await asyncio.sleep(0.5 * (attempt + 1))
-                return None
-        blobs = await asyncio.gather(*(fetch(url) for url in urls))
+    request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    blobs = []
+
+    async def download_chapter(chapter_urls):
+        sem = asyncio.Semaphore(WORKERS)
+        connector = aiohttp.TCPConnector(
+            limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
+            keepalive_timeout=30, enable_cleanup_closed=True
+        )
+        chapter_blobs = []
+        # Exactly one HTTP session per chapter; all its images share it.
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector, headers=request_headers
+        ) as session:
+            async def fetch(url):
+                async with sem:
+                    for attempt in range(4):
+                        try:
+                            async with session.get(url, allow_redirects=True) as response:
+                                if response.status == 429:
+                                    retry = response.headers.get("Retry-After", "2")
+                                    try:
+                                        delay = min(20, max(1, int(retry)))
+                                    except Exception:
+                                        delay = 2
+                                    await asyncio.sleep(delay)
+                                    continue
+                                if response.status == 200:
+                                    data = await response.read()
+                                    if data and len(data) > 100:
+                                        return data
+                        except Exception:
+                            if attempt < 3:
+                                await asyncio.sleep(0.5 * (attempt + 1))
+                    return None
+
+            chapter_blobs = await asyncio.gather(*(fetch(url) for url in chapter_urls))
+        return chapter_blobs
+
+    # Process chapters in order; this avoids multiplying concurrency by
+    # opening many chapter sessions at the same time.
+    for chapter_urls in chapter_groups:
+        blobs.extend(await download_chapter(chapter_urls))
+
     doc = fitz.open()
     for blob in blobs:
         if not blob:
