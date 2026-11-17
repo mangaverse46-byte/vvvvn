@@ -497,7 +497,8 @@ def save_settings():
         c = _conn()
         for k, v in settings.items():
             c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v, ensure_ascii=False)))
-        c.commit()settings = load_settings()
+        c.commit()
+settings = load_settings()
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
 save_settings()
