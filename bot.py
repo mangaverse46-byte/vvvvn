@@ -12,7 +12,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQ
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import MessageNotModified
 import gc
-from manga_api import StarzManga, MeshManga, AzoraFly, LavaScans, download_images_parallel
+from manga_api import get_sources, get_source, get_source_ids, source_code, source_from_code, get_all_latest, download_images_parallel
 PDF_MAX_CHAPTERS = 10
 
 def install_package(p):
@@ -764,14 +764,10 @@ set_notify_callback(_send_renewal_notify)
 def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
     per=10; total=math.ceil(len(chs)/per) if len(chs)>0 else 1; s=page*per
     cur=chs[s:s+per]; kb,row=[],[]
-    src_short = {"mangalik":"m","mesh":"e","azora":"a","lavascans":"l"}.get(src,"m")
+    src_short = source_code(src)
     for i,ch in enumerate(cur):
         idx=s+i
-        if src=="mangalik": d=ch.get('num_str','?') if ch.get('is_numeric') else ch.get('title','')[:4]
-        elif src=="mesh": d=ch.get('display_text','?')
-        elif src=="azora": d=ch.get('number','?')
-        elif src=="lavascans": d=ch.get('num_str','?') if ch.get('is_numeric') else ch.get('title','')[:4]
-        else: continue
+        d = str(ch.get("display_text") or ch.get("number") or ch.get("num_str") or ch.get("title") or "?")[:12]
         row.append(InlineKeyboardButton(f"📖 {d}",callback_data=f"ch_{src_short}_{idx}"))
         if len(row)==4: kb.append(row); row=[]
     if row: kb.append(row)
@@ -906,7 +902,32 @@ async def check_subscription_and_continue(client,cb,pending=None):
 app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
 
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
-    await client.send_message(cid, "⚠️ روابط المانجا معطلة بعد إزالة مصادر وواجهات API.")
+    src = source_from_code(src_short)
+    if not src:
+        await client.send_message(cid, "⚠️ هذا المصدر لم يعد متاحاً.")
+        return
+    try:
+        api = await asyncio.to_thread(get_source, src)
+        manga_url = unquote(str(ident))
+        info = await asyncio.to_thread(api.get_details, manga_url)
+        if not info:
+            await client.send_message(cid, "❌ تعذر جلب معلومات المانجا."); return
+        chapters = info.get("chapters", [])
+        if not chapters:
+            await client.send_message(cid, "❌ لا توجد فصول."); return
+        title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
+        async def pdf(ch):
+            urls = await asyncio.to_thread(api.get_chapter_images, ch)
+            return await download_images_parallel(urls, client=client)
+        user_data[uid] = {"chapters": chapters, "title": title, "identifier": info.get("id") or manga_url,
+            "page": 0, "source": src, "create_pdf_func": pdf, "manga_url": manga_url,
+            "cover_url": info.get("cover_url"), "genres": info.get("genres", []), "kind": info.get("kind", "")}
+        cap = f"**{title}**\n\n{(info.get('description') or '')[:300]}\n\n📖 **{len(chapters)} فصل**"
+        user_data[uid]["base_caption"] = cap
+        markup,_,_ = create_chapters_markup(chapters, 0, user_data[uid]["identifier"], src, uid)
+        await client.send_message(cid, cap, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await client.send_message(cid, f"❌ تعذر فتح المانجا: {str(e)[:180]}")
 
 async def send_message_with_image(client,cid,text,key,markup=None):
     img=settings.get(key)
@@ -1105,7 +1126,7 @@ async def latest_manga_refresh_task():
     global latest_manga_cache
     while True:
         try:
-            latest_manga_cache = await asyncio.to_thread(StarzManga.get_latest_updates)
+            latest_manga_cache = await asyncio.to_thread(get_all_latest)
             print("🔥 تم تحديث قائمة أحدث المانجا:", len(latest_manga_cache))
         except Exception as e:
             print("⚠️ latest refresh:", e)
@@ -1213,10 +1234,19 @@ async def search_cmd(client,message):
         await message.reply_text("🔍 اكتب اسم المانجا بعد الأمر، مثال:\n/search Solo Leveling")
         return
     user_data.setdefault(uid, {})["search_query"] = query
-    rows = [[InlineKeyboardButton("📚 MangaLik", callback_data="src_mangalik")],
-            [InlineKeyboardButton("📖 Mesh", callback_data="src_mesh"), InlineKeyboardButton("✨ Azora", callback_data="src_azora")],
-            [InlineKeyboardButton("🌋 Lava", callback_data="src_lavascans")],
-            [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
+    try:
+        sources = await asyncio.to_thread(get_sources)
+    except Exception as e:
+        await message.reply_text(f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}"); return
+    rows, row = [], []
+    for source in sources:
+        sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
+        row.append(InlineKeyboardButton(label, callback_data=f"src_{sid}"))
+        if len(row) == 2: rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+    if not sources:
+        await message.reply_text("❌ لا توجد مصادر مفعلة داخل المحرك."); return
     await message.reply_text("🔍 اختر المصدر للبحث عن:\n" + query, reply_markup=InlineKeyboardMarkup(rows))
 
 @app.on_message(filters.command("check"))
@@ -1251,8 +1281,7 @@ async def admin_panel(client,message):
 async def unified_callback(client,callback):
     data=callback.data; uid=callback.from_user.id
     cid=callback.message.chat.id; msg=callback.message
-    if data.startswith(("src_","sel_","latest_","cat_","pdfmenu","cp:","p:","fav_open_","merge_")) or data in ("main_categories","latest_manga_list"):
-        await callback.answer("⚠️ تم تعطيل مصادر المانجا وواجهات API.", show_alert=True); return
+
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
         await callback.answer("⚠️ صيانة", show_alert=True); return
     if data=="check_sub":
@@ -1325,7 +1354,7 @@ async def unified_callback(client,callback):
     if data=="latest_manga_list":
         await callback.answer("🔥"); global latest_manga_cache
         if not latest_manga_cache:
-            try: latest_manga_cache = await asyncio.to_thread(StarzManga.get_latest_updates)
+            try: latest_manga_cache = await asyncio.to_thread(get_all_latest)
             except: pass
         if not latest_manga_cache: await safe_edit(msg,"❌"); return
         kb=[]
@@ -1340,7 +1369,7 @@ async def unified_callback(client,callback):
     if data=="main_categories" or data.startswith("cat_pg_"):
         page=0 if data=="main_categories" else int(data.replace("cat_pg_",""))
         await callback.answer("⏳")
-        genres=await asyncio.to_thread(StarzManga.get_genres)
+        genres=await asyncio.to_thread(get_source("mangalik").get_genres)
         if not genres: await safe_edit(msg,"❌"); return
         per=12; tp=math.ceil(len(genres)/per); cur=genres[page*per:(page+1)*per]; kb,row=[],[]
         for i,(n,s) in enumerate(cur):
@@ -1355,11 +1384,11 @@ async def unified_callback(client,callback):
         await safe_edit(msg,f"🏷️ **التصنيفات ({page+1}/{tp})**",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_g_"):
-        idx=int(data[6:]); genres=await asyncio.to_thread(StarzManga.get_genres)
+        idx=int(data[6:]); genres=await asyncio.to_thread(get_source("mangalik").get_genres)
         if not genres or idx>=len(genres): await callback.answer("⚠️",show_alert=True); return
         slug,name=genres[idx][1],genres[idx][0]; await callback.answer("⏳")
         await safe_edit(msg,f"⏳ **{name}**")
-        mangas=await asyncio.to_thread(StarzManga.get_manga_by_genre, slug, 1)
+        mangas=await asyncio.to_thread(get_source("mangalik").get_manga_by_genre, slug, 1)
         if not mangas: await safe_edit(msg,"❌",InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌",callback_data="close_list")]])); return
         kb=[[InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"cat_sel_{idx}_{i}")] for i,(t,u,s) in enumerate(mangas)]
         kb.append([InlineKeyboardButton("🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
