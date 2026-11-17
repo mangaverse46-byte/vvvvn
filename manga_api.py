@@ -175,82 +175,68 @@ class MangaSource:
     def get_cover_image(self, info):
         return (info or {}).get("cover_url")
 
-    async def create_pdf_from_images(self, urls, client=None):
-        return await create_pdf_from_images(urls, client=client)
-
-def get_source(source_id):
-    return MangaSource(source_id)
-
-def get_all_latest():
-    out = []
-    for meta in get_sources():
-        sid = str(meta["id"])
-        try:
-            for item in MangaSource(sid).get_latest_updates():
-                out.append((item.get("title", "Manga"), item.get("url") or "", item.get("id") or "",
-                    item.get("latest_chapter") or item.get("latest") or "", sid))
-        except Exception as exc:
-            print(f"[latest:{sid}] {exc}")
-    return out
-
-async def create_pdf_from_images(urls, client=None, headers=None):
+    async def create_pdf_from_images(urls, client=None, headers=None):
     import aiohttp
     import fitz
 
-    # A flat URL list means one chapter. A nested list means one URL group
-    # (chapter) per ClientSession, reusing that session for every image.
+    # Accept either a flat list (one chapter) or nested lists (multiple chapters).
     if urls and isinstance(urls[0], (list, tuple)):
         chapter_groups = [list(group) for group in urls if group]
     else:
         chapter_groups = [list(urls or [])]
 
+    # Flatten requests while retaining their chapter/image positions.
+    indexed_urls = [
+        (chapter_index, image_index, url)
+        for chapter_index, group in enumerate(chapter_groups)
+        for image_index, url in enumerate(group)
+    ]
+    if not indexed_urls:
+        return None
+
     timeout = aiohttp.ClientTimeout(total=60, connect=15)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
-    blobs = []
+    connector = aiohttp.TCPConnector(
+        limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
+        keepalive_timeout=30, enable_cleanup_closed=True
+    )
+    semaphore = asyncio.Semaphore(WORKERS)
+    downloaded = [None] * len(indexed_urls)
 
-    async def download_chapter(chapter_urls):
-        sem = asyncio.Semaphore(WORKERS)
-        connector = aiohttp.TCPConnector(
-            limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
-            keepalive_timeout=30, enable_cleanup_closed=True
-        )
-        chapter_blobs = []
-        # Exactly one HTTP session per chapter; all its images share it.
-        async with aiohttp.ClientSession(
-            timeout=timeout, connector=connector, headers=request_headers
-        ) as session:
-            async def fetch(url):
-                async with sem:
-                    for attempt in range(4):
-                        try:
-                            async with session.get(url, allow_redirects=True) as response:
-                                if response.status == 429:
-                                    retry = response.headers.get("Retry-After", "2")
-                                    try:
-                                        delay = min(20, max(1, int(retry)))
-                                    except Exception:
-                                        delay = 2
+    async with aiohttp.ClientSession(
+        timeout=timeout, connector=connector, headers=request_headers
+    ) as session:
+        async def fetch(position, url):
+            async with semaphore:
+                for attempt in range(4):
+                    try:
+                        async with session.get(url, allow_redirects=True) as response:
+                            if response.status == 429:
+                                retry = response.headers.get("Retry-After", "2")
+                                try:
+                                    delay = min(20, max(1, int(retry)))
+                                except (TypeError, ValueError):
+                                    delay = 2
+                                if attempt < 3:
                                     await asyncio.sleep(delay)
                                     continue
-                                if response.status == 200:
-                                    data = await response.read()
-                                    if data and len(data) > 100:
-                                        return data
-                        except Exception:
-                            if attempt < 3:
-                                await asyncio.sleep(0.5 * (attempt + 1))
-                    return None
+                            if response.status == 200:
+                                data = await response.read()
+                                if data and len(data) > 100:
+                                    downloaded[position] = data
+                                    return
+                    except Exception:
+                        pass
+                    if attempt < 3:
+                        await asyncio.sleep(0.5 * (attempt + 1))
 
-            chapter_blobs = await asyncio.gather(*(fetch(url) for url in chapter_urls))
-        return chapter_blobs
+        await asyncio.gather(
+            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
+        )
 
-    # Process chapters in order; this avoids multiplying concurrency by
-    # opening many chapter sessions at the same time.
-    for chapter_urls in chapter_groups:
-        blobs.extend(await download_chapter(chapter_urls))
-
+    # gather writes results by original flat index, preserving chapter and page order.
     doc = fitz.open()
-    for blob in blobs:
+    for blob in downloaded:
         if not blob:
             continue
         try:
@@ -270,10 +256,11 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                 page.insert_image(page.rect, stream=blob, keep_proportion=True)
             except Exception:
                 pass
+
     if not doc.page_count:
         doc.close()
         return None
-    # JPEGs are already compressed; deflate=True needlessly recompresses every page and costs CPU.
+    # Source images are already compressed; avoid expensive PDF deflate recompression.
     result = doc.tobytes(garbage=3, deflate=False)
     doc.close()
     buf = BytesIO(result)
