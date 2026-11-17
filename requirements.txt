@@ -1,0 +1,6 @@
+Pyrogram==2.0.106
+TgCrypto
+aiohttp>=3.9,<4
+python-dotenv>=1.0
+Pillow>=10.0
+img2pdf>=0.5
