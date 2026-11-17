@@ -1221,6 +1221,8 @@ async def search_cmd(client,message):
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
+    if not is_admin_any(message.from_user.id):
+        await message.reply_text("⛔ هذا الأمر للأدمن فقط."); return
     await message.reply_text("🔄 جاري فحص الفصول الجديدة...")
     await check_new_chapters()
     await message.reply_text("✅ انتهى فحص المفضلات.")
