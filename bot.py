@@ -2024,7 +2024,7 @@ async def unified_callback(client,callback):
                 if stage == "extract":
                     status = f"📖 **الفصل 1/1 — {disp}**\n🔗 تم استخراج `{image_count}` صورة"
                 else:
-                    status = f"📖 **الفصل 1/1 — {disp}**\n📦 تجهيز PDF من `{image_count}` صورة..."
+                    status = f"📖 **الفصل 1/1 — {disp}**\n📦 تم تجهيز PDF من `{image_count}` صورة"
                 await lm.edit_text(status)
             try: buf=await pdf_func(target, progress=single_progress)
             except Exception as e: print(f"⚠️ {e}"); buf=None
@@ -2998,4 +2998,3 @@ if __name__ == "__main__":
                 print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
         asyncio.create_task(periodic_check())
         asyncio.create_task(auto_backup_task())
-        asyncio.create_task(latest_manga_refresh_task())
