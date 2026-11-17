@@ -1276,7 +1276,7 @@ async def unified_callback(client,callback):
         await msg.reply_text(
             f"❓ **مساعدة**\n\n🔍 `/search الاسم`\n📚 4 مصادر\n\n"
             f"📖 فردي: `{settings.get('daily_reward_amount',100)}`\n🧩 دمج: `{settings.get('merge_daily_limit',50)}`\n"
-            f"📎 حد الملف: `{settings.get('merge_max_per_file',10)}`\n"
+            f"📎 حد الملف: `{PDF_MAX_CHAPTERS}`\n"
             f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
             f"👑 VIP: بلا حدود",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
@@ -1324,9 +1324,14 @@ async def unified_callback(client,callback):
             try: latest_manga_cache = await asyncio.to_thread(StarzManga.get_latest_updates)
             except: pass
         if not latest_manga_cache: await safe_edit(msg,"❌"); return
-        kb=[[InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"latest_{i}")] for i, (t,u,s) in enumerate(latest_manga_cache)]
+        kb=[]
+        for i,item in enumerate(latest_manga_cache):
+            t,u,slug=item[:3]
+            ch=item[3] if len(item)>3 else ""
+            label=f"📖 {t[:32]}" + (f" — {str(ch)[:12]}" if ch else "")
+            kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
         kb.append([InlineKeyboardButton("🔄 تحديث",callback_data="latest_manga_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-        await safe_edit(msg,"🔥 **أحدث المانجا:**",InlineKeyboardMarkup(kb)); return
+        await safe_edit(msg,"🔥 **أحدث الفصول والمانجا:**",InlineKeyboardMarkup(kb)); return
 
     if data=="main_categories" or data.startswith("cat_pg_"):
         page=0 if data=="main_categories" else int(data.replace("cat_pg_",""))
@@ -1783,14 +1788,14 @@ async def unified_callback(client,callback):
             user_data[uid]["gift_expiry_unit"]="minutes"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
             await msg.reply_text("⏱️ **الدقائق:**\nمثال: `30`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏱️"); return
         if data=="admin_merge_counters":
-            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{settings.get('merge_max_per_file',10)}`",
+            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{PDF_MAX_CHAPTERS}`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
             await callback.answer("🧮"); return
         if data=="admin_edit_merge_limit":
             await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_daily_limit',50)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_limit":True}; await callback.answer("✏️"); return
         if data=="admin_edit_merge_max":
-            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_max_per_file',10)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{PDF_MAX_CHAPTERS}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_max":True}; await callback.answer("✏️"); return
         if data=="admin_edit_daily_amount":
             await msg.delete(); await msg.reply_text(f"✏️ الحالي: `{settings.get('daily_reward_amount',100)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
@@ -2473,7 +2478,34 @@ async def handle_documents(client,message):
     user_data.pop(uid, None)
 
 async def check_new_chapters():
-    return
+    source_classes = {"mangalik": StarzManga, "mesh": MeshManga, "azora": AzoraFly, "lavascans": LavaScans}
+    for uid in get_all_user_ids():
+        if not is_notifications_enabled(uid):
+            continue
+        for fav in get_fav_items(uid):
+            if not fav.get("notify", True):
+                continue
+            cls = source_classes.get(fav.get("source"))
+            if not cls:
+                continue
+            try:
+                info = await asyncio.to_thread(cls.get_details, fav.get("manga_url") or fav.get("identifier"))
+                chapters = (info or {}).get("chapters") or []
+                if not chapters:
+                    continue
+                latest = str(chapters[0].get("title") or chapters[0].get("number") or "")
+                previous = str(fav.get("last_chapter") or "")
+                if not latest:
+                    continue
+                if previous and previous != "0" and latest != previous:
+                    try:
+                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\\n\\n📚 " + fav.get("title", "مانجا") + "\\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
+                    except Exception:
+                        pass
+                if latest != previous:
+                    set_fav_last_chapter(uid, fav["identifier"], fav["source"], latest)
+            except Exception as e:
+                print("⚠️ chapter check:", e)
 
 async def check_vip_expiry():
     for u in get_expired_vips():
