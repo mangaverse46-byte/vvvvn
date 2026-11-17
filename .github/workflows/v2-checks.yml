@@ -1,0 +1,23 @@
+name: Manga Virus v2 checks
+
+on:
+  push:
+    branches: ["rewrite/v2-clean-architecture"]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Python modules
+        run: python -m compileall -q mangavirus bot.py
+      - name: Check required project files
+        run: |
+          test -f requirements.txt
+          test -f .env.example
+          test -f mangavirus/main.py
+          test -f mangavirus/database.py
