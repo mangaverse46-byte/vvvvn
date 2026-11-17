@@ -1,0 +1,6 @@
+# Python 3.11+
+Pyrogram==2.0.106
+aiohttp>=3.9,<4
+img2pdf>=0.6.0
+Pillow>=10.0
+cloudscraper>=1.2.71
