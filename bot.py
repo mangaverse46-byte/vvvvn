@@ -1413,7 +1413,7 @@ async def unified_callback(client,callback):
                 if not chs: await safe_edit(msg,"❌"); return
                 t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
                 cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
-                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
+                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch),client=_c)
                 ik=ident; murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
             elif src=="lavascans":
                 murl=None
@@ -1517,13 +1517,13 @@ async def unified_callback(client,callback):
                 d=dd.get('story','')[:300]+"..." if dd else ''
                 cover=MeshManga.get_cover_image(dd) if dd else None
                 murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
-                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
+                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch),client=_c)
             elif src=="azora":
                 info=await asyncio.to_thread(AzoraFly.get_details, ident); chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
                 if not info or not chs: await safe_edit(msg,"❌"); return
                 t=clean_manga_title(info.get('name',''),ident); d=info.get('description','')[:300]+"..."
                 cover=info.get('cover_url'); murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
-                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
+                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch),client=_c)
             elif src=="lavascans":
                 murl=user_data.get(uid,{}).get('manga_url') or f"{LavaScans.BASE}manga/{ident}/"
                 chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
@@ -2144,7 +2144,7 @@ async def handle_all_text(client,message):
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
         if not selected: await message.reply_text(f"❌ لا فصول"); return
-        count = len(selected); mmax = settings.get("merge_max_per_file", 10)
+        count = len(selected); mmax = PDF_MAX_CHAPTERS
         if count > mmax: await message.reply_text("❌ الحد الأقصى 10 فصول في ملف PDF واحد"); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
@@ -2163,7 +2163,7 @@ async def handle_all_text(client,message):
                 try:
                     urls = []
                     if src == "mangalik": urls = await asyncio.to_thread(StarzManga.get_chapter_images, ch['url'])
-                    elif src == "mesh": urls = await asyncio.to_thread(MeshManga.get_chapter_images, ch['id'])
+                    elif src == "mesh": urls = await asyncio.to_thread(MeshManga.get_chapter_images, ch)
                     elif src == "azora": urls = await asyncio.to_thread(AzoraFly.get_chapter_images, ch)
                     elif src == "lavascans": urls = await asyncio.to_thread(LavaScans.get_chapter_images, ch['url'])
                     if urls: all_urls.extend(urls)
