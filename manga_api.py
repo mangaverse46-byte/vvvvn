@@ -9,7 +9,7 @@ from io import BytesIO
 
 API = "https://pixelflow-callback-harbor.lovable.app/api/public/manga"
 API_IMAGE = "https://pixelflow-callback-harbor.lovable.app/api/public/image"
-WORKERS = 15
+WORKERS = 24
 _SOURCE_CACHE = []
 _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 
@@ -198,7 +198,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     import fitz
     sem = asyncio.Semaphore(WORKERS)
     timeout = aiohttp.ClientTimeout(total=60, connect=15)
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}) as session:
+    connector = aiohttp.TCPConnector(limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300, keepalive_timeout=30, enable_cleanup_closed=True)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}) as session:
         async def fetch(url):
             async with sem:
                 for attempt in range(4):
@@ -243,7 +244,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not doc.page_count:
         doc.close()
         return None
-    result = doc.tobytes(garbage=4, deflate=True)
+    # JPEGs are already compressed; deflate=True needlessly recompresses every page and costs CPU.
+    result = doc.tobytes(garbage=3, deflate=False)
     doc.close()
     buf = BytesIO(result)
     buf.name = "manga.pdf"
