@@ -1193,6 +1193,7 @@ def create_fav_list_markup(uid):
 
 def _download_image_cloudscraper(url, referer, base_headers):
     """Synchronous fallback; always call this through asyncio.to_thread."""
+    import cloudscraper
     cs = cloudscraper.create_scraper()
     headers = dict(base_headers)
     if referer:
