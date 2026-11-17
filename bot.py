@@ -2156,17 +2156,22 @@ async def handle_all_text(client,message):
             user_data[uid].pop('awaiting_merge_range', None)
             title = user_data[uid].get('title', 'مانجا')
             lm = await message.reply_text(f"🧩 `{start_num:g} → {end_num:g}` ({count})\n⏳")
-            all_urls = []
+            chapter_groups = []
+            total_images = 0
             api = await asyncio.to_thread(get_source,src)
             for idx,ch in enumerate(selected,1):
                 try:
                     urls=await asyncio.to_thread(api.get_chapter_images,ch)
-                    if urls: all_urls.extend(urls)
-                    if idx % 2 == 0 or idx == count: await lm.edit_text(f"🧩 `{idx}/{count}` — `{len(all_urls)}` صورة")
+                    if urls:
+                        chapter_groups.append(urls)
+                        total_images += len(urls)
+                    if idx % 2 == 0 or idx == count:
+                        await lm.edit_text(f"🧩 `{idx}/{count}` — `{total_images}` صورة")
                 except Exception as e: print(f"⚠️ [{src}] {e}")
-            if not all_urls: refund_merge(uid,count); await lm.edit_text("❌ لم يستخرج المحرك صور الفصول"); return
-            await lm.edit_text(f"🧩 إنشاء PDF من `{len(all_urls)}` صورة...")
-            buf = await download_images_parallel(all_urls,client=client)
+            if not chapter_groups: refund_merge(uid,count); await lm.edit_text("❌ لم يستخرج المحرك صور الفصول"); return
+            await lm.edit_text(f"🧩 إنشاء PDF من `{total_images}` صورة...")
+            # Nested lists preserve chapter boundaries: one HTTP session per chapter.
+            buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌"); return
             increment_download_count(uid); await lm.edit_text("📤")
             safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()[:50] or "manga"
