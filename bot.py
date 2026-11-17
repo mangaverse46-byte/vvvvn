@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
-import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets
+import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib
 import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
@@ -792,6 +792,20 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
     kb.append([InlineKeyboardButton("🔄 تحديث",callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
     return InlineKeyboardMarkup(kb),page,total
 
+def pack_share_url(url):
+    raw = zlib.compress(str(url).encode("utf-8"), 9)
+    return "z" + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+def unpack_share_url(token):
+    if str(token).startswith("z"):
+        value = str(token)[1:]
+        value += "=" * (-len(value) % 4)
+        try:
+            return zlib.decompress(base64.urlsafe_b64decode(value.encode("ascii"))).decode("utf-8")
+        except Exception:
+            pass
+    return unquote(str(token))
+
 def create_fav_list_markup(uid):
     favs=get_favorites(uid); n=is_notifications_enabled(uid)
     tt="🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة"
@@ -1191,7 +1205,7 @@ async def start_cmd(client,message):
         elif pl.startswith("show_"):
             parts = pl[5:].split("_", 1)
             if len(parts) == 2:
-                show_data = {'src': parts[0], 'ident': unquote(parts[1])}
+                show_data = {'src': parts[0], 'ident': unpack_share_url(parts[1])}
     if is_new and ref_owner and already_referred(uid) is None:
         add_referral(ref_owner,uid); user_data.setdefault(uid,{})["pending_referral_owner"]=ref_owner
     if is_new:
@@ -1473,7 +1487,8 @@ async def unified_callback(client,callback):
         if not ident:
             await callback.answer("⚠️ لا توجد بيانات، افتح المانجا أولاً", show_alert=True)
             return
-        share_url = f"https://t.me/{BOT_USERNAME}?start=show_{src_short}_{quote(str(ident), safe='')}"
+        share_token = pack_share_url(ident)
+        share_url = f"https://t.me/{BOT_USERNAME}?start=show_{src_short}_{share_token}"
         txt = (
             f"🔗 **رابط مشاركة المانجا**\n\n"
             f"📚 **{title}**\n\n"
