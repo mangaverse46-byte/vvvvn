@@ -1,0 +1,3337 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
+
+import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets
+import asyncio, aiohttp, cloudscraper, requests
+import zipfile, threading, tempfile
+from datetime import datetime
+from bs4 import BeautifulSoup
+from urllib.parse import quote, urljoin, unquote
+from pyrogram import Client, filters, idle
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.enums import ParseMode, ChatMemberStatus
+from pyrogram.errors import MessageNotModified
+import gc
+
+def install_package(p):
+    try: subprocess.check_call([sys.executable,"-m","pip","install",p,"--quiet"]); return True
+    except: return False
+def ensure_installed(p):
+    if importlib.util.find_spec(p) is None:
+        print(f"📦 {p}..."); install_package(p)
+for pkg in ["pyrogram","cloudscraper","beautifulsoup4","requests","aiohttp","img2pdf"]:
+    ensure_installed(pkg)
+import img2pdf
+
+API_ID = 5442915
+API_HASH = "b6a556aba92ae96f271b936cacd930a6"
+BOT_TOKEN = "8812455288:AAFDdZveDQX6RFI6PqSpsGtAKpDiqzPWbK0"
+OWNER_ID = 8926481513
+ADMINS = [OWNER_ID]; OWNER_IDS = [OWNER_ID]
+MAX_WORKERS = 15
+CHECK_INTERVAL = 15*60
+BACKUP_INTERVAL = 24*3600
+VIP_PLANS = {"weekly":7*24*3600,"monthly":30*24*3600,"yearly":365*24*3600}
+VIP_PLAN_NAMES = {"weekly":"أسبوعي","monthly":"شهري","yearly":"سنوي"}
+IMAGE_API_URL = "https://pixelflow-callback-harbor.lovable.app/api/public/convert"
+PDF_WIDTH = 600; JPEG_QUALITY = 80; API_BATCH_SIZE = 10; API_TIMEOUT = 120; API_CONCURRENCY = 3
+
+BACKUP_DIR="backups"; os.makedirs(BACKUP_DIR,exist_ok=True)
+user_data={}; BOT_USERNAME=None; latest_manga_cache=[]
+active_downloads = set(); active_downloads_lock = threading.Lock()
+def try_lock_download(uid):
+    with active_downloads_lock:
+        if uid in active_downloads: return False
+        active_downloads.add(uid); return True
+def unlock_download(uid):
+    with active_downloads_lock: active_downloads.discard(uid)
+def is_downloading(uid):
+    with active_downloads_lock: return uid in active_downloads
+
+class FakeCallback:
+    def __init__(self, user, message, data):
+        self.from_user = user; self.message = message; self.data = data
+        self.id = ""; self.chat_instance = ""
+    async def answer(self, *args, **kwargs): return None
+
+async def _reopen_admin_page(client, uid, msg, cb_data):
+    fake = FakeCallback(type('U',(),{'id':uid,'username':None,'first_name':'','last_name':''})(), msg, cb_data)
+    try: await unified_callback(client, fake)
+    except Exception as e: print(f"⚠️ reopen: {e}")
+
+# ============ SQLite ============
+DB_PATH = "bot.db"; _local = threading.local(); _write_lock = threading.Lock()
+def _conn():
+    if not hasattr(_local, "conn"):
+        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA busy_timeout=30000"); c.row_factory = sqlite3.Row
+        _local.conn = c
+    return _local.conn
+def _execute(sql, params=()):
+    for attempt in range(3):
+        try:
+            with _write_lock:
+                c = _conn(); cur = c.execute(sql, params); c.commit(); return cur
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < 2: time.sleep(0.5)
+            else: raise
+
+def _init_db():
+    c = _conn()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS favorites (uid INTEGER NOT NULL, identifier TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, manga_url TEXT NOT NULL, cover TEXT, last_chapter TEXT, notify INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (uid, identifier, source));
+    CREATE TABLE IF NOT EXISTS fav_settings (uid INTEGER PRIMARY KEY, notifications_enabled INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS daily_usage (uid INTEGER PRIMARY KEY, last_reset REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0, bonus INTEGER NOT NULL DEFAULT 0, reset_expires REAL NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS vip_users (uid INTEGER PRIMARY KEY, plan TEXT NOT NULL, started REAL NOT NULL, expires REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS referrals (owner_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, ts REAL NOT NULL, rewarded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (owner_id, referred_id));
+    CREATE TABLE IF NOT EXISTS bots (bid TEXT PRIMARY KEY, token TEXT NOT NULL, name TEXT NOT NULL, target_id INTEGER, added REAL NOT NULL, added_by INTEGER, last_sent REAL NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS admins (uid INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS banned (uid INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS complaints (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, username TEXT, first_name TEXT, text TEXT NOT NULL, ts REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS download_stats (id INTEGER PRIMARY KEY CHECK (id = 1), total_downloads INTEGER NOT NULL DEFAULT 0);
+    INSERT OR IGNORE INTO download_stats (id, total_downloads) VALUES (1, 0);
+    """)
+    cols = [r["name"] for r in c.execute("PRAGMA table_info(daily_usage)").fetchall()]
+    if "merge_used" not in cols: c.execute("ALTER TABLE daily_usage ADD COLUMN merge_used INTEGER NOT NULL DEFAULT 0")
+    if "merge_bonus" not in cols: c.execute("ALTER TABLE daily_usage ADD COLUMN merge_bonus INTEGER NOT NULL DEFAULT 0")
+    if "single_reset_at" not in cols: c.execute("ALTER TABLE daily_usage ADD COLUMN single_reset_at REAL NOT NULL DEFAULT 0")
+    if "merge_reset_at" not in cols: c.execute("ALTER TABLE daily_usage ADD COLUMN merge_reset_at REAL NOT NULL DEFAULT 0")
+    c.execute("""CREATE TABLE IF NOT EXISTS gift_links (
+        code TEXT PRIMARY KEY, single_amount INTEGER NOT NULL, merge_amount INTEGER NOT NULL,
+        max_users INTEGER NOT NULL, used_count INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS gift_claims (
+        code TEXT NOT NULL, uid INTEGER NOT NULL, claimed_at REAL NOT NULL,
+        PRIMARY KEY (code, uid))""")
+    c.commit()
+    gift_cols = [r["name"] for r in c.execute("PRAGMA table_info(gift_links)").fetchall()]
+    for col, ddl in [("allowed_users","TEXT DEFAULT NULL"),("channel_id","TEXT DEFAULT NULL"),
+                     ("channel_message_id","INTEGER DEFAULT NULL"),("post_enabled","INTEGER DEFAULT 0"),
+                     ("post_interval_hours","INTEGER DEFAULT 2"),("next_post_at","REAL DEFAULT 0"),
+                     ("delete_scheduled_at","REAL DEFAULT 0"),("post_mode","TEXT DEFAULT 'auto'")]:
+        if col not in gift_cols: c.execute(f"ALTER TABLE gift_links ADD COLUMN {col} {ddl}")
+    c.commit()
+_init_db()
+
+REQUIRED_TABLES = {'users','settings','favorites','daily_usage','vip_users','referrals','bots','admins','banned','complaints','download_stats','fav_settings','gift_links','gift_claims'}
+def _validate_db_file(path):
+    if not os.path.exists(path): return False, "الملف غير موجود"
+    if os.path.getsize(path) < 4096: return False, "الملف تالف"
+    try:
+        c = sqlite3.connect(path)
+        try: tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        finally: c.close()
+        missing = REQUIRED_TABLES - tables
+        if missing: return False, f"ناقصة: {', '.join(sorted(missing))}"
+        return True, None
+    except Exception as e: return False, f"تالف: {e}"
+
+# ============ Settings ============
+DEFAULTS = {
+    "welcome_message":"🌟 **مرحباً بك في بوت المانجا** 🌟\n\n📖 اختر من الأزرار أدناه:",
+    "bdf_image":None,"welcome_image":None,"favorites_image":None,"results_image":None,"sources_image":None,
+    "force_sub_channels":[],"force_sub_message":"⚠️ **يجب الاشتراك في القنوات أولاً**\n\nاشترك ثم اضغط تحقق ✅",
+    "force_sub_image":None,"force_sub_buttons":{},
+    "daily_reward_amount":100,"daily_reward_interval":86400,"merge_daily_limit":50,"merge_max_per_file":10,
+    "single_caption":"**[ Ch {chapter} ] {title}**\n@T7T0K_bot",
+    "vip_contact_second":None,"allow_parallel_downloads":False,
+    "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
+}
+def load_settings():
+    s = dict(DEFAULTS)
+    for row in _conn().execute("SELECT key, value FROM settings").fetchall():
+        try: s[row["key"]] = json.loads(row["value"])
+        except: pass
+    return s
+def save_settings():
+    with _write_lock:
+        c = _conn()
+        for k, v in settings.items():
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v, ensure_ascii=False)))
+        c.commit()
+settings = load_settings()
+for k, v in DEFAULTS.items():
+    if k not in settings: settings[k] = v
+save_settings()
+NEW_SINGLE_CAPTION = DEFAULTS["single_caption"]
+
+# ============ Users ============
+def add_user(uid):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn()
+        if c.execute("SELECT 1 FROM users WHERE uid=?", (u,)).fetchone(): return False
+        c.execute("INSERT INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time())); c.commit(); return True
+def get_users_count(): return _conn().execute("SELECT COUNT(*) FROM users").fetchone()[0]
+def get_all_user_ids(): return [r["uid"] for r in _conn().execute("SELECT uid FROM users").fetchall()]
+def get_user_downloads(uid):
+    try: u = int(uid)
+    except: return 0
+    row = _conn().execute("SELECT downloads FROM users WHERE uid=?", (u,)).fetchone()
+    return row["downloads"] if row else 0
+def get_user_joined(uid):
+    try: u = int(uid)
+    except: return time.time()
+    row = _conn().execute("SELECT joined FROM users WHERE uid=?", (u,)).fetchone()
+    return row["joined"] if row else time.time()
+def increment_user_downloads(uid):
+    try: u = int(uid)
+    except: return
+    with _write_lock:
+        c = _conn()
+        c.execute("INSERT OR IGNORE INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time()))
+        c.execute("UPDATE users SET downloads = downloads + 1 WHERE uid=?", (u,)); c.commit()
+def increment_download_count(uid=None):
+    _execute("UPDATE download_stats SET total_downloads = total_downloads + 1 WHERE id = 1")
+    if uid is not None: increment_user_downloads(uid)
+def get_download_count():
+    row = _conn().execute("SELECT total_downloads FROM download_stats WHERE id=1").fetchone()
+    return row["total_downloads"] if row else 0
+
+# ============ Favorites ============
+def get_user_favs(uid):
+    try: u = int(uid)
+    except: return {"items": [], "notifications_enabled": True}
+    c = _conn()
+    nr = c.execute("SELECT notifications_enabled FROM fav_settings WHERE uid=?", (u,)).fetchone()
+    if nr is None:
+        _execute("INSERT OR IGNORE INTO fav_settings (uid, notifications_enabled) VALUES (?,1)", (u,)); notif = True
+    else: notif = bool(nr["notifications_enabled"])
+    items = []
+    for r in c.execute("SELECT * FROM favorites WHERE uid=? ORDER BY rowid", (u,)).fetchall():
+        items.append({"identifier": r["identifier"], "source": r["source"], "title": r["title"], "manga_url": r["manga_url"], "cover": r["cover"], "last_chapter": r["last_chapter"], "notify": bool(r["notify"])})
+    return {"items": items, "notifications_enabled": notif}
+def get_fav_items(uid): return get_user_favs(uid).get("items", [])
+def get_favorites(uid): return get_fav_items(uid)
+def set_notifications_enabled(uid, enabled):
+    try: u = int(uid)
+    except: return
+    _execute("INSERT OR REPLACE INTO fav_settings (uid, notifications_enabled) VALUES (?,?)", (u, 1 if enabled else 0))
+def is_notifications_enabled(uid):
+    try: u = int(uid)
+    except: return True
+    row = _conn().execute("SELECT notifications_enabled FROM fav_settings WHERE uid=?", (u,)).fetchone()
+    return bool(row["notifications_enabled"]) if row else True
+def add_to_favorites(uid, title, ident, source, murl, cover, lch=None):
+    try: u = int(uid)
+    except: return False
+    title = clean_manga_title(title, ident)
+    with _write_lock:
+        c = _conn()
+        if c.execute("SELECT 1 FROM favorites WHERE uid=? AND identifier=? AND source=?", (u, ident, source)).fetchone(): return False
+        c.execute("""INSERT INTO favorites (uid, identifier, source, title, manga_url, cover, last_chapter, notify) VALUES (?,?,?,?,?,?,?,1)""", (u, ident, source, title, murl, cover, lch))
+        c.commit(); return True
+def remove_from_favorites(uid, ident, source):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("DELETE FROM favorites WHERE uid=? AND identifier=? AND source=?", (u, ident, source)); c.commit(); return cur.rowcount > 0
+def is_favorite(uid, ident, source):
+    try: u = int(uid)
+    except: return False
+    return _conn().execute("SELECT 1 FROM favorites WHERE uid=? AND identifier=? AND source=?", (u, ident, source)).fetchone() is not None
+def set_fav_notify(uid, ident, source, notify):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("UPDATE favorites SET notify=? WHERE uid=? AND identifier=? AND source=?", (1 if notify else 0, u, ident, source)); c.commit(); return cur.rowcount > 0
+def get_fav_notify(uid, ident, source):
+    try: u = int(uid)
+    except: return True
+    row = _conn().execute("SELECT notify FROM favorites WHERE uid=? AND identifier=? AND source=?", (u, ident, source)).fetchone()
+    return bool(row["notify"]) if row else True
+def set_fav_last_chapter(uid, ident, source, lch):
+    try: u = int(uid)
+    except: return
+    _execute("UPDATE favorites SET last_chapter=? WHERE uid=? AND identifier=? AND source=?", (lch, u, ident, source))
+def cleanup_empty_favorites():
+    with _write_lock:
+        c = _conn(); cur = c.execute("DELETE FROM fav_settings WHERE uid NOT IN (SELECT DISTINCT uid FROM favorites)"); c.commit(); return cur.rowcount
+def count_total_favorites(): return _conn().execute("SELECT COUNT(*) FROM favorites").fetchone()[0]
+
+# ============ Daily Usage ============
+def get_daily_usage(uid):
+    try: u = int(uid)
+    except: return {"last_reset": time.time(), "used": 0, "bonus": 0, "reset_expires": 0, "merge_used": 0, "merge_bonus": 0, "single_reset_at": 0, "merge_reset_at": 0}
+    now = time.time(); c = _conn()
+    row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    if not row:
+        _execute("INSERT INTO daily_usage (uid, last_reset, used, bonus, reset_expires, merge_used, merge_bonus, single_reset_at, merge_reset_at) VALUES (?,?,0,0,0,0,0,0,0)", (u, now))
+        return {"last_reset": now, "used": 0, "bonus": 0, "reset_expires": 0, "merge_used": 0, "merge_bonus": 0, "single_reset_at": 0, "merge_reset_at": 0}
+    if row["reset_expires"] and now >= row["reset_expires"]:
+        _execute("UPDATE daily_usage SET last_reset=?, used=0, bonus=0, reset_expires=0, merge_used=0, merge_bonus=0, single_reset_at=0, merge_reset_at=0 WHERE uid=?", (now, u))
+        _trigger_notify(u, "both"); row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    if row["single_reset_at"] and now >= row["single_reset_at"]:
+        base = settings.get("daily_reward_amount", 100)
+        new_used = max(0, int(row["used"]) - base)
+        _execute("UPDATE daily_usage SET used=?, single_reset_at=0 WHERE uid=?", (new_used, u))
+        _trigger_notify(u, "single"); row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    if row["merge_reset_at"] and now >= row["merge_reset_at"]:
+        mbase = settings.get("merge_daily_limit", 50)
+        new_used = max(0, int(row["merge_used"]) - mbase)
+        _execute("UPDATE daily_usage SET merge_used=?, merge_reset_at=0 WHERE uid=?", (new_used, u))
+        _trigger_notify(u, "merge"); row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    if (not row["merge_reset_at"]) and (not row["reset_expires"] or row["reset_expires"] <= now):
+        mbase_chk = settings.get("merge_daily_limit", 50); mbonus_chk = int(row["merge_bonus"])
+        merge_remaining = (mbase_chk + mbonus_chk) - int(row["merge_used"])
+        if mbase_chk > 0 and 0 <= merge_remaining < 2:
+            interval = settings.get("daily_reward_interval", 86400)
+            _execute("UPDATE daily_usage SET merge_reset_at=? WHERE uid=?", (now + interval, u))
+            row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    if (not row["single_reset_at"]) and (not row["reset_expires"] or row["reset_expires"] <= now):
+        base_chk = settings.get("daily_reward_amount", 100); bonus_chk = int(row["bonus"])
+        single_remaining = (base_chk + bonus_chk) - int(row["used"])
+        if base_chk > 0 and 0 <= single_remaining < 1:
+            interval = settings.get("daily_reward_interval", 86400)
+            _execute("UPDATE daily_usage SET single_reset_at=? WHERE uid=?", (now + interval, u))
+            row = c.execute("SELECT * FROM daily_usage WHERE uid=?", (u,)).fetchone()
+    return {"last_reset": row["last_reset"], "used": row["used"], "bonus": row["bonus"], "reset_expires": row["reset_expires"], "merge_used": row["merge_used"], "merge_bonus": row["merge_bonus"], "single_reset_at": row["single_reset_at"], "merge_reset_at": row["merge_reset_at"]}
+def get_user_base(uid):
+    rec = get_daily_usage(uid)
+    if rec.get("reset_expires", 0) > time.time(): return 0
+    return settings.get("daily_reward_amount", 100)
+def get_daily_remaining(uid):
+    if is_vip(uid): return float("inf")
+    rec = get_daily_usage(uid)
+    return max(0, (get_user_base(uid) + int(rec.get("bonus", 0))) - int(rec.get("used", 0)))
+def add_bonus(uid, amount):
+    try: u = int(uid)
+    except: return
+    get_daily_usage(u); _execute("UPDATE daily_usage SET bonus = bonus + ? WHERE uid=?", (amount, u))
+def refund_chapter(uid):
+    if is_vip(uid): return
+    try: u = int(uid)
+    except: return
+    get_daily_usage(u); _execute("UPDATE daily_usage SET used = MAX(0, used - 1) WHERE uid=?", (u,))
+def try_deduct_chapter(uid, count=1):
+    if is_vip(uid): return True, -1
+    rec = get_daily_usage(uid)
+    base = 0 if rec.get("reset_expires", 0) > time.time() else settings.get("daily_reward_amount", 100)
+    bonus = int(rec.get("bonus", 0)); total = base + bonus
+    remaining = total - int(rec.get("used", 0))
+    if remaining < count: return False, remaining
+    new_used = int(rec.get("used", 0)) + count
+    if base > 0 and new_used >= base and not rec.get("single_reset_at"):
+        interval = settings.get("daily_reward_interval", 86400)
+        _execute("UPDATE daily_usage SET used = ?, single_reset_at = ? WHERE uid=?", (new_used, time.time() + interval, int(uid)))
+    else:
+        _execute("UPDATE daily_usage SET used = ? WHERE uid=?", (new_used, int(uid)))
+    return True, remaining - count
+def get_merge_base(uid):
+    rec = get_daily_usage(uid)
+    if rec.get("reset_expires", 0) > time.time(): return 0
+    return settings.get("merge_daily_limit", 50)
+def get_merge_remaining(uid):
+    if is_vip(uid): return float("inf")
+    rec = get_daily_usage(uid)
+    return max(0, (get_merge_base(uid) + int(rec.get("merge_bonus", 0))) - int(rec.get("merge_used", 0)))
+def add_merge_bonus(uid, amount):
+    try: u = int(uid)
+    except: return
+    get_daily_usage(u); _execute("UPDATE daily_usage SET merge_bonus = merge_bonus + ? WHERE uid=?", (amount, u))
+def refund_merge(uid, count):
+    if is_vip(uid): return
+    try: u = int(uid)
+    except: return
+    get_daily_usage(u); _execute("UPDATE daily_usage SET merge_used = MAX(0, merge_used - ?) WHERE uid=?", (count, u))
+def try_deduct_merge(uid, count=1):
+    if is_vip(uid): return True, -1
+    rec = get_daily_usage(uid)
+    mbase = 0 if rec.get("reset_expires", 0) > time.time() else settings.get("merge_daily_limit", 50)
+    mbonus = int(rec.get("merge_bonus", 0)); total = mbase + mbonus
+    remaining = total - int(rec.get("merge_used", 0))
+    if remaining < count: return False, remaining
+    new_used = int(rec.get("merge_used", 0)) + count
+    new_remaining = total - new_used
+    should_start = ((mbase > 0 and new_used >= mbase) or (new_remaining < 2))
+    if should_start and not rec.get("merge_reset_at"):
+        interval = settings.get("daily_reward_interval", 86400)
+        _execute("UPDATE daily_usage SET merge_used = ?, merge_reset_at = ? WHERE uid=?", (new_used, time.time() + interval, int(uid)))
+    else:
+        _execute("UPDATE daily_usage SET merge_used = ? WHERE uid=?", (new_used, int(uid)))
+    return True, new_remaining
+def reset_user_balance(uid):
+    try: u = int(uid)
+    except: return
+    interval = settings.get("daily_reward_interval", 86400); now = time.time()
+    _execute("""INSERT OR REPLACE INTO daily_usage (uid, last_reset, used, bonus, reset_expires, merge_used, merge_bonus, single_reset_at, merge_reset_at) VALUES (?,?,0,0,?,0,0,0,0)""", (u, now, now + interval))
+def reset_all_balances():
+    interval = settings.get("daily_reward_interval", 86400); now = time.time()
+    with _write_lock:
+        c = _conn(); count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        c.execute("""INSERT OR REPLACE INTO daily_usage (uid, last_reset, used, bonus, reset_expires, merge_used, merge_bonus, single_reset_at, merge_reset_at) SELECT uid, ?, 0, 0, ?, 0, 0, 0, 0 FROM users""", (now, now + interval))
+        c.commit(); return count
+def get_time_until_reset(uid=None, kind="single"):
+    interval = settings.get("daily_reward_interval", 86400); now = time.time()
+    if uid:
+        rec = get_daily_usage(uid)
+        if kind == "single":
+            t_target = rec.get("single_reset_at", 0)
+            if not t_target or t_target <= now: return 0, 0, 0
+        elif kind == "merge":
+            t_target = rec.get("merge_reset_at", 0)
+            if not t_target or t_target <= now: return 0, 0, 0
+        else:
+            re_ = rec.get("reset_expires", 0)
+            t_target = re_ if (re_ and re_ > now) else (rec.get("last_reset", now) + interval)
+        end = t_target
+    else: end = now + interval
+    delta = max(0, end - now); t = int(delta)
+    h, rem = divmod(t, 3600); m, s = divmod(rem, 60); return h, m, s
+
+# ============ VIP ============
+def is_vip(uid):
+    try: u = int(uid)
+    except: return False
+    row = _conn().execute("SELECT expires FROM vip_users WHERE uid=?", (u,)).fetchone()
+    return bool(row and row["expires"] >= time.time())
+def get_vip_info(uid):
+    try: u = int(uid)
+    except: return None
+    row = _conn().execute("SELECT plan, started, expires FROM vip_users WHERE uid=?", (u,)).fetchone()
+    return {"plan": row["plan"], "started": row["started"], "expires": row["expires"]} if row else None
+def add_vip(uid, plan):
+    if plan not in VIP_PLANS: return False
+    try: u = int(uid)
+    except: return False
+    now = time.time()
+    existing = _conn().execute("SELECT expires FROM vip_users WHERE uid=?", (u,)).fetchone()
+    base = existing["expires"] if existing and existing["expires"] > now else now
+    _execute("INSERT OR REPLACE INTO vip_users (uid, plan, started, expires) VALUES (?,?,?,?)", (u, plan, now, base + VIP_PLANS[plan])); return True
+def remove_vip(uid):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("DELETE FROM vip_users WHERE uid=?", (u,)); c.commit(); return cur.rowcount > 0
+def get_all_vips(): return [str(r["uid"]) for r in _conn().execute("SELECT uid FROM vip_users").fetchall()]
+def get_expired_vips(): return [r["uid"] for r in _conn().execute("SELECT uid FROM vip_users WHERE expires < ?", (time.time(),)).fetchall()]
+def extend_all_vips(seconds):
+    now = time.time()
+    with _write_lock:
+        c = _conn(); users = c.execute("SELECT uid FROM users").fetchall(); count = 0
+        for row in users:
+            uid = row["uid"]
+            existing = c.execute("SELECT expires FROM vip_users WHERE uid=?", (uid,)).fetchone()
+            if existing and existing["expires"] > now:
+                c.execute("UPDATE vip_users SET expires = expires + ? WHERE uid=?", (seconds, uid))
+            else:
+                c.execute("INSERT OR REPLACE INTO vip_users (uid, plan, started, expires) VALUES (?,?,?,?)", (uid, "weekly", now, now + seconds))
+            count += 1
+        c.commit(); return count
+
+# ============ Referrals ============
+def already_referred(nid):
+    try: n = int(nid)
+    except: return None
+    row = _conn().execute("SELECT owner_id FROM referrals WHERE referred_id=?", (n,)).fetchone()
+    return str(row["owner_id"]) if row else None
+def add_referral(oid, nid):
+    try: o, n = int(oid), int(nid)
+    except: return
+    _execute("INSERT OR IGNORE INTO referrals (owner_id, referred_id, ts, rewarded) VALUES (?,?,?,0)", (o, n, time.time()))
+def mark_rewarded(oid, nid):
+    try: o, n = int(oid), int(nid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("UPDATE referrals SET rewarded=1 WHERE owner_id=? AND referred_id=? AND rewarded=0", (o, n)); c.commit(); return cur.rowcount > 0
+def get_referral_link(uid):
+    return f"https://t.me/{BOT_USERNAME}?start=ref_{uid}" if BOT_USERNAME else f"https://t.me/?start=ref_{uid}"
+
+# ============ Bots ============
+def add_bot_token(token, name, by, target_id=None):
+    if not re.match(r'^\d{8,12}:[A-Za-z0-9_-]{30,50}$', token): return False, "صيغة خاطئة", None
+    c = _conn()
+    existing = c.execute("SELECT name FROM bots WHERE token=?", (token,)).fetchone()
+    if existing: return False, f"موجود: {existing['name']}", None
+    bid = token.split(":")[0]
+    _execute("""INSERT INTO bots (bid, token, name, target_id, added, added_by, last_sent) VALUES (?,?,?,?,?,?,0)""", (bid, token, name, target_id, time.time(), by))
+    return True, "تم", bid
+def remove_bot_token(bid):
+    with _write_lock:
+        c = _conn(); row = c.execute("SELECT * FROM bots WHERE bid=?", (bid,)).fetchone()
+        if not row: return False, None
+        c.execute("DELETE FROM bots WHERE bid=?", (bid,)); c.commit(); return True, dict(row)
+def get_all_bots():
+    return {r["bid"]: {"token": r["token"], "name": r["name"], "target_id": r["target_id"], "added": r["added"], "added_by": r["added_by"], "last_sent": r["last_sent"]} for r in _conn().execute("SELECT * FROM bots").fetchall()}
+def update_bot_last_sent(bid, ts): _execute("UPDATE bots SET last_sent=? WHERE bid=?", (ts, bid))
+
+# ============ Admins ============
+def add_added_admin(uid):
+    try: u = int(uid)
+    except: return False, "معرّف خاطئ"
+    if u in ADMINS: return False, "أدمن أساسي"
+    with _write_lock:
+        c = _conn()
+        if c.execute("SELECT 1 FROM admins WHERE uid=?", (u,)).fetchone(): return False, "موجود"
+        c.execute("INSERT INTO admins (uid) VALUES (?)", (u,)); c.commit(); return True, "تم"
+def remove_added_admin(uid):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("DELETE FROM admins WHERE uid=?", (u,)); c.commit(); return cur.rowcount > 0
+def get_all_added_admins(): return [r["uid"] for r in _conn().execute("SELECT uid FROM admins").fetchall()]
+def is_added_admin(uid):
+    try: u = int(uid)
+    except: return False
+    return _conn().execute("SELECT 1 FROM admins WHERE uid=?", (u,)).fetchone() is not None
+def is_main_admin(uid): return uid in ADMINS
+def is_admin_any(uid): return uid in ADMINS or is_added_admin(uid)
+
+# ============ Banned ============
+def is_banned(uid):
+    try: u = int(uid)
+    except: return False
+    return _conn().execute("SELECT 1 FROM banned WHERE uid=?", (u,)).fetchone() is not None
+def ban_user(uid):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn()
+        if c.execute("SELECT 1 FROM banned WHERE uid=?", (u,)).fetchone(): return False
+        c.execute("INSERT INTO banned (uid) VALUES (?)", (u,)); c.commit(); return True
+def unban_user(uid):
+    try: u = int(uid)
+    except: return False
+    with _write_lock:
+        c = _conn(); cur = c.execute("DELETE FROM banned WHERE uid=?", (u,)); c.commit(); return cur.rowcount > 0
+def get_all_banned(): return [r["uid"] for r in _conn().execute("SELECT uid FROM banned").fetchall()]
+
+# ============ Complaints ============
+def add_complaint(uid, username, first_name, text):
+    try: u = int(uid)
+    except: return
+    _execute("INSERT INTO complaints (uid, username, first_name, text, ts) VALUES (?,?,?,?,?)", (u, username or "", first_name or "", text, time.time()))
+def get_all_complaints():
+    return [{"uid": r["uid"], "username": r["username"], "first_name": r["first_name"], "text": r["text"], "ts": r["ts"]} for r in _conn().execute("SELECT * FROM complaints ORDER BY id").fetchall()]
+def count_complaints(): return _conn().execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
+def clear_complaints():
+    with _write_lock:
+        c = _conn(); n = c.execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
+        c.execute("DELETE FROM complaints"); c.commit(); return n
+
+# ============ Backup ============
+def backup_to(target_path):
+    if os.path.exists(target_path):
+        try: os.remove(target_path)
+        except: pass
+    src = _conn(); dst = sqlite3.connect(target_path)
+    try:
+        with dst: src.backup(dst)
+    finally: dst.close()
+    ok, err = _validate_db_file(target_path)
+    if not ok:
+        try: os.remove(target_path)
+        except: pass
+        raise RuntimeError(f"فشل: {err}")
+def restore_from(src_path):
+    ok, err = _validate_db_file(src_path)
+    if not ok: raise RuntimeError(f"غير صالح: {err}")
+    if hasattr(_local, "conn"):
+        try: _local.conn.close()
+        except: pass
+        try: del _local.conn
+        except: pass
+    src = sqlite3.connect(src_path); dst = sqlite3.connect(DB_PATH)
+    try:
+        with dst: src.backup(dst)
+    finally: src.close(); dst.close()
+    _conn(); _init_db()
+
+# ============ Gift Links ============
+def create_gift_link(single, merge, max_users, expires_at, created_by, mode='auto'):
+    code = secrets.token_urlsafe(9).replace("-","").replace("_","")[:10]
+    _execute("""INSERT INTO gift_links (code, single_amount, merge_amount, max_users, used_count, created_by, created_at, expires_at, active, post_mode) VALUES (?,?,?,?,0,?,?,?,1,?)""",
+             (code, single, merge, max_users, created_by, time.time(), expires_at, mode))
+    return code
+def get_gift_link(code):
+    row = _conn().execute("SELECT * FROM gift_links WHERE code=? AND active=1", (code,)).fetchone()
+    return dict(row) if row else None
+def get_all_gift_links():
+    return [dict(r) for r in _conn().execute("SELECT * FROM gift_links WHERE active=1 ORDER BY created_at DESC").fetchall()]
+def delete_gift_link(code):
+    with _write_lock:
+        c = _conn(); cur = c.execute("UPDATE gift_links SET active=0 WHERE code=?", (code,)); c.commit(); return cur.rowcount > 0
+def has_claimed_gift(code, uid):
+    return _conn().execute("SELECT 1 FROM gift_claims WHERE code=? AND uid=?", (code, uid)).fetchone() is not None
+def set_gift_allowed_users(code, uids):
+    _execute("UPDATE gift_links SET allowed_users=? WHERE code=?", (json.dumps(uids) if uids else None, code))
+def get_gift_allowed_users(code):
+    row = _conn().execute("SELECT allowed_users FROM gift_links WHERE code=?", (code,)).fetchone()
+    if not row or not row["allowed_users"]: return []
+    try: return json.loads(row["allowed_users"])
+    except: return []
+def clear_gift_allowed_users(code):
+    _execute("UPDATE gift_links SET allowed_users=NULL WHERE code=?", (code,))
+def set_gift_channel(code, channel_id):
+    _execute("UPDATE gift_links SET channel_id=?, channel_message_id=NULL, next_post_at=0, post_enabled=0 WHERE code=?", (channel_id, code))
+def toggle_gift_post(code):
+    row = _conn().execute("SELECT post_enabled, channel_id, post_mode FROM gift_links WHERE code=?", (code,)).fetchone()
+    if not row: return None
+    mode = row["post_mode"] or 'auto'
+    if mode == 'auto' and not row["channel_id"]: return None
+    new_val = 0 if row["post_enabled"] else 1
+    _execute("UPDATE gift_links SET post_enabled=?, next_post_at=0 WHERE code=?", (new_val, code)); return new_val
+def set_gift_interval(code, hours):
+    _execute("UPDATE gift_links SET post_interval_hours=?, next_post_at=0 WHERE code=?", (hours, code))
+def set_gift_post_mode(code, mode):
+    if mode not in ('auto', 'manual'): return False
+    _execute("UPDATE gift_links SET post_mode=?, next_post_at=0 WHERE code=?", (mode, code)); return True
+def claim_gift(code, uid):
+    link = get_gift_link(code)
+    if not link: return 'not_found', None
+    if link.get('allowed_users'):
+        try:
+            if uid not in json.loads(link['allowed_users']): return 'not_allowed', link
+        except: pass
+    if has_claimed_gift(code, uid): return 'already', link
+    if time.time() > link['expires_at']: return 'expired', link
+    if link['used_count'] >= link['max_users']: return 'limit', link
+    if link['single_amount'] > 0: add_bonus(uid, link['single_amount'])
+    if link['merge_amount'] > 0: add_merge_bonus(uid, link['merge_amount'])
+    with _write_lock:
+        c = _conn()
+        c.execute("INSERT OR IGNORE INTO gift_claims (code, uid, claimed_at) VALUES (?,?,?)", (code, uid, time.time()))
+        c.execute("UPDATE gift_links SET used_count = used_count + 1 WHERE code=?", (code,)); c.commit()
+    link = get_gift_link(code); return 'ok', link
+
+async def delete_gift_channel_msg(client, channel_id, message_id):
+    if not channel_id or not message_id: return
+    try: await client.delete_messages(channel_id, message_id)
+    except Exception as e: print(f"⚠️ del msg: {e}")
+
+async def _delayed_gift_delete(client, code, delay=60):
+    _execute("UPDATE gift_links SET delete_scheduled_at=? WHERE code=?", (time.time() + delay, code))
+    await asyncio.sleep(delay)
+    try:
+        row = _conn().execute("SELECT channel_id, channel_message_id FROM gift_links WHERE code=?", (code,)).fetchone()
+        if not row: return
+        if row["channel_message_id"]:
+            await delete_gift_channel_msg(client, row["channel_id"], row["channel_message_id"])
+            _execute("UPDATE gift_links SET channel_message_id=NULL, delete_scheduled_at=0 WHERE code=?", (code,))
+    except Exception as e: print(f"⚠️ delayed: {e}")
+
+async def publish_gift_now(client, admin_uid, code):
+    link = get_gift_link(code)
+    if not link: return False, '⚠️ الرابط غير موجود', None
+    if link['expires_at'] <= time.time(): return False, '⏰ انتهت الصلاحية', None
+    mode = link.get('post_mode') or 'auto'
+    old_code = link['code']; old_mid = link.get('channel_message_id'); old_channel = link.get('channel_id')
+    new_code = secrets.token_urlsafe(9).replace("-","").replace("_","")[:10]
+    _execute("""INSERT INTO gift_links 
+        (code, single_amount, merge_amount, max_users, used_count, created_by, created_at, expires_at, active,
+         allowed_users, channel_id, channel_message_id, post_enabled, post_interval_hours, next_post_at, post_mode)
+        VALUES (?,?,?,?,0,?,?,?,1,?,?,?,?,?,?,?)""",
+        (new_code, link['single_amount'], link['merge_amount'], link['max_users'],
+         link['created_by'], time.time(), link['expires_at'],
+         link.get('allowed_users'), old_channel, None,
+         1 if link.get('post_enabled') else 0,
+         link.get('post_interval_hours') or 2, 0, mode))
+    _execute("DELETE FROM gift_links WHERE code=?", (old_code,))
+    _execute("DELETE FROM gift_claims WHERE code=?", (old_code,))
+    if old_mid and old_channel:
+        try: await client.delete_messages(old_channel, old_mid)
+        except: pass
+    bot_user = BOT_USERNAME or "bot"
+    url = f"https://t.me/{bot_user}?start=gift_{new_code}"
+    interval = link.get('post_interval_hours') or 2
+    if mode == 'manual':
+        try:
+            await client.send_message(admin_uid,
+                f"🎁 **رابط هدية جديد**\n\n🔗 `{url}`\n\n"
+                f"📖 فردي: `{link['single_amount']}`\n🧩 دمج: `{link['merge_amount']}`\n"
+                f"👥 حد: `{link['max_users']}`\n"
+                f"⏰ ينتهي: `{time.strftime('%Y-%m-%d %H:%M', time.localtime(link['expires_at']))}`\n\n"
+                f"💡 انسخ الرابط وانشره:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(url)}&text={quote('🎁 هدية!')}")],
+                    [InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{new_code}")],
+                    [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
+                parse_mode=ParseMode.MARKDOWN)
+            return True, None, new_code
+        except Exception as e: return False, f'فشل: {e}', None
+    if not old_channel:
+        _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
+        return False, '📢 لم تحدد قناة', None
+    parts = ["🎁 **هدية فصول مجانية!**\n"]
+    if link["single_amount"] > 0: parts.append(f"📖 فصول مفردة: **{link['single_amount']}**")
+    if link["merge_amount"] > 0: parts.append(f"🧩 فصول مدمجة: **{link['merge_amount']}**")
+    parts.append(f"\n👥 متبقٍ: `{link['max_users']}`")
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 استلم الآن", url=url)]])
+    try:
+        m = await client.send_message(old_channel, "\n".join(parts), reply_markup=kb,
+                                      parse_mode=ParseMode.MARKDOWN, disable_notification=True)
+    except Exception as e:
+        print(f"⚠️ publish: {e}")
+        _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
+        return False, f'فشل النشر: {e}', None
+    _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.id, time.time() + interval * 3600, new_code))
+    return True, None, new_code
+
+async def _process_gift_claim(client, cid, uid, code):
+    status, link = claim_gift(code, uid)
+    if status == 'ok':
+        parts = ["🎉 **مبروك! حصلت على هدية**\n\n"]
+        if link['single_amount'] > 0: parts.append(f"📖 فصول مفردة: +`{link['single_amount']}`\n")
+        if link['merge_amount'] > 0: parts.append(f"🧩 فصول مدمجة: +`{link['merge_amount']}`\n")
+        await client.send_message(cid, "".join(parts), parse_mode=ParseMode.MARKDOWN)
+        admin_id = link.get('created_by')
+        if admin_id:
+            try:
+                u = await client.get_users(uid); uname = f"@{u.username}" if u.username else (u.first_name or str(uid))
+                await client.send_message(admin_id,
+                    f"🔔 **دخل شخص عبر رابط الهدية**\n\n🔗 `{link['code']}`\n👤 {uname} (`{uid}`)\n"
+                    f"📊 `{link['used_count']}/{link['max_users']}`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{link['code']}")]]),
+                    parse_mode=ParseMode.MARKDOWN)
+            except: pass
+        if link['used_count'] >= link['max_users'] and link.get('channel_message_id'):
+            asyncio.create_task(_delayed_gift_delete(client, code, 60))
+    elif status == 'not_found': await client.send_message(cid, "❌ **رابط غير موجود أو محذوف**", parse_mode=ParseMode.MARKDOWN)
+    elif status == 'not_allowed': await client.send_message(cid, "🔒 **مخصص لمستخدمين معينين**", parse_mode=ParseMode.MARKDOWN)
+    elif status == 'expired':
+        await client.send_message(cid, "⏰ **انتهت مدة الرابط، اسف**", parse_mode=ParseMode.MARKDOWN)
+        if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
+    elif status == 'limit':
+        await client.send_message(cid, "⚠️ **وصل للحد الأقصى، اسف**", parse_mode=ParseMode.MARKDOWN)
+        if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
+    elif status == 'already': await client.send_message(cid, "ℹ️ **استلمت من هذا الرابط مسبقاً**", parse_mode=ParseMode.MARKDOWN)
+
+# ============ أدوات ============
+def clean_url(s):
+    if not s: return s
+    return re.sub(r'\s+','',s).replace('\\','')
+def sort_urls_by_number(urls):
+    def k(u_):
+        fn=u_.split("?")[0].rstrip("/").split("/")[-1]; m=re.search(r'(\d+)',fn); return int(m.group(1)) if m else 999999999
+    seen=set(); uniq=[]
+    for u in urls:
+        if u not in seen: seen.add(u); uniq.append(u)
+    uniq.sort(key=k); return uniq
+def clean_manga_title(title,identifier):
+    if not title: return identifier.replace("-"," ").title()
+    t=title.strip()
+    if t.lower() in ["access denied", "just a moment...", "attention required!", "forbidden", "404 not found", "غير معروف", "lava scans", "lavascans"]:
+        return identifier.replace("-"," ").title()
+    t=re.sub(r'^\s*مانجا\s+','',t); t=re.sub(r'^\s*مانها\s+','',t); t=re.sub(r'^\s*مانهوا\s+','',t)
+    t=re.sub(r'\s+مترجمة\s*$','',t); t=re.sub(r'\s+مترجم\s*$','',t)
+    for p in [r'مانجا\s*(?:اون|ون)\s*لاين',r'(?:اون|ون)\s*لاين',r'اونلاين',r'ونلاين',r'Team-?[Xx]',r'تيم\s*اكس',r'غير معروف', r'lava\s*scans']:
+        t=re.sub(r'\s*[-|•]\s*'+p+r'.*$','',t,flags=re.I).strip(); t=re.sub(p,'',t,flags=re.I).strip()
+    t=re.sub(r'^[\s\-|:•]+','',t); t=re.sub(r'[\s\-|:•]+$','',t)
+    return t.strip() or identifier.replace("-"," ").title()
+def make_quote(text):
+    if not text: return text
+    out=[]
+    for line in text.split("\n"):
+        s=line.rstrip()
+        if not s: out.append(""); continue
+        if s.startswith(">"): out.append(s)
+        else: out.append(f"> {s}")
+    return "\n".join(out)
+def build_caption(template_key,**kwargs):
+    try:
+        template=settings.get(template_key,"")
+        kwargs.update({"date":time.strftime("%Y-%m-%d"),"time":time.strftime("%H:%M")})
+        return template.format(**kwargs)
+    except Exception as e: print(f"⚠️ cap: {e}"); return ""
+def get_latest_chapter_info(source,ident,murl):
+    try:
+        if source=="mangalik": c=StarzManga.get_latest_chapter(murl); return c.get('num_str','?') if c else '?'
+        elif source=="mesh": c=MeshManga.get_latest_chapter(int(ident)); return c.get('display_text','?') if c else '?'
+        elif source=="azora": c=AzoraFly.get_latest_chapter(ident); return str(c.get('number','?')) if c else '?'
+        elif source=="lavascans": c=LavaScans.get_latest_chapter(murl); return c.get('num_str','?') if c else '?'
+    except: pass
+    return "0"
+def get_latest_chapter_number(source,ident,murl):
+    try:
+        if source=="mangalik":
+            c=StarzManga.get_latest_chapter(murl)
+            if c:
+                m=re.search(r'(\d+(?:\.\d+)?)',c.get('num_str','')); return float(m.group(1)) if m else 0
+        elif source=="mesh":
+            c=MeshManga.get_latest_chapter(int(ident))
+            if c:
+                m=re.search(r'(\d+(?:\.\d+)?)',c.get('display_text','')); return float(m.group(1)) if m else 0
+        elif source=="azora":
+            c=AzoraFly.get_latest_chapter(ident)
+            if c:
+                try: return float(c['number'])
+                except: pass
+        elif source=="lavascans":
+            c=LavaScans.get_latest_chapter(murl)
+            if c:
+                m=re.search(r'(\d+(?:\.\d+)?)',c.get('num_str','')); return float(m.group(1)) if m else 0
+    except: pass
+    return 0
+
+_notify_callback = None
+def set_notify_callback(cb):
+    global _notify_callback; _notify_callback = cb
+def _trigger_notify(uid, kind="both"):
+    if not _notify_callback: return
+    try: asyncio.get_running_loop().create_task(_notify_callback(uid, kind))
+    except RuntimeError: pass
+async def _send_renewal_notify(uid, kind="both"):
+    try:
+        parts = ["🎁 **تم تجديد رصيدك!**\n\n"]
+        if kind in ("single", "both"): parts.append(f"📖 فصول مفردة: `{settings.get('daily_reward_amount',100)}`\n")
+        if kind in ("merge", "both"): parts.append(f"🧩 فصول مدمجة: `{settings.get('merge_daily_limit',50)}`\n")
+        if len(parts) > 1: await app.send_message(uid, "".join(parts), parse_mode=ParseMode.MARKDOWN)
+    except: pass
+set_notify_callback(_send_renewal_notify)
+
+# ============ محرك pixelflow ============
+def _is_jpeg(b): return len(b) >= 3 and b[:3] == b'\xff\xd8\xff'
+def _is_png(b): return len(b) >= 8 and b[:8] == b'\x89PNG\r\n\x1a\n'
+async def _api_send_batch(session, batch, mapping):
+    try:
+        async with session.post(IMAGE_API_URL, json={"urls": batch, "width": PDF_WIDTH, "quality": JPEG_QUALITY}, headers={"Accept": "application/json"}, timeout=aiohttp.ClientTimeout(total=API_TIMEOUT)) as r:
+            if r.status != 200: return
+            data = await r.json()
+            for orig, img in zip(batch, data.get("images", [])):
+                if isinstance(img, dict) and img.get("ok") is True and img.get("url"): mapping[orig] = img["url"]
+    except: pass
+async def convert_via_api(urls):
+    if not urls: return {}
+    mapping = {}
+    batches = [urls[i:i+API_BATCH_SIZE] for i in range(0, len(urls), API_BATCH_SIZE)]
+    sem = asyncio.Semaphore(API_CONCURRENCY)
+    async def worker(batch):
+        async with sem: await _api_send_batch(session, batch, mapping)
+    async with aiohttp.ClientSession() as session:
+        await asyncio.gather(*[worker(b) for b in batches])
+    return mapping
+async def get_bdf_image_bytes(client):
+    bid = settings.get("bdf_image")
+    if not bid: return None
+    try:
+        tf = await client.download_media(bid)
+        if not tf: return None
+        with open(tf, 'rb') as f: data = f.read()
+        try: os.remove(tf)
+        except: pass
+        if _is_jpeg(data) or _is_png(data): return data
+        return None
+    except: return None
+async def fetch_chapter_jpegs(urls, headers=None):
+    if not urls: return []
+    seen, uq = set(), []
+    for u in urls:
+        if u not in seen: seen.add(u); uq.append(u)
+    urls = uq
+    mapping = await convert_via_api(urls)
+    if not mapping: return []
+    hdr = headers or {"User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36"}
+    sem = asyncio.Semaphore(MAX_WORKERS)
+    async def dl_one(orig_url, session):
+        jurl = mapping.get(orig_url)
+        if not jurl: return None
+        async with sem:
+            for _ in range(3):
+                try:
+                    async with session.get(jurl, timeout=30) as r:
+                        if r.status == 200:
+                            d = await r.read()
+                            if d and _is_jpeg(d): return d
+                except: pass
+                await asyncio.sleep(1)
+            return None
+    async with aiohttp.ClientSession(headers=hdr) as s:
+        results = await asyncio.gather(*[dl_one(u, s) for u in urls if u in mapping])
+    return [d for d in results if d]
+async def download_images_parallel(urls, client=None, headers=None):
+    if not urls: return None
+    ch_jpegs = await fetch_chapter_jpegs(urls, headers=headers)
+    if not ch_jpegs: return None
+    jpegs = []
+    if client:
+        bb = await get_bdf_image_bytes(client)
+        if bb: jpegs.append(bb)
+    jpegs.extend(ch_jpegs)
+    valid = [j for j in jpegs if _is_jpeg(j)]
+    if not valid: return None
+    try:
+        pdf_bytes = await asyncio.to_thread(img2pdf.convert, valid, layout_fun=img2pdf.get_layout_fun(None))
+        if pdf_bytes and len(pdf_bytes) > 1000:
+            buf = io.BytesIO(pdf_bytes); buf.seek(0)
+            del jpegs, valid, pdf_bytes; gc.collect(); return buf
+        return None
+    except Exception as e: print(f"  ❌ img2pdf: {e}"); return None
+
+# ============ المصادر ============
+class StarzManga:
+    BASE="https://starzmanga.com"
+    H={"User-Agent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36","Referer":BASE}
+    s=cloudscraper.create_scraper(); s.headers.update(H); _genres_cache=None
+    @staticmethod
+    def slug(u):
+        m=re.search(r'/manga/([^/]+)/?',u); return m.group(1) if m else None
+    @staticmethod
+    def search(q):
+        q=q.strip()
+        if not q: return []
+        for url in [f"{StarzManga.BASE}/?s={quote(q)}&post_type=wp-manga&m_orderby=latest", f"{StarzManga.BASE}/?s={quote(q)}&post_type=wp-manga", f"{StarzManga.BASE}/?s={quote(q)}"]:
+            try:
+                r=StarzManga.s.get(url,timeout=20,allow_redirects=True)
+                if r.status_code!=200: continue
+                soup=BeautifulSoup(r.text,'html.parser'); res=[]
+                for sel in ['div.page-item-detail a[href*="/manga/"]','div.post-title a[href*="/manga/"]','h3 a[href*="/manga/"]','h4 a[href*="/manga/"]']:
+                    for l in soup.select(sel):
+                        h=l.get('href','')
+                        if not h or '/manga/' not in h or '/chapter' in h: continue
+                        if h==f"{StarzManga.BASE}/manga/": continue
+                        t=l.get_text(strip=True)
+                        if not t or len(t)<2: continue
+                        s=StarzManga.slug(h)
+                        if s and not any(x[1]==s for x in res): res.append((t,h,s))
+                    if res: break
+                if res: return res[:10]
+            except: pass
+        return []
+    @staticmethod
+    def get_latest_updates():
+        try:
+            r = StarzManga.s.get(f"{StarzManga.BASE}/manga/?m_orderby=latest", timeout=15)
+            if r.status_code != 200: return []
+            soup = BeautifulSoup(r.text, 'html.parser')
+            res = []
+            # نبحث فقط داخل عناوين المانجا ونتجاهل أي رابط يحتوي على فصول
+            for a in soup.select('.post-title a, h3 a, h4 a'):
+                h = a.get('href', '')
+                t = a.get_text(strip=True)
+                if not h or '/manga/' not in h or not t: continue
+                
+                # فلترة ذكية: رابط المانجا يجب أن ينتهي بـ /manga/اسم-المانجا/ فقط
+                parts = h.replace(StarzManga.BASE, "").strip("/").split("/")
+                if len(parts) != 2 or parts[0] != 'manga': continue
+                
+                s = StarzManga.slug(h)
+                if s and not any(x[1] == s for x in res): res.append((t, h, s))
+            return res[:10]
+        except: return []
+    @staticmethod
+    def get_genres():
+        if StarzManga._genres_cache: return StarzManga._genres_cache
+        try:
+            r = StarzManga.s.get(f"{StarzManga.BASE}/manga/", timeout=15)
+            if r.status_code != 200: return []
+            soup = BeautifulSoup(r.text, 'html.parser')
+            genres = {}
+            for a in soup.find_all('a', href=True):
+                h = a['href']
+                if '/manga-genre/' not in h: continue
+                tail = h.split('/manga-genre/')[-1].strip('/')
+                parts = [p for p in tail.split('/') if p and '?' not in p]
+                if not parts: continue
+                sl = parts[0]
+                n = a.get_text(strip=True)
+                if n and sl and 1 < len(n) < 40 and n not in genres: genres[n] = sl
+            StarzManga._genres_cache = list(genres.items())
+            return StarzManga._genres_cache
+        except: return []
+    @staticmethod
+    def get_manga_by_genre(slug,page=1):
+        try:
+            if page <= 1:
+                urls=[f"{StarzManga.BASE}/manga-genre/{slug}/?m_orderby=latest", f"{StarzManga.BASE}/manga-genre/{slug}/",f"{StarzManga.BASE}/manga-genre/{slug}"]
+            else:
+                urls=[f"{StarzManga.BASE}/manga-genre/{slug}/page/{page}/?m_orderby=latest", f"{StarzManga.BASE}/manga-genre/{slug}/page/{page}/"]
+            for url in urls:
+                try:
+                    r=StarzManga.s.get(url,timeout=20,allow_redirects=True)
+                    if r.status_code!=200: continue
+                    soup=BeautifulSoup(r.text,'html.parser'); res, seen = [], set()
+                    for sel in ['div.post-title a[href*="/manga/"]','div.page-item-detail a[href*="/manga/"]','div.c-tabs-item__content a[href*="/manga/"]','h3 a[href*="/manga/"]','h4 a[href*="/manga/"]']:
+                        for l in soup.select(sel):
+                            h=l.get('href','')
+                            if not h or '/manga/' not in h or '/chapter' in h: continue
+                            if h==f"{StarzManga.BASE}/manga/": continue
+                            t=l.get_text(strip=True)
+                            if not t or len(t)<2: continue
+                            s=StarzManga.slug(h)
+                            if s and s not in seen: seen.add(s); res.append((t,h,s))
+                        if res: break
+                    if res: return res[:10]
+                except: continue
+            return []
+        except: return []
+    @staticmethod
+    def get_details(u):
+        try:
+            r=StarzManga.s.get(u,timeout=15)
+            if r.status_code!=200: return None
+            soup=BeautifulSoup(r.text,'html.parser'); cover=None
+            og=soup.find('meta',property='og:image')
+            if og and og.get('content'): cover=clean_url(og['content'])
+            if cover:
+                if cover.startswith('//'): cover='https:'+cover
+                elif cover.startswith('/'): cover=StarzManga.BASE+cover
+            title = "غير معروف"
+            og_title = soup.find('meta', property='og:title')
+            if og_title and og_title.get('content'): title = og_title['content'].split('|')[0].split('-')[0].strip()
+            else:
+                t = soup.select_one('div.post-title h1')
+                if t: title = t.get_text(strip=True)
+                else: title = u.rstrip('/').split('/')[-1].replace('-', ' ').title()
+            d=soup.select_one('div.description-summary, div.summary__content')
+            desc=d.get_text(strip=True) if d else "لا يوجد وصف"; desc=desc[:300]+"..." if len(desc)>300 else desc
+            genres=[]
+            for a in soup.select('div.genres-content a, a[href*="/manga-genre/"], a[href*="/genres/"]'):
+                g=a.get_text(strip=True)
+                if g and 1<len(g)<40 and not g.isdigit() and g not in genres: genres.append(g)
+            kind=""
+            for a in soup.select('a[href*="/manga-tag/"]'):
+                g=a.get_text(strip=True).lower()
+                if 'مانهوا' in g or 'manhwa' in g: kind="مانهوا"; break
+                elif 'مانجا' in g or 'manga' in g: kind="مانجا"; break
+                elif 'مانها' in g: kind="مانها"; break
+            if not kind:
+                for g in genres:
+                    gl=g.lower()
+                    if 'مانهوا' in gl or 'manhwa' in gl: kind="مانهوا"; break
+                    elif 'مانجا' in gl or 'manga' in gl: kind="مانجا"; break
+            return {'name':title,'description':desc,'cover_url':cover,'genres':genres[:8],'kind':kind}
+        except: return None
+    @staticmethod
+    def get_chapters(u):
+        try:
+            r = StarzManga.s.get(u, timeout=15)
+            if r.status_code != 200: return []
+            soup = BeautifulSoup(r.text, 'html.parser')
+            chs, sn = [], set()
+
+            # 1. المحاولة العادية (HTML)
+            for li in soup.select('li.wp-manga-chapter'):
+                a = li.find('a', href=True)
+                if not a: continue
+                h = a.get('href')
+                if not h or h in sn: continue
+                t = a.get_text(strip=True)
+                sn.add(h); chs.append({'title': t, 'url': h, 'num_str': t, 'is_numeric': False})
+
+            # 2. إذا لم نجد شيئاً، نستخدم AJAX (خاص بقالب Madara)
+            if not chs:
+                post_id = None
+                m = re.search(r'data-post-id="(\d+)"', r.text) or re.search(r'"post_id":"(\d+)"', r.text) or re.search(r'id="manga-chapters-holder"\s+data-id="(\d+)"', r.text)
+                if m: post_id = m.group(1)
+                
+                if post_id:
+                    ajax_url = f"{StarzManga.BASE}/wp-admin/admin-ajax.php"
+                    payload = {'action': 'manga_get_chapters', 'manga': post_id}
+                    headers = {'X-Requested-With': 'XMLHttpRequest', 'Referer': u}
+                    ajax_r = StarzManga.s.post(ajax_url, data=payload, headers=headers, timeout=15)
+                    if ajax_r.status_code == 200:
+                        ajax_soup = BeautifulSoup(ajax_r.text, 'html.parser')
+                        for li in ajax_soup.select('li.wp-manga-chapter'):
+                            a = li.find('a', href=True)
+                            if not a: continue
+                            h = a.get('href')
+                            if not h or h in sn: continue
+                            t = a.get_text(strip=True)
+                            sn.add(h); chs.append({'title': t, 'url': h, 'num_str': t, 'is_numeric': False})
+
+            # 3. استخراج الأرقام وترتيبها
+            for c in chs:
+                m = re.search(r'(?:chapter|ch|فصل)[-_/]?(\d+(?:\.\d+)?)', c['url'], re.I)
+                if not m: m = re.search(r'/(\d+(?:\.\d+)?)/?$', c['url'])
+                if not m: m = re.search(r'(\d+(?:\.\d+)?)', c['title'])
+                if m:
+                    c['num_str'] = m.group(1)
+                    c['is_numeric'] = True
+                    c['title'] = f"Chapter {m.group(1)}"
+
+            chs.sort(key=lambda x: (float(x['num_str']) if x['is_numeric'] else float('inf')))
+            return chs
+        except Exception as e:
+            print(f"Error: {e}")
+            return []
+
+    @staticmethod
+    def get_latest_chapter(u):
+        c=StarzManga.get_chapters(u); return c[-1] if c else None
+    @staticmethod
+    def get_chapter_images(u):
+        imgs=[]
+        try:
+            r=StarzManga.s.get(u,timeout=15)
+            if r.status_code!=200: return []
+            soup=BeautifulSoup(r.text,'html.parser')
+            scope=soup.select_one('div.reading-content, div.page-content, div.chapter-content') or soup
+            for i in scope.find_all('img'):
+                s=None
+                for attr in ('data-src','data-lazy-src','data-original','src'):
+                    v=i.get(attr)
+                    if v: s=v; break
+                if not s or s.startswith('data:'): continue
+                s=clean_url(s)
+                if any(x in s.lower() for x in ['175x238','logo','avatar','icon','banner','loading']): continue
+                if s.startswith('//'): s='https:'+s
+                elif s.startswith('/'): s=StarzManga.BASE+s
+                if not re.search(r'\.(jpg|jpeg|png|webp|gif)(\?|$)',s,re.I): continue
+                imgs.append(s)
+            return sort_urls_by_number(imgs)
+        except: return []
+    @staticmethod
+    async def create_pdf_from_images(imgs,client=None):
+        return await download_images_parallel(imgs,client,headers=StarzManga.H)
+
+class MeshManga:
+    API="https://appswat.com/v2/api/v2"; BASE="https://meshmanga.com"
+    H={"User-Agent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36","Referer":BASE}
+    @staticmethod
+    def search(q):
+        q=q.strip()
+        if not q: return []
+        for url in [f"{MeshManga.API}/series/?search={quote(q)}&page_size=20", f"{MeshManga.API}/series/?search={quote(q)}"]:
+            for hdrs in [MeshManga.H,{"User-Agent":"Mozilla/5.0","Accept":"application/json","Referer":"https://meshmanga.com/"}]:
+                try:
+                    r=requests.get(url,headers=hdrs,timeout=20)
+                    if r.status_code!=200: continue
+                    try: data=r.json()
+                    except: continue
+                    results=data.get("results",[])
+                    if not results and isinstance(data,list): results=data
+                    if results: return results[:10]
+                except: continue
+        return []
+    @staticmethod
+    def get_details(sid):
+        try:
+            r=requests.get(f"{MeshManga.API}/series/{sid}",headers=MeshManga.H,timeout=10)
+            if r.status_code==200:
+                d=r.json(); genres=[]
+                for g in d.get("genres",[]):
+                    if isinstance(g,dict) and g.get("name"): genres.append(g["name"])
+                    elif isinstance(g,str): genres.append(g)
+                d["_genres"]=genres[:8]
+                t=d.get("type"); d["_kind"]=t.get("name","") if isinstance(t,dict) else (t or "")
+                return d
+        except: pass
+        return None
+    @staticmethod
+    def get_chapters(sid):
+        all_ch,page=[],1
+        while page<=50:
+            try:
+                r=requests.get(f"{MeshManga.API}/series/{sid}/chapters/?page={page}",headers=MeshManga.H,timeout=10)
+                if r.status_code!=200: break
+                d=r.json(); res=d.get("results",[])
+                if not res: break
+                all_ch.extend(res)
+                if not d.get("next"): break
+                page+=1; time.sleep(0.3)
+            except: break
+        if not all_ch: return []
+        def ext(t):
+            m=re.search(r'(\d+)',str(t)); return int(m.group(1)) if m else None
+        if len(all_ch)>1:
+            f,s=ext(all_ch[0].get('chapter')),ext(all_ch[1].get('chapter'))
+            if f and s and f>s: all_ch.reverse()
+        proc=[]
+        for c in all_ch:
+            raw=c.get('chapter')
+            if raw is None: continue
+            proc.append({'id':c.get('id'),'display_text':str(raw).strip(),'title':c.get('title',f"الفصل {raw}"),'url':c.get('url')})
+        return proc
+    @staticmethod
+    def get_latest_chapter(sid):
+        c=MeshManga.get_chapters(sid); return c[-1] if c else None
+    @staticmethod
+    def get_chapter_images(cid):
+        try:
+            r=requests.get(f"{MeshManga.API}/chapters/{cid}/images",headers=MeshManga.H,timeout=10)
+            if r.status_code==200:
+                d=r.json()
+                if isinstance(d,list): return [i["image"] if isinstance(i,dict) and "image" in i else i for i in d if isinstance(i,(str,dict))]
+                elif isinstance(d,dict) and "images" in d: return d["images"]
+        except: pass
+        return []
+    @staticmethod
+    def get_cover_image(d):
+        if not d: return None
+        poster=d.get("poster")
+        if isinstance(poster,dict):
+            for s in ["medium","thumbnail","large","original","full"]:
+                if s in poster and poster[s]:
+                    u=poster[s]
+                    if not u.startswith("http"): u="https://appswat.com"+u if u.startswith("/") else u
+                    return u if u.startswith("http") else None
+        if isinstance(poster,str) and poster:
+            if not poster.startswith("http"): poster="https://appswat.com"+poster if poster.startswith("/") else poster
+            return poster if poster.startswith("http") else None
+        return None
+    @staticmethod
+    async def create_pdf_from_images(imgs,client=None):
+        return await download_images_parallel(imgs,client,headers=MeshManga.H)
+
+class AzoraFly:
+    BASE="https://azorafly.com"; API="https://api.azorafly.com"
+    H={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36","Accept":"application/json","Referer":"https://azorafly.com/"}
+    s=cloudscraper.create_scraper(browser={'browser':'chrome','platform':'windows'}); s.headers.update({"User-Agent":H["User-Agent"],"Referer":BASE+"/"})
+    @staticmethod
+    def _api(path,params=None):
+        r=requests.get(f"{AzoraFly.API}{path}",headers=AzoraFly.H,params=params,timeout=20); r.raise_for_status(); return r.json()
+    @staticmethod
+    def search(q):
+        q=q.strip()
+        if not q: return []
+        try:
+            r=AzoraFly.s.get(f"{AzoraFly.BASE}/series/?searchTerm={quote(q)}",timeout=25)
+            if r.status_code!=200: return []
+            soup=BeautifulSoup(r.text,'html.parser'); res=[]; seen=set()
+            for a in soup.find_all('a',href=True):
+                h=a['href']
+                if h.startswith('/'): h=AzoraFly.BASE+h
+                m=re.search(r'/series/([^/?#]+)',h)
+                if not m: continue
+                slug=m.group(1)
+                if not slug or slug in seen or slug in ('search','page','genre','genres','tag','tags'): continue
+                seen.add(slug); title = ""
+                for tag in ['h3','h2','h4','h1']:
+                    el = a.find(tag)
+                    if el: title = el.get_text(strip=True); break
+                if not title:
+                    img = a.find('img')
+                    if img: title = img.get('alt') or img.get('title')
+                if not title: title = slug.replace('-',' ').title()
+                title = re.sub(r'(مانهوا|مانجا|مانها|مكتمل|مستمر)', '', title).strip()
+                if len(title)<2: continue
+                res.append({"title":clean_manga_title(title,slug),"slug":slug})
+            return res[:20]
+        except: return []
+    @staticmethod
+    def _post(slug):
+        try:
+            d=AzoraFly._api("/api/post",{"postSlug":slug}); return d.get("post") or None
+        except: return None
+    @staticmethod
+    def get_details(slug):
+        p=AzoraFly._post(slug); name = ""; desc = ""; cover = ""
+        if p:
+            name = p.get("postTitle") or p.get("title") or ""
+            desc = re.sub(r'<[^>]+>', '', str(p.get("description") or p.get("summary") or p.get("story") or "")).strip()
+            cover = p.get("featuredImage") or ""
+            if cover and cover.startswith("//"): cover = "https:" + cover
+            elif cover and cover.startswith("/"): cover = AzoraFly.BASE + cover
+        if not name or not desc or not cover:
+            try:
+                r = AzoraFly.s.get(f"{AzoraFly.BASE}/series/{slug}", timeout=20)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    if not name:
+                        og = soup.find('meta', property='og:title')
+                        if og: name = og.get('content', '').split('|')[0].strip()
+                        if not name:
+                            h1 = soup.find('h1')
+                            if h1 and "access denied" not in h1.text.lower(): name = h1.get_text(strip=True)
+                    if not desc:
+                        og = soup.find('meta', property='og:description')
+                        if og: desc = og.get('content', '').strip()
+                    if not cover:
+                        og = soup.find('meta', property='og:image')
+                        if og: cover = og.get('content')
+                        if cover and cover.startswith("//"): cover = "https:" + cover
+                        elif cover and cover.startswith("/"): cover = AzoraFly.BASE + cover
+            except: pass
+        if not name: name = slug.replace('-', ' ').title()
+        name = clean_manga_title(name, slug)
+        genres = []; kind = ""
+        if p:
+            genres = p.get("genres") or p.get("categories") or []
+            if genres and isinstance(genres[0], dict): genres = [g.get("name", "") for g in genres if g.get("name")]
+            genres = [g for g in genres if g][:8]
+            t = p.get("type") or p.get("seriesType") or ""
+            kind = t.get("name", "") if isinstance(t, dict) else str(t)
+        return {"name": name, "description": desc[:300], "cover_url": cover, "genres": genres, "kind": kind}
+    @staticmethod
+    def get_chapters(slug):
+        p=AzoraFly._post(slug); pid=p.get("id") if p else None; out = []
+        if pid:
+            try:
+                d=AzoraFly._api("/api/chapters",{"postId":pid})
+                for c in (d.get("post") or {}).get("chapters",[]) or []:
+                    num="?"
+                    for k in ("chapterNumber","number","chapter","chapterIndex"):
+                        if c.get(k) is not None:
+                            m=re.search(r'(\d+(?:\.\d+)?)',str(c.get(k)))
+                            if m: num=m.group(1); break
+                    out.append({"id":c.get("id"),"number":num,"title":f"الفصل {num}","url":f"{AzoraFly.BASE}/series/{slug}/chapter-{num}"})
+            except: pass
+        if not out:
+            try:
+                r = AzoraFly.s.get(f"{AzoraFly.BASE}/series/{slug}", timeout=20)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    for a in soup.find_all('a', href=True):
+                        m = re.search(r'/chapter-([\d\.]+)', a['href'])
+                        if m:
+                            num = m.group(1)
+                            if any(x['number'] == num for x in out): continue
+                            out.append({"id": num, "number": num, "title": a.get_text(strip=True) or f"الفصل {num}", "url": f"{AzoraFly.BASE}/series/{slug}/chapter-{num}"})
+            except: pass
+        try: out.sort(key=lambda x: float(x["number"]))
+        except: pass
+        return out
+    @staticmethod
+    def get_latest_chapter(slug):
+        c=AzoraFly.get_chapters(slug); return c[-1] if c else None
+    @staticmethod
+    def get_chapter_images(cid):
+        try:
+            try: cid_int = int(float(cid))
+            except: return []
+            d=AzoraFly._api("/api/chapter",{"chapterId":cid_int})
+            ch=d.get("chapter") or {}
+            if ch.get("isShortLinkLocked") or ch.get("isLockedByCoins") or ch.get("isPermanentlyLocked"): return []
+            imgs=ch.get("images") or []; imgs.sort(key=lambda x: x.get("order",999999))
+            urls=[]; seen=set()
+            for img in imgs:
+                u=(img.get("url") or "").strip().replace(" ","%20")
+                if not u: continue
+                if u.startswith("//"): u="https:"+u
+                elif u.startswith("/"): u=AzoraFly.BASE+u
+                if u not in seen: seen.add(u); urls.append(u)
+            return urls
+        except: return []
+    @staticmethod
+    async def create_pdf_from_images(imgs,client=None):
+        return await download_images_parallel(imgs,client,headers={"User-Agent":AzoraFly.H["User-Agent"],"Referer":AzoraFly.BASE+"/"})
+
+class LavaScans:
+    BASE = "https://lavascans.com/"
+    H = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36","Referer": BASE}
+    s = cloudscraper.create_scraper(); s.headers.update(H)
+    @staticmethod
+    def _is_chapter_link(name, url):
+        return bool(re.search(r"(chapter|chap[-_. ]?\d|episode|فصل\s*\d|الفصل)", (name or "") + " " + (url or ""), re.I))
+    @staticmethod
+    def _get_manga_title(a):
+        for attr in ("title", "aria-label", "data-title"):
+            v = re.sub(r"\s+", " ", a.get(attr, "") or "").strip()
+            if v and len(v) > 3: return v
+        card = a
+        for _ in range(5):
+            if card.parent: card = card.parent
+            if getattr(card, "name", None) in ("article", "li"): break
+        for sel in ("h1","h2","h3","h4",".post-title",".manga-title",".item-title",".series-title"):
+            node = card.select_one(sel)
+            if node:
+                title = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+                if title and not re.fullmatch(r"[\d.,★☆ ]+|مستمر|مكتمل", title): return title
+        slug = (a.get("href", "") or "").rstrip("/").split("/")[-1]
+        slug = re.sub(r"^(manga|comic)-", "", slug)
+        return slug.replace("-", " ").title()
+    @staticmethod
+    def search(q):
+        q = q.strip()
+        if not q: return []
+        try:
+            r = LavaScans.s.get(LavaScans.BASE + "?s=" + quote(q), timeout=30)
+            if r.status_code != 200: return []
+            soup = BeautifulSoup(r.text, 'html.parser'); results, seen = [], set()
+            for a in soup.select('a[href*="/manga/"]'):
+                href = urljoin(LavaScans.BASE, a.get("href", "")).split("#")[0]
+                if href.rstrip("/") == LavaScans.BASE.rstrip("/"): continue
+                if "lavascans.com" not in href or href in seen: continue
+                seen.add(href); slug = href.rstrip("/").split("/")[-1]
+                results.append({"title": LavaScans._get_manga_title(a),"url": href,"slug": slug})
+            return results[:20]
+        except: return []
+    @staticmethod
+    def get_details(url):
+        try:
+            r = LavaScans.s.get(url, timeout=20)
+            if r.status_code != 200: return None
+            soup = BeautifulSoup(r.text, 'html.parser')
+            
+            title = ""
+            for sel in ["h1.entry-title", ".post-title h1", ".manga-title h1", ".seriestucontent h1", "h1"]:
+                h1 = soup.select_one(sel)
+                if h1:
+                    txt = h1.get_text(strip=True)
+                    if txt and txt.lower() not in ["lava scans", "lavascans", "home", "manga"]:
+                        title = txt
+                        break
+            
+            if not title:
+                og_t = soup.find('meta', property='og:title')
+                if og_t and og_t.get('content'):
+                    og_text = og_t['content'].strip()
+                    for suffix in [" - Lava Scans", " | Lava Scans", "Lava Scans - ", "Lava Scans | "]:
+                        og_text = og_text.replace(suffix, "").strip()
+                    if og_text.lower() not in ["lava scans", "lavascans"]: title = og_text
+            
+            if not title: title = url.rstrip('/').split('/')[-1].replace('-', ' ').title()
+
+            desc = ""
+            md = soup.find('meta', attrs={'name': 'description'})
+            if md: desc = md.get('content', '').strip()
+            if not desc:
+                summary = soup.select_one('.summary__content, .description-summary, .manga-excerpt, .entry-content')
+                if summary: desc = summary.get_text(strip=True)
+            cover = None
+            og_i = soup.find('meta', property='og:image')
+            if og_i: cover = og_i.get('content')
+            if not cover:
+                img = soup.select_one('.summary_image img, .post-content_item img, .series-img img')
+                if img: cover = img.get('data-src') or img.get('src')
+            if cover:
+                if cover.startswith('//'): cover = 'https:' + cover
+                elif cover.startswith('/'): cover = LavaScans.BASE + cover.lstrip('/')
+            genres = []
+            for a in soup.select('a[href*="/genre/"], .genres a, .manga-genres a'):
+                g = a.get_text(strip=True)
+                if g and 1 < len(g) < 40 and g not in genres: genres.append(g)
+            return {'name': title,'description': (desc[:300] + "...") if len(desc) > 300 else desc,'cover_url': cover,'genres': genres[:8],'kind': ''}
+        except: return None
+    @staticmethod
+    def get_chapters(url):
+        chapters = []
+        found = set()
+        visited = set()
+        pending = [url]
+        while pending and len(visited) < 30:
+            page_url = pending.pop(0)
+            if page_url in visited: continue
+            visited.add(page_url)
+            try:
+                r = LavaScans.s.get(page_url, timeout=20)
+                if r.status_code != 200: continue
+                soup = BeautifulSoup(r.text, 'html.parser')
+            except: continue
+
+            # Madara Theme specific
+            for li in soup.select('li.wp-manga-chapter'):
+                a = li.find('a', href=True)
+                if not a: continue
+                h = a.get('href')
+                if not h or h in found: continue
+                t = a.get_text(strip=True)
+                m = re.search(r'(\d+(?:\.\d+)?)', t)
+                if not m: m = re.search(r'(\d+(?:\.\d+)?)', h)
+                num_str = m.group(1) if m else "?"
+                chapters.append({'title': t or f"Chapter {num_str}", 'url': h, 'num_str': num_str, 'is_numeric': num_str != "?"})
+                found.add(h)
+
+            # Generic fallback
+            if not chapters:
+                for a in soup.select("a[href]"):
+                    href = urljoin(page_url, a.get("href", "")).split("#")[0]
+                    name = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
+                    if not name: name = re.sub(r"\s+", " ", a.get("title", "") or "").strip()
+                    if LavaScans._is_chapter_link(name, href) and "lavascans.com" in href:
+                        if href in found: continue
+                        m = re.search(r'(\d+(?:\.\d+)?)', name + ' ' + href)
+                        num_str = m.group(1) if m else "?"
+                        chapters.append({'title': name, 'url': href, 'num_str': num_str, 'is_numeric': num_str != "?"})
+                        found.add(href)
+
+            for a in soup.select('.pagination a, .page-numbers a'):
+                h = urljoin(page_url, a.get('href', ''))
+                if h not in visited and h not in pending: pending.append(h)
+            time.sleep(0.2)
+
+        chapters.sort(key=lambda x: float(x['num_str']) if x['is_numeric'] else float('inf'))
+        return chapters
+    @staticmethod
+    def get_latest_chapter(url):
+        c = LavaScans.get_chapters(url); return c[-1] if c else None
+    @staticmethod
+    def _image_url(img, page_url):
+        for attr in ("data-src","data-lazy-src","data-original","data-cfsrc","data-url","src"):
+            v = img.get(attr)
+            if isinstance(v, str) and v.strip():
+                v = v.strip()
+                if v.startswith("data:"): continue
+                if v.startswith("//"): v = "https:" + v
+                return urljoin(page_url, v)
+        srcset = img.get("srcset") or img.get("data-srcset")
+        if srcset: return urljoin(page_url, srcset.split(",")[0].strip().split()[0])
+        return None
+    @staticmethod
+    def get_chapter_images(url):
+        try:
+            r = LavaScans.s.get(url, timeout=20)
+            if r.status_code != 200: return []
+            soup = BeautifulSoup(r.text, 'html.parser')
+        except: return []
+        images, seen = [], set()
+        for sel in [".reading-content img",".page-break img",".wp-manga-chapter-img",".chapter-content img","#readerarea img",".readerarea img",".entry-content img"]:
+            nodes = soup.select(sel)
+            if nodes:
+                for img in nodes:
+                    u = LavaScans._image_url(img, url)
+                    if not u or u in seen: continue
+                    if any(w in u.lower() for w in ('logo','avatar','icon','banner')): continue
+                    seen.add(u); images.append(u)
+                if images: break
+        return sort_urls_by_number(images)
+    @staticmethod
+    async def create_pdf_from_images(imgs, client=None):
+        return await download_images_parallel(imgs, client, headers=LavaScans.H)
+
+# ============ UI ============
+def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
+    per=10; total=math.ceil(len(chs)/per) if len(chs)>0 else 1; s=page*per
+    cur=chs[s:s+per]; kb,row=[],[]
+    src_short = {"mangalik":"m","mesh":"e","azora":"a","lavascans":"l"}.get(src,"m")
+    for i,ch in enumerate(cur):
+        idx=s+i
+        if src=="mangalik": d=ch.get('num_str','?') if ch.get('is_numeric') else ch.get('title','')[:4]
+        elif src=="mesh": d=ch.get('display_text','?')
+        elif src=="azora": d=ch.get('number','?')
+        elif src=="lavascans": d=ch.get('num_str','?') if ch.get('is_numeric') else ch.get('title','')[:4]
+        else: continue
+        row.append(InlineKeyboardButton(f"📖 {d}",callback_data=f"ch_{src_short}_{idx}"))
+        if len(row)==4: kb.append(row); row=[]
+    if row: kb.append(row)
+    nav=[]
+    if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"pg_{src_short}_{page-1}"))
+    if page<total-1: nav.append(InlineKeyboardButton("التالي ➡️",callback_data=f"pg_{src_short}_{page+1}"))
+    if nav: kb.append(nav)
+    qk=[]
+    if page>0: qk.append(InlineKeyboardButton("🏠 الأول",callback_data=f"f_{src_short}"))
+    if page<total-1: qk.append(InlineKeyboardButton("🔝 الأخير",callback_data=f"l_{src_short}"))
+    if qk: kb.append(qk)
+    if uid is not None and is_vip(uid):
+        if is_favorite(uid,ident,src):
+            kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة",callback_data=f"fav_remove_{src_short}")])
+            kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid,ident,src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
+        else: kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة",callback_data=f"fav_add_{src_short}")])
+    kb.append([InlineKeyboardButton("🧩 دمج الفصول",callback_data=f"mrg_{src_short}")])
+    
+    if ident and BOT_USERNAME:
+        kb.append([InlineKeyboardButton("🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
+        
+    kb.append([InlineKeyboardButton("🔄 تحديث",callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+    return InlineKeyboardMarkup(kb),page,total
+
+def create_fav_list_markup(uid):
+    favs=get_favorites(uid); n=is_notifications_enabled(uid)
+    tt="🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة"
+    if not favs:
+        return InlineKeyboardMarkup([[InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),"مفعلة" if n else "معطلة",0
+    kb=[]
+    for i, f in enumerate(favs):
+        kb.append([InlineKeyboardButton(f"📖 {clean_manga_title(f.get('title',''),f.get('identifier',''))[:35]}",callback_data=f"fav_open_{i}")])
+    kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+    return InlineKeyboardMarkup(kb),"مفعلة" if n else "معطلة",len(favs)
+
+async def download_image_bytesio(url,referer=None):
+    if not url: return None
+    url=clean_url(url)
+    base_h={"User-Agent":"Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36", "Accept":"image/avif,image/webp,image/apng,image/*,*/*;q=0.8"}
+    for ref in [referer,None]:
+        hh=dict(base_h)
+        if ref: hh["Referer"]=ref
+        try:
+            async with aiohttp.ClientSession(headers=hh) as s:
+                async with s.get(url,timeout=15,allow_redirects=True) as r:
+                    if r.status!=200: continue
+                    d=await r.read()
+                    if d and len(d)>=200: return io.BytesIO(d)
+        except: pass
+    try:
+        cs=cloudscraper.create_scraper(); hd=dict(base_h)
+        if referer: hd["Referer"]=referer
+        cs.headers.update(hd)
+        r=cs.get(url,timeout=20,allow_redirects=True)
+        if r.status_code==200 and len(r.content)>=200: return io.BytesIO(r.content)
+    except: pass
+    return None
+
+async def send_cover_message(msg,cover,text,markup,referer=None):
+    if cover:
+        for rf in [referer,None]:
+            try:
+                cb=await download_image_bytesio(cover,referer=rf)
+                if cb: return await msg.reply_photo(photo=cb,caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+            except: pass
+    return await msg.reply_text(text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+
+async def safe_edit(msg,text,markup=None):
+    if msg.photo or msg.video or msg.document or msg.animation:
+        try: return await msg.edit_caption(caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+        except: pass
+    try: return await msg.edit_text(text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    except: pass
+    try: await msg.delete()
+    except: pass
+    try: return await msg.reply_text(text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    except: return None
+
+async def is_user_subscribed(client,uid):
+    if uid in OWNER_IDS: return True,None
+    chs=settings.get("force_sub_channels",[])
+    if not chs: return True,None
+    unsub=[]
+    for ch in chs:
+        try:
+            m=await client.get_chat_member(chat_id=ch,user_id=uid)
+            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.BANNED]: unsub.append(ch)
+        except Exception as e:
+            if "user_not_participant" in str(e).lower(): unsub.append(ch)
+    return (len(unsub)==0),(unsub if unsub else None)
+
+async def send_subscription_prompt(client,uid,cid,pending=None):
+    chs=settings.get("force_sub_channels",[]); text=settings.get("force_sub_message","⚠️ اشترك أولاً.")
+    img=settings.get("force_sub_image"); bc=settings.get("force_sub_buttons",{})
+    kb=[]
+    for ch in chs:
+        kb.append([InlineKeyboardButton(bc.get(ch) or f"📢 اشترك في {ch}", url=f"https://t.me/{ch[1:]}" if ch.startswith("@") else f"https://t.me/c/{str(ch).replace('-100','')}")])
+    if pending: user_data[uid]={'pending_action':pending}
+    kb.append([InlineKeyboardButton("✅ تحقق من الاشتراك",callback_data="check_sub")])
+    markup=InlineKeyboardMarkup(kb)
+    if img:
+        try: await client.send_photo(chat_id=cid,photo=img,caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN); return
+        except: pass
+    await client.send_message(chat_id=cid,text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+
+async def check_subscription_and_continue(client,cb,pending=None):
+    uid=cb.from_user.id; cid=cb.message.chat.id; msg=cb.message
+    is_sub,_=await is_user_subscribed(client,uid)
+    if is_sub:
+        await cb.answer("✅ تم التحقق!")
+        try: await msg.delete()
+        except: pass
+        await _try_reward_referral(client,uid)
+        if pending:
+            at=pending.get('type')
+            class FM:
+                def __init__(s,c,ci,ui,t=""): s.chat=type('C',(),{'id':ci})(); s.from_user=type('U',(),{'id':ui}); s.text=t
+                async def reply_text(s,t,*a,**k): return await client.send_message(s.chat.id,t,*a,**k)
+            fm=FM(client,cid,uid,"")
+            if at=='search': fm.text=f"/search {pending.get('query','')}"; await search_cmd(client,fm)
+            elif at=='check': await check_cmd(client,fm)
+            elif at=='start':
+                if pending.get('gift_code'): await _process_gift_claim(client, cid, uid, pending['gift_code'])
+                if pending.get('show_data'):
+                    sd = pending['show_data']
+                    await _show_manga_by_deeplink(client, cid, uid, sd['src'], sd['ident'])
+                fm.text=""; await start_cmd(client,fm)
+    else:
+        await cb.answer("⚠️ اشترك في جميع القنوات أولاً",show_alert=True)
+        await send_subscription_prompt(client,uid,cid,pending)
+
+app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
+
+async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
+    src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}
+    src = src_map.get(src_short)
+    if not src:
+        await client.send_message(cid, "❌ رابط غير صالح", parse_mode=ParseMode.MARKDOWN); return
+    loading = await client.send_message(cid, "⏳ **جاري جلب المانجا...**", parse_mode=ParseMode.MARKDOWN)
+    try:
+        if src=="mangalik":
+            murl = f"{StarzManga.BASE}/manga/{ident}/"
+            info = await asyncio.to_thread(StarzManga.get_details, murl)
+            if not info: await loading.edit_text("❌ فشل الجلب"); return
+            chs = await asyncio.to_thread(StarzManga.get_chapters, murl)
+            if not chs: await loading.edit_text("❌ لا فصول"); return
+            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+            async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
+            ik=ident; murl_k=murl; ref="https://starzmanga.com/"
+        elif src=="mesh":
+            sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
+            if not dd: await loading.edit_text("❌"); return
+            chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
+            if not chs: await loading.edit_text("❌"); return
+            t=clean_manga_title(dd.get('title','?'),str(sid)); d=dd.get('story','')[:300]+"..."
+            cover=MeshManga.get_cover_image(dd); genres=dd.get('_genres',[]); kind=dd.get('_kind','')
+            async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
+            ik=sid; murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
+        elif src=="azora":
+            info=await asyncio.to_thread(AzoraFly.get_details, ident)
+            if not info: await loading.edit_text("❌"); return
+            chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
+            if not chs: await loading.edit_text("❌"); return
+            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+            async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
+            ik=ident; murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
+        elif src=="lavascans":
+            murl=f"{LavaScans.BASE}manga/{ident}/"
+            info=await asyncio.to_thread(LavaScans.get_details, murl)
+            if not info: await loading.edit_text("❌"); return
+            chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
+            if not chs: await loading.edit_text("❌"); return
+            t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+            cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+            async def pdf(ch,_c=client): return await LavaScans.create_pdf_from_images(await asyncio.to_thread(LavaScans.get_chapter_images, ch['url']),client=_c)
+            ik=ident; murl_k=murl; ref=LavaScans.BASE
+        else:
+            await loading.edit_text("❌"); return
+    except Exception as e:
+        print(f"❌ deeplink: {e}"); await loading.edit_text(f"❌ خطأ\n{str(e)[:100]}"); return
+    user_data[uid]={'chapters':chs,'title':t,'identifier':ik,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover,'genres':genres,'kind':kind}
+    parts=[f"**{t}**"]
+    if kind: parts.append(f"📚 **{kind}**")
+    if genres: parts.append(f"🏷️ {' | '.join(genres)}")
+    parts.extend(["",d,"",f"📖 **{len(chs)} فصل**"])
+    if chs:
+        last=chs[-1]; lc=""
+        if src in ("mangalik","lavascans"): lc=str(last.get('num_str',''))
+        elif src=="mesh": lc=str(last.get('display_text',''))
+        elif src=="azora": lc=str(last.get('number',''))
+        if lc: parts.append(f"📌 آخر: `{lc}`")
+    cap="\n".join(parts); user_data[uid]['base_caption']=cap
+    m,_,_=create_chapters_markup(chs,0,ik,src,uid)
+    try: await loading.delete()
+    except: pass
+    class DummyMsg:
+        def __init__(s,c,ci): s._c=c; s.chat=type('C',(),{'id':ci})()
+        async def reply_photo(s,photo,caption,reply_markup,parse_mode): return await s._c.send_photo(s.chat.id,photo=photo,caption=caption,reply_markup=reply_markup,parse_mode=parse_mode)
+        async def reply_text(s,text,reply_markup,parse_mode): return await s._c.send_message(s.chat.id,text=text,reply_markup=reply_markup,parse_mode=parse_mode)
+    dm = DummyMsg(client, cid)
+    await send_cover_message(dm,cover,cap,m,referer=ref)
+
+async def send_message_with_image(client,cid,text,key,markup=None):
+    img=settings.get(key)
+    if img:
+        try: return await client.send_photo(chat_id=cid,photo=img,caption=text, reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+        except: pass
+    return await client.send_message(chat_id=cid,text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+
+async def build_main_keyboard(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 بحث عن مانجا", callback_data="main_search")],
+        [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
+        [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
+        [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
+        [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
+    ])
+
+def _account_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 رصيدي",callback_data="acc_chapters"), InlineKeyboardButton("🔗 مشاركة",callback_data="acc_share")],
+        [InlineKeyboardButton("⏰ وقت التجديد",callback_data="acc_daily_timer"), InlineKeyboardButton("👑 ترقية VIP",callback_data="acc_upgrade")],
+        [InlineKeyboardButton("💎 تفاصيل VIP",callback_data="acc_vip_details"), InlineKeyboardButton("🔄 تحديث",callback_data="my_account_refresh")],
+        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")],
+    ])
+
+async def _show_my_account(client,msg,uid,edit=False):
+    if is_vip(uid): type_line="👑 **عضو VIP** — تحميل غير محدود"
+    else: type_line=f"👤 **عضو عادي**\n📖 فردي: `{int(get_daily_remaining(uid))}`\n🧩 دمج: `{int(get_merge_remaining(uid))}`"
+    joined=time.strftime("%Y-%m-%d",time.localtime(get_user_joined(uid)))
+    try:
+        u=await client.get_users(uid); un=f"@{u.username}" if u.username else "—"
+    except: un="—"
+    text=(f"👤 **حسابي**\n\n{type_line}\n\n🆔 **المعرّف:** `{uid}`\n📝 **اليوزر:** {un}\n"
+          f"📅 **مسجل:** `{joined}`\n⬇️ **التحميلات:** `{get_user_downloads(uid)}`")
+    if edit: await safe_edit(msg, text, _account_keyboard())
+    else:
+        try: await msg.delete()
+        except: pass
+        await msg.reply_text(text,reply_markup=_account_keyboard(),parse_mode=ParseMode.MARKDOWN)
+
+async def _show_chapters_balance(client,msg,uid):
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    if is_vip(uid):
+        info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
+        await msg.reply_text(f"📊 **رصيد الفصول**\n\n👑 **أنت VIP!**\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود", reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+    rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
+    used=int(rec.get("used",0)); total=base+bonus; rem=max(0,total-used)
+    mbase=get_merge_base(uid); mbonus=int(rec.get("merge_bonus",0)); mused=int(rec.get("merge_used",0))
+    mtotal=mbase+mbonus; mrem=max(0,mtotal-mused)
+    single_note=""; merge_note=""; forced_note=""
+    if rec.get("single_reset_at", 0) > time.time():
+        h,m,s=get_time_until_reset(uid, "single"); single_note=f"\n⏰ تجديد: `{h:02d}:{m:02d}:{s:02d}`"
+    if rec.get("merge_reset_at", 0) > time.time():
+        h,m,s=get_time_until_reset(uid, "merge"); merge_note=f"\n⏰ تجديد: `{h:02d}:{m:02d}:{s:02d}`"
+    if rec.get("reset_expires", 0) > time.time():
+        h,m,s=get_time_until_reset(uid, "forced"); forced_note=f"\n⚡ تصفير: `{h:02d}:{m:02d}:{s:02d}`"
+    pct=int((rem/total)*10) if total>0 else 0; bar="█"*pct+"░"*(10-pct)
+    mpct=int((mrem/mtotal)*10) if mtotal>0 else 0; mbar="█"*mpct+"░"*(10-mpct)
+    await msg.reply_text(
+        f"📊 **رصيدي**\n\n"
+        f"📖 **فردي**\n├ 🎯 `{base}`\n├ 🎁 `{bonus}`\n├ 📦 `{total}`\n├ ✅ `{used}`\n└ 🔋 **`{rem}`**\n`[{bar}]`{single_note}\n\n"
+        f"🧩 **دمج**\n├ 🎯 `{mbase}`\n├ 🎁 `{mbonus}`\n├ 📦 `{mtotal}`\n├ ✅ `{mused}`\n└ 🔋 **`{mrem}`**\n`[{mbar}]`{merge_note}{forced_note}",
+        reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+
+async def _show_share_link(client,msg,uid):
+    link=get_referral_link(uid)
+    text=(f"🔗 **مشاركة البوت**\n\nاحصل على مكافآت لكل صديق:\n\n"
+          f"📖 فردي: +`{settings.get('referral_bonus_single',50)}`\n"
+          f"🧩 دمج: +`{settings.get('referral_bonus_merge',20)}`\n\n"
+          f"**رابطك:**\n`{link}`")
+    kb=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 جرب هذا البوت!')}")],
+        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    await msg.reply_text(text,reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+
+async def _show_vip_upgrade(client,msg):
+    au=None
+    try: o=await client.get_users(OWNER_ID); au=o.username
+    except: pass
+    cu=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}"
+    second=settings.get("vip_contact_second"); cu2=f"https://t.me/{str(second)[1:]}" if second and str(second).startswith("@") else None
+    rows=[[InlineKeyboardButton("👤 تواصل مع الأدمن",url=cu)]]
+    if cu2: rows.append([InlineKeyboardButton("👥 تواصل بديل",url=cu2)])
+    rows.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+    await msg.reply_text(
+        f"👑 **ترقية VIP**\n\n"
+        f"✨ **المميزات:**\n"
+        f"├ ♾️ تحميل غير محدود\n"
+        f"├ ⭐ المفضلة\n"
+        f"├ 🧩 دمج غير محدود\n"
+        f"└ ⚡ أولوية في الدعم\n\n"
+        f"💰 أسبوعي / شهري / سنوي\n\n"
+        f"💬 تواصل:",
+        reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.MARKDOWN)
+
+async def _show_vip_details(client,msg,uid):
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    if is_vip(uid):
+        info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
+        exp=time.strftime("%Y-%m-%d %H:%M",time.localtime(info["expires"]))
+        await msg.reply_text(f"💎 **تفاصيل VIP**\n\n✅ **أنت VIP**\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n📆 `{exp}`", reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+    else: await msg.reply_text("💎 **VIP**\n\n❌ لست VIP\n\n💡 يمكنك الترقية", reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+
+async def _show_daily_timer(client,msg,uid):
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    if is_vip(uid): await msg.reply_text("⏰ **VIP — بلا انتظار**",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+    rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
+    rem=max(0,(base+bonus)-int(rec.get("used",0)))
+    mbase=get_merge_base(uid); mbonus=int(rec.get("merge_bonus",0)); mrem=max(0,(mbase+mbonus)-int(rec.get("merge_used",0)))
+    if rec.get("single_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"single"); single_timer=f"⏳ `{h:02d}:{m:02d}:{s:02d}`"
+    else: single_timer="✅ جاهز"
+    if rec.get("merge_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"merge"); merge_timer=f"⏳ `{h:02d}:{m:02d}:{s:02d}`"
+    else: merge_timer="✅ جاهز"
+    await msg.reply_text(
+        f"⏰ **الوقت**\n\n"
+        f"📖 **فردي**\n├ 🔋 `{rem}`\n└ {single_timer}\n\n"
+        f"🧩 **دمج**\n├ 🔋 `{mrem}`\n└ {merge_timer}\n\n"
+        f"⏱️ مدة التجديد: `{settings.get('daily_reward_interval',86400)//3600}` ساعة",
+        reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+
+def create_backup_with_custom_token(tk,bn):
+    ts=datetime.now().strftime("%Y%m%d_%H%M%S"); safe=re.sub(r'[^A-Za-z0-9_-]','_',bn)[:30]
+    zn=f"bot_{safe}_{ts}.zip"; zp=os.path.join(BACKUP_DIR,zn); tmp_db=zp+".db"
+    backup_to(tmp_db)
+    cfg={"api_id":API_ID,"api_hash":API_HASH,"bot_token":tk,"bot_name":bn,"admins":ADMINS,"owner_ids":OWNER_IDS,"backup_date":ts}
+    install='#!/usr/bin/env python3\nimport os, shutil\nBASE=os.path.dirname(os.path.abspath(__file__))\nd=os.path.join(BASE,"data")\nif os.path.isdir(d):\n    for f in os.listdir(d): shutil.copy2(os.path.join(d,f),os.path.join(os.getcwd(),f))\n'
+    with zipfile.ZipFile(zp,'w',zipfile.ZIP_DEFLATED) as z:
+        z.write(tmp_db, "data/bot.db")
+        z.writestr("config/bot_config.json",json.dumps(cfg,ensure_ascii=False,indent=2))
+        z.writestr("install.py",install)
+    try: os.remove(tmp_db)
+    except: pass
+    return zp,zn
+
+def restore_from_zip(zp):
+    global settings
+    try:
+        with zipfile.ZipFile(zp,'r') as z:
+            if "data/bot.db" not in z.namelist(): return False,[],"❌ ZIP لا يحتوي data/bot.db"
+            tmp=tempfile.mktemp(suffix=".db")
+            with open(tmp,'wb') as f: f.write(z.read("data/bot.db"))
+            ok, err = _validate_db_file(tmp)
+            if not ok:
+                try: os.remove(tmp)
+                except: pass
+                return False,[],f"❌ bot.db غير صالح: {err}"
+            restore_from(tmp)
+            try: os.remove(tmp)
+            except: pass
+            new_s=load_settings(); settings.clear(); settings.update(new_s); return True,["bot.db"],None
+    except Exception as e: return False,[],f"❌ {e}"
+
+def cleanup_old_backups(keep=10):
+    try:
+        fs=sorted([f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")], key=lambda x: os.path.getmtime(os.path.join(BACKUP_DIR,x)),reverse=True)
+        for o in fs[keep:]: os.remove(os.path.join(BACKUP_DIR,o))
+    except: pass
+
+async def send_zip_via_added_bots(manual=False):
+    bots=get_all_bots()
+    if not bots: return 0,0,"لا بوتات"
+    title="يدوية" if manual else "تلقائية"; success=failed=0
+    for bid,info in list(bots.items()):
+        try:
+            token=info.get("token"); target_id=info.get("target_id"); name=info.get("name","?")
+            if not token or not target_id: failed+=1; continue
+            zp,zn=create_backup_with_custom_token(token,name); sz=os.path.getsize(zp)/1024
+            cap=(f"💾 **{title} - {name}**\n\n📅 `{time.strftime('%Y-%m-%d %H:%M')}`\n👥 `{get_users_count()}`\n👑 VIP: `{len(get_all_vips())}`\n📥 `{get_download_count()}`\n📦 `{sz:.1f} KB`")
+            temp_bot=Client(name=f"send_{bid}_{int(time.time())}",api_id=API_ID, api_hash=API_HASH,bot_token=token,in_memory=True)
+            try:
+                await temp_bot.start()
+                with open(zp,'rb') as f: await temp_bot.send_document(chat_id=target_id,document=f,file_name=zn, caption=cap,parse_mode=ParseMode.MARKDOWN)
+                await temp_bot.stop(); success+=1
+                if not manual: update_bot_last_sent(bid, time.time())
+            except Exception as e:
+                print(f"❌ @{name}: {e}"); failed+=1
+                try: await temp_bot.stop()
+                except: pass
+            try: os.remove(zp)
+            except: pass
+        except: failed+=1
+    cleanup_old_backups(); return success,failed,None
+
+async def auto_backup_task():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            bots=get_all_bots()
+            if not bots: await asyncio.sleep(3600); continue
+            now=time.time(); need=any((now-info.get("last_sent",0))>=BACKUP_INTERVAL for info in bots.values())
+            if need: print("💾 نسخة تلقائية..."); await send_zip_via_added_bots(manual=False)
+        except: pass
+        await asyncio.sleep(600)
+
+async def latest_manga_refresh_task():
+    global latest_manga_cache
+    while True:
+        try:
+            res = await asyncio.to_thread(StarzManga.get_latest_updates)
+            if res: latest_manga_cache = res
+        except Exception as e: print(f"⚠️ {e}")
+        await asyncio.sleep(5 * 60)
+
+async def gift_channel_publisher_task():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            rows = _conn().execute("SELECT * FROM gift_links WHERE active=1 AND post_enabled=1 AND post_mode='auto' AND channel_id IS NOT NULL").fetchall()
+            now = time.time()
+            for row in rows:
+                link = dict(row); code = link['code']
+                if link['expires_at'] <= now:
+                    sched = link.get('delete_scheduled_at', 0) or 0
+                    if sched > now: continue
+                    if link.get('channel_message_id'):
+                        await delete_gift_channel_msg(app, link['channel_id'], link['channel_message_id'])
+                    _execute("UPDATE gift_links SET channel_message_id=NULL, post_enabled=0, delete_scheduled_at=0 WHERE code=?", (code,))
+                    continue
+                if link['next_post_at'] <= now:
+                    ok, err, new_code = await publish_gift_now(app, link['created_by'], code)
+                    if not ok: print(f"⚠️ auto: {err}")
+        except Exception as e: print(f"⚠️ publisher: {e}")
+        await asyncio.sleep(60)
+
+def get_admin_panel_kb():
+    status = "🔓 إيقاف الصيانة" if settings.get("maintenance_mode") else "🔒 وضع الصيانة"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 الإحصائيات والبث",callback_data="sec_broadcast_stats")],
+        [InlineKeyboardButton("📬 صندوق الشكاوى",callback_data="admin_complaints")],
+        [InlineKeyboardButton("🖼️ الصور",callback_data="admin_images_section"), InlineKeyboardButton("📝 الرسائل",callback_data="admin_messages_section")],
+        [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
+        [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
+        [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
+        [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
+        [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
+        [InlineKeyboardButton("♻️ تصفير الفصول",callback_data="admin_reset_section")],
+        [InlineKeyboardButton("🧩 هدية دمج",callback_data="admin_merge_gifts")],
+        [InlineKeyboardButton("🧮 عدادات الدمج",callback_data="admin_merge_counters")],
+        [InlineKeyboardButton("🚫 الحظر",callback_data="admin_ban_section"), InlineKeyboardButton("📢 الاشتراك الإجباري",callback_data="admin_forcesub_section")],
+        [InlineKeyboardButton(status, callback_data="admin_toggle_maintenance")],
+        [InlineKeyboardButton("❌ إغلاق اللوحة",callback_data="close_list")]])
+
+# ============ Handlers ============
+@app.on_message(filters.command("start"))
+async def start_cmd(client,message):
+    uid=message.from_user.id
+    if settings.get("maintenance_mode", False) and not is_admin_any(uid):
+        await message.reply_text("⚠️ **البوت في وضع الصيانة**\n\nيرجى المحاولة لاحقاً", parse_mode=ParseMode.MARKDOWN); return
+    if is_banned(uid) and uid not in OWNER_IDS:
+        await message.reply_text("🚫 **أنت محظور**", parse_mode=ParseMode.MARKDOWN); return
+    is_new=add_user(uid); ref_owner=None; gift_code=None; show_data=None
+    if len(message.text.split())>1:
+        pl=message.text.split()[1]
+        if pl.startswith("ref_"):
+            try:
+                oid=int(pl[4:])
+                if oid!=uid: ref_owner=oid
+            except: pass
+        elif pl.startswith("gift_"): gift_code = pl[5:]
+        elif pl.startswith("show_"):
+            parts = pl[5:].split("_", 1)
+            if len(parts) == 2:
+                show_data = {'src': parts[0], 'ident': unquote(parts[1])}
+    if is_new and ref_owner and already_referred(uid) is None:
+        add_referral(ref_owner,uid); user_data.setdefault(uid,{})["pending_referral_owner"]=ref_owner
+    if is_new:
+        try:
+            un=message.from_user.username or "لا يوجد"
+            await client.send_message(OWNER_ID,f"👤 **عضو جديد**\n\n👤 {message.from_user.first_name or ''}\n🆔 `{uid}`\n📝 @{un}",parse_mode=ParseMode.MARKDOWN)
+        except: pass
+    is_sub,_=await is_user_subscribed(client,uid)
+    if not is_sub:
+        pa={'type':'start'}
+        if ref_owner: pa['referral_owner']=ref_owner
+        if gift_code: pa['gift_code']=gift_code
+        if show_data: pa['show_data']=show_data
+        await send_subscription_prompt(client,uid,message.chat.id,pa); return
+    await _try_reward_referral(client,uid)
+    if gift_code: await _process_gift_claim(client, message.chat.id, uid, gift_code)
+    if show_data:
+        await _show_manga_by_deeplink(client, message.chat.id, uid, show_data['src'], show_data['ident'])
+        return
+    kb=await build_main_keyboard(uid); wt=settings.get("welcome_message","🌟 **مرحباً!**")
+    if is_vip(uid): wt+="\n\n👑 **أنت VIP!**"
+    await send_message_with_image(client,message.chat.id,wt,"welcome_image",kb)
+
+async def _try_reward_referral(client,new_uid):
+    po=user_data.get(new_uid,{}).get("pending_referral_owner")
+    if not po: return
+    if not mark_rewarded(po,new_uid): return
+    add_bonus(po,settings.get("referral_bonus_single",50)); add_merge_bonus(po,settings.get("referral_bonus_merge",20))
+    try:
+        await client.send_message(po,f"🎉 **مبروك!**\n\nحصلت على:\n📖 +`{settings.get('referral_bonus_single',50)}`\n🧩 +`{settings.get('referral_bonus_merge',20)}`",parse_mode=ParseMode.MARKDOWN)
+    except: pass
+    user_data.get(new_uid,{}).pop("pending_referral_owner",None)
+
+@app.on_message(filters.command("search"))
+async def search_cmd(client,message):
+    uid=message.from_user.id
+    if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
+    if is_banned(uid) and uid not in OWNER_IDS: return
+    is_sub,_=await is_user_subscribed(client,uid)
+    if not is_sub:
+        args=message.text.split(maxsplit=1); pa={'type':'search'}
+        if len(args)>1: pa['query']=args[1]
+        await send_subscription_prompt(client,uid,message.chat.id,pa); return
+    args=message.text.split(maxsplit=1)
+    if len(args)<2:
+        await message.reply_text("⚠️ **الاستخدام:**\n`/search اسم المانجا`", parse_mode=ParseMode.MARKDOWN); return
+    q=args[1].strip(); user_data.setdefault(uid,{})['search_query']=q
+    kb=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 مانجا و مانهوا",callback_data="src_mangalik")],
+        [InlineKeyboardButton("📚 فقط مانهوا",callback_data="src_mesh")],
+        [InlineKeyboardButton("✨ مانهوا متميزة",callback_data="src_azora")],
+        [InlineKeyboardButton("🌋 Lava Scans",callback_data="src_lavascans")],
+        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    await send_message_with_image(client,message.chat.id, f"🔍 **بحث**\n\n`{q}`\n\n👇 اختر المصدر:","sources_image",kb)
+
+@app.on_message(filters.command("check"))
+async def check_cmd(client,message):
+    uid=message.from_user.id
+    if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
+    if is_banned(uid) and uid not in OWNER_IDS: return
+    is_sub,_=await is_user_subscribed(client,uid)
+    if not is_sub: await send_subscription_prompt(client,uid,message.chat.id,{'type':'check'}); return
+    await message.reply_text("🔄 **جاري التحقق...**")
+    favs=get_favorites(uid)
+    if not favs: await message.reply_text("📭 **لا يوجد مفضلة**"); return
+    found=False
+    for f in favs:
+        s,i,m=f['source'],f['identifier'],f['manga_url']; ti=clean_manga_title(f.get('title',''),i)
+        lc=f.get('last_chapter',"0"); ln=get_latest_chapter_number(s,i,m)
+        try: lnum=float(re.search(r'(\d+(?:\.\d+)?)',str(lc)).group(1)) if re.search(r'(\d+(?:\.\d+)?)',str(lc)) else 0
+        except: lnum=0
+        if ln>lnum:
+            found=True
+            if s=="mangalik": c=StarzManga.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
+            elif s=="mesh": c=MeshManga.get_latest_chapter(int(i)); d=c.get('display_text','?') if c else '?'
+            elif s=="azora": c=AzoraFly.get_latest_chapter(i); d=str(c.get('number','?')) if c else '?'
+            elif s=="lavascans": c=LavaScans.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
+            else: continue
+            set_fav_last_chapter(uid, i, s, d)
+            await message.reply_text(f"📢 **{ti}**\n📌 `{d}`",parse_mode=ParseMode.MARKDOWN)
+    if not found: await message.reply_text("✅ **لا جديد**")
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_cmd(client,message):
+    uid=message.from_user.id
+    if user_data.get(uid): user_data.pop(uid,None); await message.reply_text("❌ **ملغى**")
+    else: await message.reply_text("ℹ️ **لا شيء قيد التنفيذ**")
+
+@app.on_message(filters.command("admin") & filters.private)
+async def admin_panel(client,message):
+    uid=message.from_user.id
+    if not is_admin_any(uid): await message.reply_text("⛔ **غير مصرح**"); return
+    if is_added_admin(uid) and not is_main_admin(uid):
+        kb=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
+            [InlineKeyboardButton("🎁 هدية للجميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 لفرد",callback_data="admin_gift_one")],
+            [InlineKeyboardButton("📬 الشكاوى",callback_data="admin_complaints")],
+            [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+        await message.reply_text("🛠️ **لوحة الأدمن**",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+    await message.reply_text("🛠️ **لوحة التحكم**\n\n👇 اختر:", reply_markup=get_admin_panel_kb(),parse_mode=ParseMode.MARKDOWN)
+
+# ============ Unified Callback ============
+@app.on_callback_query()
+async def unified_callback(client,callback):
+    data=callback.data; uid=callback.from_user.id
+    cid=callback.message.chat.id; msg=callback.message
+    if settings.get("maintenance_mode", False) and not is_admin_any(uid):
+        await callback.answer("⚠️ صيانة", show_alert=True); return
+    if data=="check_sub":
+        await check_subscription_and_continue(client,callback,user_data.get(uid,{}).get('pending_action')); return
+    if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
+    if data!="check_sub":
+        is_sub,_=await is_user_subscribed(client,uid)
+        if not is_sub:
+            await callback.answer("⚠️ اشترك أولاً",show_alert=True); await send_subscription_prompt(client,uid,cid); return
+    if data=="close_list":
+        try: await msg.delete()
+        except: pass
+        await callback.answer("✅"); return
+
+    if data=="complaint_start":
+        await callback.answer("📩"); user_data[uid]={"awaiting_complaint":True}
+        await msg.reply_text("📩 **شكوى**\n\n✍️ اكتب:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء",callback_data="cancel_complaint")]]),parse_mode=ParseMode.MARKDOWN); return
+    if data=="cancel_complaint":
+        user_data.pop(uid,None)
+        try: await msg.delete()
+        except: pass
+        await callback.answer("❌"); return
+    if data in ("help_full","help"):
+        await callback.answer("❓")
+        await msg.reply_text(
+            f"❓ **مساعدة**\n\n🔍 `/search الاسم`\n📚 4 مصادر\n\n"
+            f"📖 فردي: `{settings.get('daily_reward_amount',100)}`\n🧩 دمج: `{settings.get('merge_daily_limit',50)}`\n"
+            f"📎 حد الملف: `{settings.get('merge_max_per_file',10)}`\n"
+            f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
+            f"👑 VIP: بلا حدود",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
+    if data=="main_search":
+        await callback.answer("🔍")
+        await msg.reply_text("🔍 **للبحث:**\n`/search اسم المانجا`",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
+    if data=="my_account": await callback.answer("👤"); await _show_my_account(client,msg,uid,edit=False); return
+    if data=="my_account_refresh": await callback.answer("🔄"); await _show_my_account(client,msg,uid,edit=True); return
+    if data=="acc_chapters": await callback.answer("📊"); await _show_chapters_balance(client,msg,uid); return
+    if data=="acc_share": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
+    if data=="acc_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="acc_vip_details": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
+    if data=="acc_daily_timer": await callback.answer("⏰"); await _show_daily_timer(client,msg,uid); return
+    if data=="share_referral": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
+    if data=="vip_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="vip_info": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
+
+    if data=="fav_list":
+        if not is_vip(uid):
+            await callback.answer("VIP فقط 👑", show_alert=True)
+            try: await msg.delete()
+            except: pass
+            try:
+                o=await client.get_users(OWNER_ID); au=o.username
+            except: au=None
+            rows=[[InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
+            await msg.reply_text("🔒 **ميزة VIP**\n\n⭐ المفضلات لمشتركي VIP فقط", reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN); return
+        m,s,c=create_fav_list_markup(uid)
+        try: await msg.delete()
+        except: pass
+        await send_message_with_image(client,cid,f"⭐ **المفضلات** ({c})\n⚙️ {s}\n\nاختر:","favorites_image",m)
+        await callback.answer("⭐"); return
+
+    if data=="toggle_notifications":
+        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        cur=is_notifications_enabled(uid); set_notifications_enabled(uid,not cur)
+        m,s,c=create_fav_list_markup(uid)
+        try: await msg.edit_text(f"⭐ **({c})**\n⚙️ {s}\n\nاختر:",reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        await callback.answer("✅" if not cur else "❌"); return
+
+    if data=="latest_manga_list":
+        await callback.answer("🔥"); global latest_manga_cache
+        if not latest_manga_cache:
+            try: latest_manga_cache = await asyncio.to_thread(StarzManga.get_latest_updates)
+            except: pass
+        if not latest_manga_cache: await safe_edit(msg,"❌"); return
+        kb=[[InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"latest_{i}")] for i, (t,u,s) in enumerate(latest_manga_cache)]
+        kb.append([InlineKeyboardButton("🔄 تحديث",callback_data="latest_manga_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,"🔥 **أحدث المانجا:**",InlineKeyboardMarkup(kb)); return
+
+    if data=="main_categories" or data.startswith("cat_pg_"):
+        page=0 if data=="main_categories" else int(data.replace("cat_pg_",""))
+        await callback.answer("⏳")
+        genres=await asyncio.to_thread(StarzManga.get_genres)
+        if not genres: await safe_edit(msg,"❌"); return
+        per=12; tp=math.ceil(len(genres)/per); cur=genres[page*per:(page+1)*per]; kb,row=[],[]
+        for i,(n,s) in enumerate(cur):
+            row.append(InlineKeyboardButton(f"{n}",callback_data=f"cat_g_{page*per+i}"))
+            if len(row)==2: kb.append(row); row=[]
+        if row: kb.append(row)
+        nav=[]
+        if page>0: nav.append(InlineKeyboardButton("⬅️",callback_data=f"cat_pg_{page-1}"))
+        if page<tp-1: nav.append(InlineKeyboardButton("➡️",callback_data=f"cat_pg_{page+1}"))
+        if nav: kb.append(nav)
+        kb.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,f"🏷️ **التصنيفات ({page+1}/{tp})**",InlineKeyboardMarkup(kb)); return
+
+    if data.startswith("cat_g_"):
+        idx=int(data[6:]); genres=await asyncio.to_thread(StarzManga.get_genres)
+        if not genres or idx>=len(genres): await callback.answer("⚠️",show_alert=True); return
+        slug,name=genres[idx][1],genres[idx][0]; await callback.answer("⏳")
+        await safe_edit(msg,f"⏳ **{name}**")
+        mangas=await asyncio.to_thread(StarzManga.get_manga_by_genre, slug, 1)
+        if not mangas: await safe_edit(msg,"❌",InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌",callback_data="close_list")]])); return
+        kb=[[InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"cat_sel_{idx}_{i}")] for i,(t,u,s) in enumerate(mangas)]
+        kb.append([InlineKeyboardButton("🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,f"🏷️ **{name}** ({len(mangas)})",InlineKeyboardMarkup(kb)); return
+
+    if data.startswith("cat_sel_"):
+        p=data.split("_"); idx=int(p[2]); i=int(p[3])
+        genres=await asyncio.to_thread(StarzManga.get_genres)
+        if not genres or idx>=len(genres): return
+        mangas=await asyncio.to_thread(StarzManga.get_manga_by_genre, genres[idx][1], 1)
+        if i>=len(mangas): return
+        t,u,s=mangas[i]; user_data[uid]['search_results']=[(t,u,s)]; user_data[uid]['source']="mangalik"; data="sel_mangalik_0"
+
+    if data.startswith("sel_") or data.startswith("fav_open_") or data.startswith("latest_"):
+        if data.startswith("sel_"):
+            _, src, idx = data.split("_"); idx=int(idx)
+            res=user_data[uid].get('search_results',[])
+            if idx>=len(res): return
+            item=res[idx]
+            ident = item[2] if src=="mangalik" else (item.get('id') if src=="mesh" else (item['slug'] if src=="azora" else item.get('slug')))
+        elif data.startswith("fav_open_"):
+            idx=int(data.split("_")[2]); favs=get_favorites(uid)
+            if idx>=len(favs): return
+            item=favs[idx]; src=item['source']; ident=item['identifier']
+        elif data.startswith("latest_"):
+            idx=int(data.split("_")[1])
+            if idx>=len(latest_manga_cache): return
+            item=latest_manga_cache[idx]; src="mangalik"; ident=item[2]
+        await callback.answer("⏳"); await safe_edit(msg,"⏳ **جاري التحميل...**")
+        try:
+            if src=="mangalik":
+                murl=None
+                for t,u,s in user_data.get(uid,{}).get('search_results',[]):
+                    if s==ident: murl=u; break
+                if not murl:
+                    for f in get_favorites(uid):
+                        if f['identifier']==ident and f['source']=='mangalik': murl=f['manga_url']; break
+                if not murl: murl=f"{StarzManga.BASE}/manga/{ident}/"
+                info=await asyncio.to_thread(StarzManga.get_details, murl)
+                if not info: await safe_edit(msg,"❌"); return
+                chs=await asyncio.to_thread(StarzManga.get_chapters, murl)
+                if not chs: await safe_edit(msg,"❌ لا فصول"); return
+                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+                async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
+                ik=ident; murl_k=murl; ref="https://starzmanga.com/"
+            elif src=="mesh":
+                sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
+                if not dd: await safe_edit(msg,"❌"); return
+                chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
+                if not chs: await safe_edit(msg,"❌"); return
+                t=clean_manga_title(dd.get('title','?'),str(sid)); d=dd.get('story','')[:300]+"..."
+                cover=MeshManga.get_cover_image(dd); genres=dd.get('_genres',[]); kind=dd.get('_kind','')
+                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
+                ik=sid; murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
+            elif src=="azora":
+                info=await asyncio.to_thread(AzoraFly.get_details, ident)
+                if not info: await safe_edit(msg,"❌"); return
+                chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
+                if not chs: await safe_edit(msg,"❌"); return
+                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
+                ik=ident; murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
+            elif src=="lavascans":
+                murl=None
+                for it in user_data.get(uid,{}).get('search_results',[]):
+                    if isinstance(it, dict) and it.get('slug')==ident: murl=it.get('url'); break
+                if not murl:
+                    for f in get_favorites(uid):
+                        if f['identifier']==ident and f['source']=='lavascans': murl=f['manga_url']; break
+                if not murl: murl=f"{LavaScans.BASE}manga/{ident}/"
+                info=await asyncio.to_thread(LavaScans.get_details, murl)
+                if not info: await safe_edit(msg,"❌"); return
+                chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
+                if not chs: await safe_edit(msg,"❌"); return
+                t=clean_manga_title(info.get('name',ident),ident); d=info.get('description','')[:300]+"..."
+                cover=info.get('cover_url'); genres=info.get('genres',[]); kind=info.get('kind','')
+                async def pdf(ch,_c=client): return await LavaScans.create_pdf_from_images(await asyncio.to_thread(LavaScans.get_chapter_images, ch['url']),client=_c)
+                ik=ident; murl_k=murl; ref=LavaScans.BASE
+        except Exception as e:
+            print(f"❌ {e}"); await safe_edit(msg,f"❌ {str(e)[:100]}"); return
+        user_data[uid]={'chapters':chs,'title':t,'identifier':ik,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover,'genres':genres,'kind':kind}
+        parts=[f"**{t}**"]
+        if kind: parts.append(f"📚 **{kind}**")
+        if genres: parts.append(f"🏷️ {' | '.join(genres)}")
+        parts.extend(["",d,"",f"📖 **{len(chs)} فصل**"])
+        if chs:
+            last=chs[-1]; lc=""
+            if src in ("mangalik","lavascans"): lc=str(last.get('num_str',''))
+            elif src=="mesh": lc=str(last.get('display_text',''))
+            elif src=="azora": lc=str(last.get('number',''))
+            if lc: parts.append(f"📌 آخر: `{lc}`")
+        cap="\n".join(parts); user_data[uid]['base_caption']=cap
+        m,_,_=create_chapters_markup(chs,0,ik,src,uid)
+        try: await msg.delete()
+        except: pass
+        await send_cover_message(msg,cover,cap,m,referer=ref); return
+
+    if data.startswith("share_manga_"):
+        src_short = data.replace("share_manga_", "")
+        info = user_data.get(uid, {})
+        ident = info.get('identifier')
+        title = info.get('title', 'مانجا')
+        if not ident:
+            await callback.answer("⚠️ لا توجد بيانات، افتح المانجا أولاً", show_alert=True)
+            return
+        share_url = f"https://t.me/{BOT_USERNAME}?start=show_{src_short}_{quote(str(ident), safe='')}"
+        txt = (
+            f"🔗 **رابط مشاركة المانجا**\n\n"
+            f"📚 **{title}**\n\n"
+            f"`{share_url}`\n\n"
+            f"💡 **انسخ الرابط وشاركه مع أصدقائك**\n"
+            f"✨ عند فتحه يفتح البوت ويعرض المانجا تلقائياً"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]
+        ])
+        await msg.reply_text(txt, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+        await callback.answer("🔗 الرابط جاهز — انسخه")
+        return
+
+    if data.startswith(("pg_","f_","l_")):
+        try:
+            if data.startswith("pg_"): p=data.split("_"); src_short,pg=p[1],int(p[2])
+            elif data.startswith("f_"): p=data.split("_"); src_short=p[1]; pg=0
+            else:
+                p=data.split("_"); src_short=p[1]
+                chs=user_data.get(uid,{}).get('chapters',[]); pg=max(0,math.ceil(len(chs)/10)-1)
+        except: return
+        src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        if not src or uid not in user_data: await callback.answer("⚠️"); return
+        chs=user_data[uid].get('chapters',[]); ident=user_data[uid].get('identifier')
+        if not chs: return
+        user_data[uid]['page']=pg; m,p2,tot=create_chapters_markup(chs,pg,ident,src,uid)
+        base=user_data[uid].get('base_caption'); txt=(base+f"\n\n📄 **{p2+1}/{tot}**") if base else f"📄 {p2+1}/{tot}"
+        try: await msg.edit_caption(caption=txt,reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        except:
+            try: await msg.delete()
+            except: pass
+        await callback.answer(f"{p2+1}"); return
+
+    if data.startswith("rf_"):
+        src_short=data.split("_")[1]; src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        if not src: return
+        ident=user_data.get(uid, {}).get('identifier')
+        if not ident: await callback.answer("⚠️"); return
+        await callback.answer("🔄"); await safe_edit(msg,"⏳")
+        try:
+            if src=="mangalik":
+                murl=user_data.get(uid,{}).get('manga_url')
+                if not murl: await safe_edit(msg,"⚠️"); return
+                chs=await asyncio.to_thread(StarzManga.get_chapters, murl)
+                info=await asyncio.to_thread(StarzManga.get_details, murl)
+                t=clean_manga_title(info.get('name',''),ident) if info else ident
+                d=info.get('description','')[:300]+"..." if info else ''
+                cover=info.get('cover_url') if info else None
+                async def pdf(ch,_c=client): return await StarzManga.create_pdf_from_images(await asyncio.to_thread(StarzManga.get_chapter_images, ch['url']),client=_c)
+                murl_k=murl; ref="https://starzmanga.com/"
+            elif src=="mesh":
+                sid=int(ident); dd=await asyncio.to_thread(MeshManga.get_details, sid)
+                chs=await asyncio.to_thread(MeshManga.get_chapters, sid)
+                t=clean_manga_title(dd.get('title',''),str(sid)) if dd else '?'
+                d=dd.get('story','')[:300]+"..." if dd else ''
+                cover=MeshManga.get_cover_image(dd) if dd else None
+                murl_k=f"{MeshManga.BASE}/series/{sid}"; ref="https://meshmanga.com/"
+                async def pdf(ch,_c=client): return await MeshManga.create_pdf_from_images(await asyncio.to_thread(MeshManga.get_chapter_images, ch['id']),client=_c)
+            elif src=="azora":
+                info=await asyncio.to_thread(AzoraFly.get_details, ident); chs=await asyncio.to_thread(AzoraFly.get_chapters, ident)
+                if not info or not chs: await safe_edit(msg,"❌"); return
+                t=clean_manga_title(info.get('name',''),ident); d=info.get('description','')[:300]+"..."
+                cover=info.get('cover_url'); murl_k=f"{AzoraFly.BASE}/series/{ident}"; ref=f"{AzoraFly.BASE}/"
+                async def pdf(ch,_c=client): return await AzoraFly.create_pdf_from_images(await asyncio.to_thread(AzoraFly.get_chapter_images, ch.get('id')),client=_c)
+            elif src=="lavascans":
+                murl=user_data.get(uid,{}).get('manga_url') or f"{LavaScans.BASE}manga/{ident}/"
+                chs=await asyncio.to_thread(LavaScans.get_chapters, murl)
+                info=await asyncio.to_thread(LavaScans.get_details, murl)
+                if not chs: await safe_edit(msg,"❌"); return
+                t=clean_manga_title(info.get('name',''),ident) if info else ident
+                d=info.get('description','')[:300]+"..." if info else ''
+                cover=info.get('cover_url') if info else None
+                murl_k=murl; ref=LavaScans.BASE
+                async def pdf(ch,_c=client): return await LavaScans.create_pdf_from_images(await asyncio.to_thread(LavaScans.get_chapter_images, ch['url']),client=_c)
+            else: await safe_edit(msg,"⚠️"); return
+        except Exception as e: await safe_edit(msg,f"❌ {e}"); return
+        if not chs: await safe_edit(msg,"❌"); return
+        user_data[uid]={'chapters':chs,'title':t,'identifier':ident,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover}
+        cap=f"**{t}** (محدث) 🔄\n{d}\n📚 {len(chs)} فصل"
+        user_data[uid]['base_caption']=cap
+        m,_,_=create_chapters_markup(chs,0,ident,src,uid)
+        try: await msg.delete()
+        except: pass
+        await send_cover_message(msg,cover,cap,m,referer=ref); return
+
+    if data.startswith("ch_"):
+        p=data.split("_")
+        if len(p)<3: return
+        src_short, idx_str = p[1], p[2]; idx=int(idx_str)
+        src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        if not src: await callback.answer("⚠️"); return
+        if uid not in user_data: await callback.answer("⚠️",show_alert=True); return
+        parallel_allowed = settings.get("allow_parallel_downloads", False); locked = False
+        if not parallel_allowed:
+            if is_downloading(uid): await callback.answer("⏳",show_alert=True); return
+            if not try_lock_download(uid): await callback.answer("⏳",show_alert=True); return
+            locked = True
+        try:
+            chs=user_data[uid].get('chapters',[])
+            if idx>=len(chs): await callback.answer("❌"); return
+            pdf_func=user_data[uid].get('create_pdf_func')
+            if not pdf_func: await callback.answer("⚠️"); return
+            target=chs[idx]; disp='?'
+            if src=="mangalik": disp=target['num_str'] if target.get('is_numeric') else target['title'][:4]
+            elif src=="mesh": disp=target.get('display_text','?')
+            elif src=="azora": disp=target['number']
+            elif src=="lavascans": disp=target['num_str'] if target.get('is_numeric') else target['title'][:4]
+            success,rem=try_deduct_chapter(uid,1)
+            if not success:
+                await callback.answer("❌ لا رصيد",show_alert=True)
+                kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+                await msg.reply_text("❌ **لا يوجد رصيد**\n\nادعُ صديقاً 🔗",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+            await callback.answer("⏳")
+            lt = f"⏳ **جاري تحميل الفصل {disp}...**"
+            if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
+            lm=await msg.reply_text(lt)
+            try: buf=await pdf_func(target)
+            except Exception as e: print(f"⚠️ {e}"); buf=None
+            if not buf:
+                refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
+            increment_download_count(uid); await lm.edit_text("📤 **جاري الرفع...**")
+            try:
+                title_for_caption=user_data.get(uid,{}).get('title','')
+                caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
+                safe_title=re.sub(r'[\\/:*?"<>|]','',title_for_caption).strip()[:60] or "manga"
+                await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
+                await lm.delete()
+            except Exception as e: await lm.edit_text(f"❌ {e}")
+            del buf; gc.collect(); return
+        finally:
+            if locked: unlock_download(uid)
+
+    if data.startswith(("fav_add_","fav_remove_","toggle_notify_")):
+        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        src_short = data.split("_")[-1] if data.startswith("toggle_notify_") else data.split("_")[2]
+        src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        ident=user_data.get(uid, {}).get('identifier')
+        if not src or not ident: return
+        if data.startswith("fav_add_"):
+            info=user_data.get(uid,{})
+            lc=get_latest_chapter_info(src,ident,info.get('manga_url',''))
+            if add_to_favorites(uid,info.get('title','?'),ident,src,info.get('manga_url',''),info.get('cover_url',''),lc): await callback.answer("✅")
+            else: await callback.answer("⚠️ موجود",show_alert=True)
+        elif data.startswith("fav_remove_"):
+            if remove_from_favorites(uid,ident,src): await callback.answer("✅")
+            else: await callback.answer("⚠️",show_alert=True)
+        else:
+            cur=get_fav_notify(uid,ident,src); set_fav_notify(uid,ident,src,not cur)
+            await callback.answer("✅" if not cur else "❌")
+        info=user_data.get(uid,{})
+        m,_,_=create_chapters_markup(info.get('chapters',[]),info.get('page',0),ident,src,uid)
+        try: await msg.edit_caption(caption=msg.caption,reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        return
+
+    if data.startswith("mrg_"):
+        src_short=data.split("_")[1]; src_map = {"m":"mangalik","e":"mesh","a":"azora","l":"lavascans"}; src=src_map.get(src_short)
+        if not src: await callback.answer("⚠️"); return
+        if uid not in user_data: await callback.answer("⚠️", show_alert=True); return
+        ident=user_data[uid].get('identifier'); chs=user_data[uid].get('chapters',[])
+        if not chs: await callback.answer("لا فصول", show_alert=True); return
+        user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
+        mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
+        mmax = settings.get("merge_max_per_file", 10)
+        await msg.reply_text(f"🧩 **دمج الفصول**\n\n📚 `{len(chs)}` فصل\n🔢 `{mmax}` حد أقصى\n💳 رصيد: `{mr}`\n\n📝 أرسل: `البداية-النهاية`\nمثال: `1-{mmax}`\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+        await callback.answer("⏳"); return
+
+    if data.startswith("src_"):
+        src=data[4:]; q=user_data.get(uid,{}).get('search_query')
+        if not q: await callback.answer("⚠️",show_alert=True); await safe_edit(msg,"`/search`"); return
+        await callback.answer("⏳"); await safe_edit(msg,f"🔍 **{q}**")
+        res=[]
+        try:
+            if src=="mangalik": res=await asyncio.to_thread(StarzManga.search, q)
+            elif src=="mesh": res=await asyncio.to_thread(MeshManga.search, q)
+            elif src=="azora": res=await asyncio.to_thread(AzoraFly.search, q)
+            elif src=="lavascans": res=await asyncio.to_thread(LavaScans.search, q)
+        except Exception as e: print(f"❌ {e}")
+        if not res:
+            kb=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖", callback_data="src_mangalik")],[InlineKeyboardButton("📚", callback_data="src_mesh")],
+                [InlineKeyboardButton("✨", callback_data="src_azora")],[InlineKeyboardButton("🌋", callback_data="src_lavascans")],
+                [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+            try: await msg.delete()
+            except: pass
+            await client.send_message(cid, f"❌ **لا نتائج**\n`{q}`", reply_markup=kb, parse_mode=ParseMode.MARKDOWN); return
+        user_data[uid]['search_results']=res; user_data[uid]['source']=src
+        kb=[]
+        for i, item in enumerate(res):
+            if src=="mangalik": t=item[0]
+            elif src=="mesh": t=item.get('title','')
+            elif src=="azora": t=item['title']
+            elif src=="lavascans": t=item.get('title','')
+            kb.append([InlineKeyboardButton(f"📖 {t[:40]}",callback_data=f"sel_{src}_{i}")])
+        kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,f"✅ **{len(res)} نتيجة**\n`{q}`",InlineKeyboardMarkup(kb)); return
+
+    # ============ ADMIN ============
+    if is_admin_any(uid):
+        if data == "admin_toggle_maintenance":
+            current = settings.get("maintenance_mode", False); settings["maintenance_mode"] = not current; save_settings()
+            await callback.answer("🔒" if not current else "🔓", show_alert=True)
+            try: await msg.edit_text("🛠️ **لوحة التحكم الرئيسية**", reply_markup=get_admin_panel_kb(), parse_mode=ParseMode.MARKDOWN)
+            except: pass
+            return
+        if data=="admin_gift_links":
+            links=get_all_gift_links()
+            await msg.edit_text(f"🎁 **إدارة روابط الهدايا** ({len(links)})",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ إنشاء رابط", callback_data="admin_gift_link_create")],
+                    [InlineKeyboardButton("📋 عرض/إدارة", callback_data="admin_gift_link_list")],
+                    [InlineKeyboardButton("🗑️ حذف", callback_data="admin_gift_link_delete_menu")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
+                parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🎁"); return
+        if data.startswith("admin_gift_manage_"):
+            code = data.replace("admin_gift_manage_", ""); link = get_gift_link(code)
+            if not link: await callback.answer("⚠️", show_alert=True); return
+            allowed = get_gift_allowed_users(code); allowed_txt = f"`{len(allowed)}` مستخدم" if allowed else "الجميع"
+            ch = link.get('channel_id') or "غير محدد"; en = "✅" if link.get('post_enabled') else "❌"
+            interval = link.get('post_interval_hours', 2); mode = link.get('post_mode') or 'auto'
+            mode_txt = "🤖 تلقائي" if mode == 'auto' else "👤 يدوي"
+            rem = max(0, int(link['expires_at'] - time.time())); h_rem = rem // 3600; m_rem = (rem % 3600) // 60
+            bot_user = BOT_USERNAME or "bot"; current_url = f"https://t.me/{bot_user}?start=gift_{code}"
+            txt = (f"⚙️ **إدارة الرابط** `{code}`\n\n🔗 `{current_url}`\n\n📖 `{link['single_amount']}`\n🧩 `{link['merge_amount']}`\n👥 `{link['used_count']}/{link['max_users']}`\n⏰ `{h_rem}س {m_rem}د`\n\n🛡️ {allowed_txt}\n📢 `{ch}`\n⏯ {en}\n📣 {mode_txt}\n🔄 كل `{interval}` ساعة")
+            kb_rows = [
+                [InlineKeyboardButton("📤 مشاركة الرابط", url=f"https://t.me/share/url?url={quote(current_url)}&text={quote('🎁 هدية!')}")],
+                [InlineKeyboardButton("👥 مستخدمين", callback_data=f"admin_gift_users_{code}"), InlineKeyboardButton("📢 قناة", callback_data=f"admin_gift_setchannel_{code}")],
+                [InlineKeyboardButton("⏯ تفعيل/تعطيل", callback_data=f"admin_gift_toggle_{code}")],
+                [InlineKeyboardButton(f"📣 الوضع", callback_data=f"admin_gift_mode_{code}")],
+                [InlineKeyboardButton("⏰ كل كم ساعة", callback_data=f"admin_gift_interval_{code}")],
+            ]
+            if mode == 'auto':
+                if link.get('post_enabled') and link.get('channel_id'):
+                    kb_rows.append([InlineKeyboardButton("📤 انشر الآن", callback_data=f"admin_gift_publish_{code}")])
+            else:
+                kb_rows.append([InlineKeyboardButton("🔄 توليد رابط جديد", callback_data=f"admin_gift_publish_{code}")])
+            kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_gift_links")])
+            await msg.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("⚙️"); return
+        if data.startswith("admin_gift_users_set_"):
+            code = data.replace("admin_gift_users_set_", ""); user_data[uid] = {"awaiting_gift_allowed_users": code}
+            await msg.delete(); await msg.reply_text("👥 **أرسل المعرّفات** مفصولة بمسافة:\n`123456789 @user1`\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("👥"); return
+        if data.startswith("admin_gift_users_clear_"):
+            code = data.replace("admin_gift_users_clear_", ""); clear_gift_allowed_users(code)
+            await msg.edit_text("✅ **مفتوح للجميع**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
+            await callback.answer("✅"); return
+        if data.startswith("admin_gift_users_"):
+            code = data.replace("admin_gift_users_", ""); allowed = get_gift_allowed_users(code)
+            if allowed: txt = f"👥 **المستخدمون المسموح لهم** ({len(allowed)})\n\n" + "\n".join(f"• `{u}`" for u in allowed[:30])
+            else: txt = "👥 **مفتوح للجميع**"
+            await msg.edit_text(txt, reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ إضافة", callback_data=f"admin_gift_users_set_{code}")],
+                [InlineKeyboardButton("🗑️ مسح", callback_data=f"admin_gift_users_clear_{code}")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data=f"admin_gift_manage_{code}")]]), parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("👥"); return
+        if data.startswith("admin_gift_setchannel_"):
+            code = data.replace("admin_gift_setchannel_", ""); user_data[uid] = {"awaiting_gift_channel": code}
+            await msg.delete(); await msg.reply_text("📢 **معرّف القناة:**\n`@channel` أو `-100...`\n\n⚠️ البوت أدمن\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📢"); return
+        if data.startswith("admin_gift_toggle_"):
+            code = data.replace("admin_gift_toggle_", ""); res = toggle_gift_post(code)
+            if res is None: await callback.answer("⚠️ حدد قناة أولاً", show_alert=True); return
+            await callback.answer("✅" if res else "❌", show_alert=True)
+            await _reopen_admin_page(client, uid, msg, f"admin_gift_manage_{code}"); return
+        if data.startswith("admin_gift_mode_"):
+            code = data.replace("admin_gift_mode_", ""); link = get_gift_link(code)
+            if not link: await callback.answer("⚠️", show_alert=True); return
+            new_mode = 'manual' if (link.get('post_mode') or 'auto') == 'auto' else 'auto'
+            set_gift_post_mode(code, new_mode)
+            await callback.answer("👤 يدوي" if new_mode=='manual' else "🤖 تلقائي", show_alert=True)
+            await _reopen_admin_page(client, uid, msg, f"admin_gift_manage_{code}"); return
+        if data.startswith("admin_gift_publish_"):
+            code = data.replace("admin_gift_publish_", ""); link = get_gift_link(code)
+            if not link: await callback.answer("⚠️", show_alert=True); return
+            mode = link.get('post_mode') or 'auto'
+            ok, err, new_code = await publish_gift_now(client, uid, code)
+            if ok: await callback.answer("✅ نُشر" if mode=='auto' else "✅ أُرسل لك", show_alert=True)
+            else: await callback.answer(f"❌ {err}", show_alert=True)
+            await _reopen_admin_page(client, uid, msg, "admin_gift_links"); return
+        if data.startswith("admin_gift_interval_"):
+            code = data.replace("admin_gift_interval_", ""); user_data[uid] = {"awaiting_gift_post_interval": code}
+            await msg.delete(); await msg.reply_text("⏰ **كل كم ساعة؟** (1-24)\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("⏰"); return
+        if data=="admin_gift_link_create":
+            user_data[uid]={"gift_link_step":"single"}; await msg.delete()
+            await msg.reply_text("🎁 **إنشاء رابط**\n\n📖 **الفصول المفردة** لكل مستخدم؟\n(0 للتخطي)\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🎁"); return
+        if data=="admin_gift_link_list":
+            links=get_all_gift_links()
+            if not links:
+                await msg.edit_text("📭 لا روابط", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
+                await callback.answer("📭"); return
+            kb=[]
+            for l in links:
+                rem=max(0, int(l['expires_at']-time.time())); h=rem//3600; m=(rem%3600)//60
+                exp = "منتهي" if rem<=0 else f"{h}س{m}د"
+                mode_icon = "🤖" if (l.get('post_mode') or 'auto') == 'auto' else "👤"
+                kb.append([InlineKeyboardButton(f"{mode_icon} {l['code']} — {l['used_count']}/{l['max_users']} — {exp}", callback_data=f"admin_gift_manage_{l['code']}")])
+            kb.append([InlineKeyboardButton("🔙", callback_data="admin_gift_links"), InlineKeyboardButton("❌", callback_data="close_list")])
+            await msg.edit_text("📋 اختر:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("📋"); return
+        if data=="admin_gift_link_delete_menu":
+            links=get_all_gift_links()
+            if not links: await msg.edit_text("📭"); await callback.answer("📭"); return
+            kb=[[InlineKeyboardButton(f"🗑️ {l['code']}", callback_data=f"admin_gift_link_del_{l['code']}")] for l in links]
+            kb.append([InlineKeyboardButton("🔙", callback_data="admin_gift_links")])
+            await msg.edit_text("حذف:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+        if data.startswith("admin_gift_link_del_"):
+            code=data.replace("admin_gift_link_del_","")
+            if delete_gift_link(code):
+                await msg.edit_text(f"✅ حُذف `{code}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+            else: await msg.edit_text("⚠️")
+            await callback.answer("✅"); return
+        if data=="gift_expiry_hours":
+            if not user_data.get(uid,{}).get("gift_link_step"): await callback.answer("⚠️", show_alert=True); return
+            user_data[uid]["gift_expiry_unit"]="hours"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
+            await msg.reply_text("⏰ **الساعات:**\nمثال: `24`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏰"); return
+        if data=="gift_expiry_minutes":
+            if not user_data.get(uid,{}).get("gift_link_step"): await callback.answer("⚠️", show_alert=True); return
+            user_data[uid]["gift_expiry_unit"]="minutes"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
+            await msg.reply_text("⏱️ **الدقائق:**\nمثال: `30`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏱️"); return
+        if data=="admin_merge_counters":
+            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{settings.get('merge_max_per_file',10)}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🧮"); return
+        if data=="admin_edit_merge_limit":
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_daily_limit',50)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_merge_limit":True}; await callback.answer("✏️"); return
+        if data=="admin_edit_merge_max":
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_max_per_file',10)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_merge_max":True}; await callback.answer("✏️"); return
+        if data=="admin_edit_daily_amount":
+            await msg.delete(); await msg.reply_text(f"✏️ الحالي: `{settings.get('daily_reward_amount',100)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_daily_amount":True}; await callback.answer("✏️"); return
+        if data=="admin_merge_gifts":
+            await msg.edit_text("🧩 **هدية دمج الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎯 فرد",callback_data="admin_merge_gift_one"), InlineKeyboardButton("🎁 جميع",callback_data="admin_merge_gift_all")],[InlineKeyboardButton("🔙",callback_data="admin_panel_back"), InlineKeyboardButton("❌",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🧩"); return
+        if data=="admin_merge_gift_one":
+            await msg.delete(); await msg.reply_text("🎯 ID\n\n/cancel")
+            user_data[uid]={"awaiting_merge_gift_one_id":True}; await callback.answer("🎯"); return
+        if data=="admin_merge_gift_all":
+            await msg.delete(); await msg.reply_text("🎁 العدد\n\n/cancel")
+            user_data[uid]={"awaiting_merge_gift_all":True}; await callback.answer("🎁"); return
+        if data=="admin_complaints":
+            clist=get_all_complaints()
+            if not clist:
+                await msg.edit_text("📭 لا شكاوى",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                await callback.answer("📭"); return
+            txt=f"📬 **صندوق الشكاوى** ({len(clist)})\n\n"
+            for i,c in enumerate(clist[-20:][::-1],1):
+                un=f"@{c['username']}" if c.get('username') else "—"; dt=time.strftime("%Y-%m-%d %H:%M",time.localtime(c.get('ts',0)))
+                txt+=f"{i}. {c.get('first_name','?')} | `{c['uid']}` | {un}\n🕐 {dt}\n💬 {c.get('text','')[:180]}\n\n"
+            if len(txt)>3900: txt=txt[:3900]+"..."
+            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📬"); return
+        if data=="admin_clear_complaints":
+            await msg.edit_text(f"حذف {count_complaints()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_clear_complaints_yes")],[InlineKeyboardButton("❌",callback_data="admin_complaints")]]))
+            await callback.answer("⚠️"); return
+        if data=="admin_clear_complaints_yes":
+            n=clear_complaints(); await msg.edit_text(f"✅ {n}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await callback.answer("✅"); return
+        if data=="admin_panel_back":
+            try: await msg.delete()
+            except: pass
+            await msg.reply_text("🛠️ **لوحة التحكم الرئيسية**",reply_markup=get_admin_panel_kb(),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🔙"); return
+        if data=="sec_broadcast_stats":
+            await msg.edit_text(
+                f"📊 **لوحة الإحصائيات العامة**\n\n👥 `{get_users_count()}`\n📥 `{get_download_count()}`\n👑 VIP `{len(get_all_vips())}`\n👮 `{len(get_all_added_admins())}`\n🚫 `{len(get_all_banned())}`\n🤖 `{len(get_all_bots())}`\n📬 `{count_complaints()}`\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📊"); return
+        if data=="admin_broadcast":
+            await msg.delete(); await msg.reply_text("📢 النص:\n\n/cancel")
+            user_data[uid]={'awaiting_broadcast':True}; await callback.answer("📢"); return
+        if data=="admin_stats":
+            await msg.edit_text(f"📊 **إحصائيات**\n👥 `{get_users_count()}`\n📥 `{get_download_count()}`\n⭐ `{count_total_favorites()}`\n👑 `{len(get_all_vips())}`\n🔄 `{time.strftime('%Y-%m-%d %H:%M:%S')}`",parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📊"); return
+        if data=="admin_reset_section":
+            await msg.edit_text("♻️ **تصفير الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("♻️ الجميع",callback_data="admin_reset_all_confirm"), InlineKeyboardButton("👤 عضو",callback_data="admin_reset_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("♻️"); return
+        if data=="admin_reset_all_confirm":
+            await msg.edit_text(f"تصفير {get_users_count()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_reset_all_do")],[InlineKeyboardButton("❌",callback_data="admin_reset_section")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("⚠️"); return
+        if data=="admin_reset_all_do":
+            await callback.answer("⏳")
+            try:
+                count=reset_all_balances(); await msg.edit_text(f"✅ {count}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            except Exception as e: await msg.edit_text(f"❌ {e}")
+            return
+        if data=="admin_reset_one":
+            await msg.delete(); await msg.reply_text("👤 ID\n\n/cancel")
+            user_data[uid]={"awaiting_reset_user":True}; await callback.answer("👤"); return
+        if data=="admin_ban_section":
+            await msg.edit_text(f"🚫 **إدارة المحظورين** ({len(get_all_banned())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚫 حظر",callback_data="admin_ban_user"), InlineKeyboardButton("✅ فك",callback_data="admin_unban_user")],[InlineKeyboardButton("📋",callback_data="admin_banned_list"), InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🚫"); return
+        if data=="admin_ban_user":
+            await msg.delete(); await msg.reply_text("🚫 ID\n\n/cancel")
+            user_data[uid]={"awaiting_ban_user":True}; await callback.answer("🚫"); return
+        if data=="admin_unban_user":
+            await msg.delete(); await msg.reply_text("✅ ID\n\n/cancel")
+            user_data[uid]={"awaiting_unban_user":True}; await callback.answer("✅"); return
+        if data=="admin_banned_list":
+            blist=get_all_banned()
+            if not blist:
+                await msg.edit_text("لا محظورين",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                await callback.answer("📋"); return
+            txt=f"📋 ({len(blist)})\n\n" + "\n".join(f"{i}. `{b}`" for i,b in enumerate(blist,1))
+            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+        if data=="admin_captions_section":
+            await msg.edit_text(f"📄\n\n{settings.get('single_caption','')[:200]}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل الوصف",callback_data="admin_edit_single_caption")],[InlineKeyboardButton("♻️ استعادة الافتراضي",callback_data="admin_reset_captions")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📄"); return
+        if data=="admin_edit_single_caption":
+            await msg.delete(); await msg.reply_text("✏️ {chapter} {title}\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_single_caption":True}; await callback.answer("✏️"); return
+        if data=="admin_reset_captions":
+            settings["single_caption"]=NEW_SINGLE_CAPTION; save_settings()
+            await msg.edit_text("✅",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await callback.answer("✅"); return
+        if data=="admin_images_section":
+            def st(k): return "✅" if settings.get(k) else "❌"
+            await msg.edit_text(f"🖼️ **إدارة صور البوت**\n\nBDF:{st('bdf_image')} ترحيب:{st('welcome_image')} مفضلة:{st('favorites_image')}\nنتائج:{st('results_image')} مصادر:{st('sources_image')} اشتراك:{st('force_sub_image')}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🖼️ BDF",callback_data="img_menu_bdf"), InlineKeyboardButton("🖼️ ترحيب",callback_data="img_menu_welcome")],[InlineKeyboardButton("🖼️ مفضلة",callback_data="img_menu_favorites")],[InlineKeyboardButton("🖼️ نتائج",callback_data="img_menu_results"), InlineKeyboardButton("🖼️ مصادر",callback_data="img_menu_sources")],[InlineKeyboardButton("🖼️ اشتراك",callback_data="img_menu_sub")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🖼️"); return
+        if data.startswith("img_menu_"):
+            km={"bdf":("bdf_image","BDF","admin_add_bdf","admin_del_bdf"),"welcome":("welcome_image","ترحيب","admin_set_welcome_image","admin_del_welcome_image"),"favorites":("favorites_image","مفضلة","admin_set_favorites_image","admin_del_favorites_image"),"results":("results_image","نتائج","admin_set_results_image","admin_del_results_image"),"sources":("sources_image","مصادر","admin_set_sources_image","admin_del_sources_image"),"sub":("force_sub_image","اشتراك","admin_set_sub_image","admin_del_sub_image")}
+            k=data.replace("img_menu_","")
+            if k not in km: await callback.answer("⚠️"); return
+            sk,ttl,scb,dcb=km[k]; has="✅" if settings.get(sk) else "❌"
+            await msg.edit_text(f"🖼️ **{ttl}**: {has}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ رفع صورة",callback_data=scb), InlineKeyboardButton("🗑️ حذف الصورة",callback_data=dcb)],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🖼️"); return
+        if data=="admin_messages_section":
+            await msg.edit_text("📝 **إدارة رسائل البوت**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 رسالة الترحيب",callback_data="admin_set_welcome"), InlineKeyboardButton("📢 رسالة الاشتراك",callback_data="admin_set_sub_message")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📝"); return
+        if data=="admin_download_settings":
+            parallel = settings.get("allow_parallel_downloads", False); status = "✅" if parallel else "❌"
+            btn_text = "🔒 تعطيل" if parallel else "🔓 تفعيل"
+            await msg.edit_text(f"⚙️ **التحميل**\n\nمتوازي: {status}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data="admin_toggle_parallel")],[InlineKeyboardButton("🔙", callback_data="admin_panel_back"), InlineKeyboardButton("❌", callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("⚙️"); return
+        if data=="admin_toggle_parallel":
+            settings["allow_parallel_downloads"] = not settings.get("allow_parallel_downloads", False); save_settings()
+            await callback.answer("✅" if settings["allow_parallel_downloads"] else "❌", show_alert=True)
+            await _reopen_admin_page(client, uid, msg, "admin_download_settings"); return
+        if data=="admin_vip_section":
+            sc=settings.get("vip_contact_second")
+            await msg.edit_text(f"👑 **إدارة الـ VIP** ({len(get_all_vips())})\nالزر الثاني: `{sc or 'غير محدد'}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة عضو VIP",callback_data="admin_vip_add"), InlineKeyboardButton("🗑️ إزالة عضو VIP",callback_data="admin_vip_remove")],[InlineKeyboardButton("🎁 VIP مجاني للجميع",callback_data="admin_vip_all_1day")],[InlineKeyboardButton("👥 تعديل زر التواصل",callback_data="admin_set_vip_contact")],[InlineKeyboardButton("📋 قائمة المشتركين",callback_data="admin_vip_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("👑"); return
+        if data=="admin_set_vip_contact":
+            await msg.edit_text(f"👥 الحالي: `{settings.get('vip_contact_second') or 'غير محدد'}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️",callback_data="admin_del_vip_contact")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_vip_contact":True}; await callback.answer("👥"); return
+        if data=="admin_del_vip_contact":
+            settings["vip_contact_second"]=None; save_settings(); user_data.pop(uid,None)
+            await msg.edit_text("✅",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await callback.answer("✅"); return
+        if data=="admin_vip_all_1day":
+            await msg.edit_text(f"منح VIP ليوم لـ {get_users_count()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_vip_all_1day_yes")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("⚠️"); return
+        if data=="admin_vip_all_1day_yes":
+            await callback.answer("⏳")
+            success=extend_all_vips(24*3600)
+            for u in get_all_user_ids():
+                try:
+                    await client.send_message(u,"🎉 **VIP ليوم** 👑",parse_mode=ParseMode.MARKDOWN); await asyncio.sleep(0.05)
+                except: pass
+            await msg.edit_text(f"✅ {success}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]])); return
+        if data=="admin_vip_add":
+            await msg.edit_text("اختر:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 أسبوع",callback_data="vip_add_weekly"), InlineKeyboardButton("📆 شهر",callback_data="vip_add_monthly"), InlineKeyboardButton("🗓️ سنة",callback_data="vip_add_yearly")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await callback.answer("👑"); return
+        if data in ("vip_add_weekly","vip_add_monthly","vip_add_yearly"):
+            plan=data.replace("vip_add_",""); user_data[uid]={"awaiting_vip_user":plan}
+            await msg.delete(); await msg.reply_text(f"{VIP_PLAN_NAMES[plan]}\n\nID/@username\n\n/cancel")
+            await callback.answer("👑"); return
+        if data=="admin_vip_remove":
+            await msg.delete(); await msg.reply_text("ID/@username\n\n/cancel")
+            user_data[uid]={"awaiting_vip_remove":True}; await callback.answer("🗑️"); return
+        if data=="admin_vip_list":
+            vips=get_all_vips()
+            if not vips: await msg.edit_text("لا مشتركين"); await callback.answer("📋"); return
+            txt="📋 **VIP**\n\n"
+            for v in vips:
+                info=get_vip_info(v)
+                if info: txt+=f"• `{v}` — {VIP_PLAN_NAMES.get(info['plan'],'?')} — {max(0,int((info['expires']-time.time())//86400))} يوم\n"
+            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+        if data=="admin_rewards_section":
+            amt=settings.get("daily_reward_amount",100); iv=settings.get("daily_reward_interval",86400)//3600
+            await msg.edit_text(f"🎁 **إعدادات المكافآت اليومية**\n\n💰 `{amt}`\n⏰ `{iv}` ساعة\n🔗 مفرد: `{settings.get('referral_bonus_single',50)}`\n🔗 دمج: `{settings.get('referral_bonus_merge',20)}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰",callback_data="admin_edit_reward_amount"), InlineKeyboardButton("⏰",callback_data="admin_edit_reward_interval")],[InlineKeyboardButton("🔗 مفرد",callback_data="admin_edit_ref_single"), InlineKeyboardButton("🔗 دمج",callback_data="admin_edit_ref_merge")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🎁"); return
+        if data=="admin_edit_reward_amount":
+            await msg.delete(); await msg.reply_text(f"💰 `{settings.get('daily_reward_amount',100)}`\n\n/cancel")
+            user_data[uid]={"awaiting_reward_amount":True}; await callback.answer("💰"); return
+        if data=="admin_edit_reward_interval":
+            await msg.delete(); await msg.reply_text(f"⏰ `{settings.get('daily_reward_interval',86400)//3600}` ساعة\n\n/cancel")
+            user_data[uid]={"awaiting_reward_interval":True}; await callback.answer("⏰"); return
+        if data=="admin_edit_ref_single":
+            await msg.delete(); await msg.reply_text(f"🔗 `{settings.get('referral_bonus_single',50)}`\n\n/cancel")
+            user_data[uid]={"awaiting_ref_single_amount":True}; await callback.answer("🔗"); return
+        if data=="admin_edit_ref_merge":
+            await msg.delete(); await msg.reply_text(f"🔗 `{settings.get('referral_bonus_merge',20)}`\n\n/cancel")
+            user_data[uid]={"awaiting_ref_merge_amount":True}; await callback.answer("🔗"); return
+        if data=="admin_gifts_section":
+            await msg.edit_text("🎉 **قسم هدايا الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 جميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 فرد",callback_data="admin_gift_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🎉"); return
+        if data=="admin_gift_all":
+            await msg.delete(); await msg.reply_text("🎁 العدد\n\n/cancel")
+            user_data[uid]={"awaiting_gift_all":True}; await callback.answer("🎁"); return
+        if data=="admin_gift_one":
+            await msg.delete(); await msg.reply_text("🎯 ID\n\n/cancel")
+            user_data[uid]={"awaiting_gift_one_id":True}; await callback.answer("🎯"); return
+        if data=="admin_manage_admins":
+            await msg.edit_text(f"👮‍♂️ **الأدمنز** (رئيسي: {len(ADMINS)} | مضاف: {len(get_all_added_admins())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة أدمن",callback_data="admin_add_new"), InlineKeyboardButton("🗑️ حذف أدمن",callback_data="admin_remove_one")],[InlineKeyboardButton("📋 قائمة الأدمنز",callback_data="admin_list_admins"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("👮"); return
+        if data=="admin_add_new":
+            await msg.delete(); await msg.reply_text("➕ ID\n\n/cancel")
+            user_data[uid]={"awaiting_add_admin":True}; await callback.answer("➕"); return
+        if data=="admin_remove_one":
+            alist=get_all_added_admins()
+            if not alist: await msg.edit_text("لا مضافون"); await callback.answer("⚠️"); return
+            kb=[[InlineKeyboardButton(f"🗑️ {a}",callback_data=f"adm_del_{a}")] for a in alist]
+            kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
+            await msg.edit_text("حذف:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+        if data.startswith("adm_del_"):
+            try:
+                a=int(data[8:])
+                if remove_added_admin(a):
+                    await msg.edit_text(f"✅ {a}")
+                    try: await client.send_message(a,"⚠️",parse_mode=ParseMode.MARKDOWN)
+                    except: pass
+                else: await msg.edit_text("⚠️")
+            except: pass
+            await callback.answer("✅"); return
+        if data=="admin_list_admins":
+            txt="📋\n\n"
+            for a in ADMINS + get_all_added_admins(): txt+=f"• `{a}`\n"
+            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+        if data=="admin_backup_section":
+            bc=len(get_all_bots()); cnt=len([f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")]) if os.path.exists(BACKUP_DIR) else 0
+            await msg.edit_text(f"💾 **النسخ الاحتياطي**\n\nمحفوظة:{cnt}\nبوتات:{bc}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 إنشاء وإرسال ({bc})",callback_data="backup_create_send")],[InlineKeyboardButton("📥 استعادة نسخة",callback_data="backup_restore")],[InlineKeyboardButton("🗑️ حذف كل النسخ",callback_data="backup_delete_all")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("💾"); return
+        if data=="backup_create_send":
+            if not get_all_bots(): await callback.answer("⚠️",show_alert=True); return
+            await callback.answer("⏳"); await msg.edit_text("⏳")
+            s,f,_=await send_zip_via_added_bots(manual=True)
+            await msg.edit_text(f"✅ {s}\n❌ {f}"); return
+        if data=="backup_restore":
+            await msg.delete(); await msg.reply_text("📥 ZIP\n\n/cancel")
+            user_data[uid]={"awaiting_backup_restore":True}; await callback.answer("📥"); return
+        if data=="backup_delete_all":
+            try:
+                fs=[f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")]
+                for f in fs: os.remove(os.path.join(BACKUP_DIR,f))
+                await msg.edit_text(f"✅ {len(fs)}")
+            except Exception as e: await msg.edit_text(f"❌ {e}")
+            await callback.answer("✅"); return
+        if data=="admin_bots_section":
+            await msg.edit_text(f"🤖 **إدارة بوتات النسخ** ({len(get_all_bots())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة بوت",callback_data="bots_add_token"), InlineKeyboardButton("🗑️ حذف بوت",callback_data="bots_remove")],[InlineKeyboardButton("📋 قائمة البوتات",callback_data="bots_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🤖"); return
+        if data=="bots_add_token":
+            await msg.delete(); await msg.reply_text("➕ `اسم | توكن | آيدي`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            user_data[uid]={"awaiting_bot_token":True}; await callback.answer("➕"); return
+        if data=="bots_remove":
+            bots=get_all_bots()
+            if not bots: await msg.edit_text("لا بوتات"); await callback.answer("⚠️"); return
+            kb=[[InlineKeyboardButton(f"🗑️ {info.get('name','?')}",callback_data=f"bot_del_{bid}")] for bid,info in bots.items()]
+            kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
+            await msg.edit_text("حذف:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+        if data.startswith("bot_del_"):
+            bid=data[8:]; ok,info=remove_bot_token(bid)
+            await msg.edit_text("✅" if ok else "⚠️"); await callback.answer("✅"); return
+        if data=="bots_list":
+            bots=get_all_bots()
+            if not bots: await msg.edit_text("لا بوتات"); await callback.answer("📋"); return
+            txt=f"📋\n\n"
+            for bid,info in bots.items(): txt+=f"🤖 **{info.get('name','?')}**\n🆔 `{bid}`\n📬 `{info.get('target_id','—')}`\n\n"
+            await msg.edit_text(txt[:4000],parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+        if data=="admin_forcesub_section":
+            chs=settings.get("force_sub_channels",[]); ch_list="\n".join(f"• `{ch}`" for ch in chs[:5]) or "_لا قنوات_"
+            await msg.edit_text(f"📢 **الاشتراك الإجباري** ({len(chs)})\n\n{ch_list}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة قناة",callback_data="admin_add_sub_channel"), InlineKeyboardButton("🗑️ حذف قناة",callback_data="admin_del_sub_channel")],[InlineKeyboardButton("✏️ تعديل أسماء الأزرار",callback_data="admin_edit_sub_btns")],[InlineKeyboardButton("📝 نص رسالة الاشتراك",callback_data="admin_set_sub_message"), InlineKeyboardButton("🖼️ صورة الاشتراك",callback_data="admin_set_sub_image")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("📢"); return
+        if data=="admin_edit_sub_btns":
+            chs=settings.get("force_sub_channels",[])
+            if not chs: await callback.answer("⚠️", show_alert=True); return
+            kb=[]
+            for ch in chs:
+                c_ch = ch[1:] if ch.startswith("@") else ch
+                name = settings.get("force_sub_buttons", {}).get(ch, f"اشترك في {ch}")
+                kb.append([InlineKeyboardButton(name, callback_data=f"edit_sub_btn_{c_ch}")])
+            kb.append([InlineKeyboardButton("🔙",callback_data="admin_forcesub_section")])
+            await msg.edit_text("اختر:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("✏️"); return
+        if data.startswith("edit_sub_btn_"):
+            c_ch = data.replace("edit_sub_btn_", ""); ch = f"@{c_ch}"
+            user_data[uid] = {"awaiting_sub_btn_name": ch}; await msg.delete()
+            await msg.reply_text(f"✏️ اسم زر {ch}:\n\n/cancel"); await callback.answer("✏️"); return
+        if data=="admin_add_sub_channel":
+            await msg.delete(); await msg.reply_text("@username\n\n/cancel")
+            user_data[uid]={"awaiting_sub_channel_add":True}; await callback.answer("➕"); return
+        if data=="admin_del_sub_channel":
+            chs=settings.get("force_sub_channels",[])
+            if not chs: await msg.edit_text("لا قنوات"); await callback.answer("⚠️"); return
+            kb=[[InlineKeyboardButton(f"🗑️ {ch}",callback_data=f"del_sub_{ch}")] for ch in chs]
+            kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
+            await msg.edit_text("حذف:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+        if data.startswith("del_sub_"):
+            ch=data[8:]; chs=settings.get("force_sub_channels",[])
+            if ch in chs:
+                chs.remove(ch); settings["force_sub_channels"]=chs
+                b=settings.get("force_sub_buttons",{}); b.pop(ch,None); settings["force_sub_buttons"]=b; save_settings()
+                await msg.edit_text(f"✅ `{ch}`")
+            else: await msg.edit_text("⚠️")
+            await callback.answer("✅"); return
+        if data=="admin_set_sub_message":
+            await msg.delete(); await msg.reply_text("📝\n\n/cancel")
+            user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return
+        if data=="admin_set_sub_image":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_sub_image':True}; await callback.answer("🖼️"); return
+        if data=="admin_add_bdf":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_bdf':True}; await callback.answer("🖼️"); return
+        if data=="admin_del_bdf":
+            settings["bdf_image"]=None; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_set_welcome_image":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_welcome_image':True}; await callback.answer("🖼️"); return
+        if data=="admin_del_welcome_image":
+            settings["welcome_image"]=None; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_set_favorites_image":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_favorites_image':True}; await callback.answer("🖼️"); return
+        if data=="admin_del_favorites_image":
+            settings["favorites_image"]=None; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_set_results_image":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_results_image':True}; await callback.answer("🖼️"); return
+        if data=="admin_del_results_image":
+            settings["results_image"]=None; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_set_sources_image":
+            await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
+            user_data[uid]={'awaiting_sources_image':True}; await callback.answer("🖼️"); return
+        if data=="admin_del_sources_image":
+            settings["sources_image"]=None; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_set_welcome":
+            await msg.delete(); await msg.reply_text("📝\n\n/cancel")
+            user_data[uid]={'awaiting_welcome':True}; await callback.answer("📝"); return
+        if data=="admin_del_welcome":
+            settings["welcome_message"]=DEFAULTS["welcome_message"]; save_settings(); await msg.edit_text("✅"); await callback.answer("✅"); return
+        if data=="admin_cleanup":
+            r=cleanup_empty_favorites(); await msg.edit_text(f"✅ {r}"); await callback.answer("✅"); return
+
+    await callback.answer("⚠️", show_alert=True)
+
+# ============ Text Handler ============
+@app.on_message(filters.private & filters.text & ~filters.command(["admin","start","search","check","cancel"]))
+async def handle_all_text(client,message):
+    uid=message.from_user.id
+    if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
+
+    if user_data.get(uid,{}).get("awaiting_complaint"):
+        text=message.text.strip()
+        if not text or len(text)<3: await message.reply_text("⚠️ قصيرة"); return
+        add_complaint(uid,message.from_user.username or "",message.from_user.first_name or "",text)
+        user_data.pop(uid,None); await message.reply_text("✅ **تم الإرسال**")
+        try: await client.send_message(OWNER_ID,f"📬 `{uid}`\n💬 {text}",parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        return
+
+    if user_data.get(uid, {}).get('awaiting_merge_range'):
+        m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$', message.text.strip())
+        if not m: await message.reply_text("❌ `1-10`", parse_mode=ParseMode.MARKDOWN); return
+        start_num, end_num = float(m.group(1)), float(m.group(2))
+        if start_num > end_num: start_num, end_num = end_num, start_num
+        info = user_data[uid]['awaiting_merge_range']; src, ident, chs = info['src'], info['ident'], info['chapters']
+        selected = []
+        for ch in chs:
+            num = None
+            try:
+                if src in ("mangalik","lavascans") and ch.get('is_numeric'): num = float(ch['num_str'])
+                elif src == "mesh":
+                    m2 = re.search(r'(\d+(?:\.\d+)?)', ch.get('display_text', ''))
+                    if m2: num = float(m2.group(1))
+                elif src == "azora": num = float(ch.get('number', ''))
+            except: pass
+            if num is not None and start_num <= num <= end_num: selected.append(ch)
+        if not selected: await message.reply_text(f"❌ لا فصول"); return
+        count = len(selected); mmax = settings.get("merge_max_per_file", 10)
+        if count > mmax: await message.reply_text(f"❌ {mmax} كحد أقصى"); return
+        if not is_vip(uid):
+            remaining = get_merge_remaining(uid)
+            if remaining < count: await message.reply_text(f"❌ المطلوب `{count}` المتاح `{int(remaining)}`", parse_mode=ParseMode.MARKDOWN); return
+        if not settings.get("allow_parallel_downloads", False):
+            if is_downloading(uid) or not try_lock_download(uid): await message.reply_text("⏳"); return
+        locked = not settings.get("allow_parallel_downloads", False)
+        try:
+            success, rem = try_deduct_merge(uid, count)
+            if not success: await message.reply_text("❌"); return
+            user_data[uid].pop('awaiting_merge_range', None)
+            title = user_data[uid].get('title', 'مانجا')
+            lm = await message.reply_text(f"🧩 `{start_num:g} → {end_num:g}` ({count})\n⏳")
+            all_urls = []
+            for idx, ch in enumerate(selected, 1):
+                try:
+                    urls = []
+                    if src == "mangalik": urls = await asyncio.to_thread(StarzManga.get_chapter_images, ch['url'])
+                    elif src == "mesh": urls = await asyncio.to_thread(MeshManga.get_chapter_images, ch['id'])
+                    elif src == "azora": urls = await asyncio.to_thread(AzoraFly.get_chapter_images, ch['id'])
+                    elif src == "lavascans": urls = await asyncio.to_thread(LavaScans.get_chapter_images, ch['url'])
+                    if urls: all_urls.extend(urls)
+                    if idx % 2 == 0 or idx == count: await lm.edit_text(f"🧩 `{idx}/{count}` — `{len(all_urls)}` صورة")
+                except Exception as e: print(f"⚠️ {e}")
+            if not all_urls: refund_merge(uid, count); await lm.edit_text("❌"); return
+            await lm.edit_text(f"🧩 تحويل `{len(all_urls)}`...")
+            headers = None
+            if src == "mangalik": headers = StarzManga.H
+            elif src == "mesh": headers = MeshManga.H
+            elif src == "azora": headers = {"User-Agent":AzoraFly.H["User-Agent"],"Referer":AzoraFly.BASE+"/"}
+            elif src == "lavascans": headers = LavaScans.H
+            buf = await download_images_parallel(all_urls, client=client, headers=headers)
+            if not buf: refund_merge(uid, count); await lm.edit_text("❌"); return
+            increment_download_count(uid); await lm.edit_text("📤")
+            safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()[:50] or "manga"
+            await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{len(all_urls)}`", parse_mode=ParseMode.MARKDOWN)
+            try: await lm.delete()
+            except: pass
+            del buf; gc.collect()
+        finally:
+            if locked: unlock_download(uid)
+        return
+
+    gs = user_data.get(uid, {}).get("gift_link_step")
+    if gs:
+        try:
+            val = int(message.text.strip())
+            if val < 0: raise ValueError
+        except: await message.reply_text("⚠️ رقم"); return
+        if gs == "single":
+            user_data[uid]["gift_link_single"] = val; user_data[uid]["gift_link_step"] = "merge"
+            await message.reply_text(f"✅ فردي: `{val}`\n\n🧩 **المدمجة**؟\n(0 للتخطي)\n\n/cancel", parse_mode=ParseMode.MARKDOWN); return
+        if gs == "merge":
+            user_data[uid]["gift_link_merge"] = val; user_data[uid]["gift_link_step"] = "max"
+            await message.reply_text(f"✅ دمج: `{val}`\n\n👥 **الحد الأقصى**؟\n(>0)\n\n/cancel", parse_mode=ParseMode.MARKDOWN); return
+        if gs == "max":
+            if val <= 0: await message.reply_text("⚠️ >0"); return
+            user_data[uid]["gift_link_max"] = val; user_data[uid]["gift_link_step"] = "expiry"
+            await message.reply_text(f"✅ `{val}`\n\n⏰ الوحدة:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏰ ساعة", callback_data="gift_expiry_hours"), InlineKeyboardButton("⏱️ دقيقة", callback_data="gift_expiry_minutes")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+        if gs == "expiry_value":
+            if val <= 0: await message.reply_text("⚠️ >0"); return
+            unit = user_data[uid].get("gift_expiry_unit", "hours"); seconds = val * 3600 if unit == "hours" else val * 60
+            expires_at = time.time() + seconds
+            single = user_data[uid]["gift_link_single"]; merge = user_data[uid]["gift_link_merge"]; max_users = user_data[uid]["gift_link_max"]
+            code = create_gift_link(single, merge, max_users, expires_at, uid)
+            bot = BOT_USERNAME or "bot"; link = f"https://t.me/{bot}?start=gift_{code}"
+            unit_name = "ساعة" if unit == "hours" else "دقيقة"
+            await message.reply_text(
+                f"✅ **تم إنشاء الرابط**\n\n🔗 `{link}`\n\n📖 `{single}`\n🧩 `{merge}`\n👥 `{max_users}`\n⏰ `{val}` {unit_name}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 هدية!')}")],[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+            user_data.pop(uid, None); return
+
+    if user_data.get(uid, {}).get("awaiting_gift_allowed_users"):
+        code = user_data[uid]["awaiting_gift_allowed_users"]; ids = []
+        for tok in re.split(r'[\s,]+', message.text.strip()):
+            if not tok: continue
+            try:
+                if tok.startswith("@"): u = await client.get_users(tok); ids.append(u.id)
+                else: ids.append(int(tok))
+            except: pass
+        if not ids: await message.reply_text("⚠️"); return
+        set_gift_allowed_users(code, ids); user_data.pop(uid, None)
+        await message.reply_text(f"✅ `{len(ids)}` مستخدم", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+    if user_data.get(uid, {}).get("awaiting_gift_channel"):
+        code = user_data[uid]["awaiting_gift_channel"]; ch = message.text.strip()
+        if not (ch.startswith("@") or ch.startswith("-100")): await message.reply_text("⚠️"); return
+        try:
+            await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.id)
+        except Exception as e: await message.reply_text(f"❌ {e}"); return
+        set_gift_channel(code, ch); user_data.pop(uid, None)
+        await message.reply_text(f"✅ `{ch}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+    if user_data.get(uid, {}).get("awaiting_gift_post_interval"):
+        code = user_data[uid]["awaiting_gift_post_interval"]
+        try:
+            h = int(message.text.strip())
+            if h < 1 or h > 24: raise ValueError
+        except: await message.reply_text("⚠️ 1-24"); return
+        set_gift_interval(code, h); user_data.pop(uid, None)
+        await message.reply_text(f"✅ كل `{h}` ساعة", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+
+    if not is_admin_any(uid): return
+
+    if user_data.get(uid,{}).get("awaiting_merge_limit"):
+        try:
+            v=int(message.text.strip())
+            if v<2: await message.reply_text("⚠️ min 2"); return
+            settings["merge_daily_limit"]=v; save_settings(); user_data.pop(uid,None)
+            await message.reply_text(f"✅ `{v}`")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_merge_max"):
+        try:
+            v=int(message.text.strip())
+            if v<2: await message.reply_text("⚠️ min 2"); return
+            settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
+            await message.reply_text(f"✅ `{v}`")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_daily_amount"):
+        try:
+            v=int(message.text.strip())
+            if v<=0: raise ValueError
+            settings["daily_reward_amount"]=v; save_settings(); user_data.pop(uid,None)
+            await message.reply_text(f"✅ `{v}`")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_ref_single_amount"):
+        try: settings["referral_bonus_single"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_ref_merge_amount"):
+        try: settings["referral_bonus_merge"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_merge_gift_one_id"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"✅ `{tid}`\nالعدد:"); return
+    if user_data.get(uid,{}).get("awaiting_merge_gift_one_amount"):
+        try: a=int(message.text.strip())
+        except: await message.reply_text("⚠️"); return
+        tid=user_data[uid]["awaiting_merge_gift_one_amount"]; add_merge_bonus(tid,a)
+        await message.reply_text(f"✅ {a}")
+        try: await client.send_message(tid,f"🧩 +{a} دمج",parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_merge_gift_all"):
+        try: a=int(message.text.strip())
+        except: await message.reply_text("⚠️"); return
+        await message.reply_text(f"⏳ {a}")
+        s=f=0
+        for u in get_all_user_ids():
+            try:
+                add_merge_bonus(u,a)
+                try: await client.send_message(u,f"🧩 +{a} دمج",parse_mode=ParseMode.MARKDOWN); s+=1
+                except: f+=1
+                await asyncio.sleep(0.05)
+            except: f+=1
+        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+    if user_data.get(uid,{}).get("awaiting_vip_contact"):
+        t=message.text.strip()
+        if t.startswith("@") and len(t)>=4: settings["vip_contact_second"]=t; save_settings(); user_data.pop(uid,None); await message.reply_text(f"✅ `{t}`"); return
+        await message.reply_text("⚠️"); return
+    if user_data.get(uid,{}).get('awaiting_broadcast'):
+        t=message.text; await message.reply_text("⏳")
+        s=f=0
+        for u in get_all_user_ids():
+            try: await client.send_message(u,f"📢 **إعلان**\n\n{t}",parse_mode=ParseMode.MARKDOWN); s+=1; await asyncio.sleep(0.05)
+            except: f+=1
+        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+    for k in ['awaiting_bdf','awaiting_welcome_image','awaiting_favorites_image','awaiting_results_image','awaiting_sources_image','awaiting_sub_image']:
+        if user_data.get(uid,{}).get(k): await message.reply_text("⚠️ صورة"); return
+    if user_data.get(uid,{}).get('awaiting_welcome'):
+        settings["welcome_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("✅"); return
+    if user_data.get(uid,{}).get('awaiting_sub_channel_add'):
+        ch=message.text.strip(); ch=ch[1:] if ch.startswith("@") else ch; c2="@"+ch
+        chs=settings.get("force_sub_channels",[])
+        if c2 not in chs: chs.append(c2); settings["force_sub_channels"]=chs; save_settings()
+        user_data.pop(uid,None); await message.reply_text(f"✅ `{c2}`"); return
+    if user_data.get(uid,{}).get("awaiting_sub_btn_name"):
+        ch=user_data[uid]["awaiting_sub_btn_name"]; b=settings.get("force_sub_buttons",{}); b[ch]=message.text.strip()
+        settings["force_sub_buttons"]=b; save_settings(); user_data.pop(uid,None); await message.reply_text("✅"); return
+    if user_data.get(uid,{}).get('awaiting_sub_message'):
+        settings["force_sub_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("✅"); return
+    if user_data.get(uid,{}).get("awaiting_single_caption"):
+        txt=message.text
+        if "{chapter}" not in txt and "{title}" not in txt: await message.reply_text("⚠️ {chapter}/{title}"); return
+        settings["single_caption"]=make_quote(txt); save_settings(); user_data.pop(uid,None); await message.reply_text("✅"); return
+    if user_data.get(uid,{}).get("awaiting_reward_amount"):
+        try: settings["daily_reward_amount"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_reward_interval"):
+        try:
+            h=int(message.text.strip()); settings["daily_reward_interval"]=h*3600; save_settings(); user_data.pop(uid,None)
+            await message.reply_text(f"✅ {h} ساعة")
+        except: await message.reply_text("⚠️")
+        return
+    if user_data.get(uid,{}).get("awaiting_gift_all"):
+        try: a=int(message.text.strip())
+        except: await message.reply_text("⚠️"); return
+        await message.reply_text(f"⏳ {a}")
+        s=f=0
+        for u in get_all_user_ids():
+            try:
+                add_bonus(u,a)
+                try: await client.send_message(u,f"🎁 +{a}",parse_mode=ParseMode.MARKDOWN); s+=1
+                except: f+=1
+                await asyncio.sleep(0.05)
+            except: f+=1
+        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+    if user_data.get(uid,{}).get("awaiting_gift_one_id"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"✅ `{tid}`\nالعدد:"); return
+    if user_data.get(uid,{}).get("awaiting_gift_one_amount"):
+        try: a=int(message.text.strip())
+        except: await message.reply_text("⚠️"); return
+        tid=user_data[uid]["awaiting_gift_one_amount"]; add_bonus(tid,a)
+        await message.reply_text(f"✅ {a}")
+        try: await client.send_message(tid,f"🎁 +{a}",parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_reset_user"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        reset_user_balance(tid); await message.reply_text(f"✅ `{tid}`"); user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_ban_user"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("⚠️ أدمن"); user_data.pop(uid,None); return
+        if ban_user(tid): await message.reply_text(f"✅ `{tid}`")
+        else: await message.reply_text("⚠️")
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_unban_user"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        if unban_user(tid): await message.reply_text(f"✅ `{tid}`")
+        else: await message.reply_text("⚠️")
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_add_admin"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        ok,m=add_added_admin(tid)
+        if ok:
+            await message.reply_text(f"✅ `{tid}`")
+            try: await client.send_message(tid,"👮",parse_mode=ParseMode.MARKDOWN)
+            except: pass
+        else: await message.reply_text(f"⚠️ {m}")
+        user_data.pop(uid,None); return
+    plan=user_data.get(uid,{}).get("awaiting_vip_user")
+    if plan:
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        if add_vip(tid,plan):
+            info=get_vip_info(tid); dy=max(0,int((info["expires"]-time.time())//86400))
+            await message.reply_text(f"✅ `{tid}` — {VIP_PLAN_NAMES[plan]} — {dy} يوم")
+            try: await client.send_message(tid,f"🎉 VIP: {VIP_PLAN_NAMES[plan]}",parse_mode=ParseMode.MARKDOWN)
+            except: pass
+        else: await message.reply_text("⚠️")
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_vip_remove"):
+        t=message.text.strip(); tid=None
+        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        except: await message.reply_text("⚠️"); return
+        if remove_vip(tid): await message.reply_text(f"✅ `{tid}`")
+        else: await message.reply_text("⚠️")
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_bot_token"):
+        parts=[p.strip() for p in message.text.strip().split("|")]
+        if len(parts)!=3: await message.reply_text("⚠️ `اسم | توكن | آيدي`"); return
+        bn,tk,tid_s=parts
+        try: target_id=int(tid_s)
+        except: await message.reply_text("⚠️ آيدي"); return
+        await message.reply_text("⏳")
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"https://api.telegram.org/bot{tk}/getMe",timeout=10) as r:
+                    d=await r.json()
+                    if not d.get("ok"): await message.reply_text("❌"); user_data.pop(uid,None); return
+                    ru=d["result"].get("username","?")
+        except: await message.reply_text("❌"); user_data.pop(uid,None); return
+        ok,m,bid=add_bot_token(tk,bn,uid,target_id=target_id)
+        if ok: await message.reply_text(f"✅ @{ru}")
+        else: await message.reply_text(f"⚠️ {m}")
+        user_data.pop(uid,None); return
+    if user_data.get(uid,{}).get("awaiting_backup_restore"):
+        await message.reply_text("⚠️ ZIP"); return
+
+@app.on_message(filters.photo & filters.private)
+async def handle_images(client,message):
+    uid=message.from_user.id
+    if not is_admin_any(uid): return
+    mapping={'awaiting_bdf':('bdf_image','BDF'),'awaiting_welcome_image':('welcome_image','ترحيب'),
+             'awaiting_favorites_image':('favorites_image','مفضلة'),'awaiting_results_image':('results_image','نتائج'),
+             'awaiting_sources_image':('sources_image','مصادر'),'awaiting_sub_image':('force_sub_image','اشتراك')}
+    for key,(field,label) in mapping.items():
+        if user_data.get(uid,{}).get(key):
+            settings[field]=message.photo.file_id; save_settings(); user_data.pop(uid,None)
+            await message.reply_text(f"✅ {label}"); return
+
+@app.on_message(filters.document & filters.private)
+async def handle_documents(client,message):
+    uid=message.from_user.id
+    if not is_admin_any(uid): return
+    fn = message.document.file_name or ""
+    if not fn.lower().endswith(".zip"):
+        if user_data.get(uid,{}).get("awaiting_backup_restore"): await message.reply_text("⚠️ ليس ZIP")
+        return
+    await message.reply_text("⏳")
+    try:
+        tp = await message.download(); ok, r, err = restore_from_zip(tp)
+        try: os.remove(tp)
+        except: pass
+        if ok: await message.reply_text(f"✅ {len(r)}")
+        else: await message.reply_text(f"❌ {err}")
+    except Exception as e: await message.reply_text(f"❌ {e}")
+    user_data.pop(uid, None)
+
+async def check_new_chapters():
+    for uid in get_all_user_ids():
+        if not is_notifications_enabled(uid): continue
+        for f in get_fav_items(uid):
+            try:
+                if not f.get('notify',True): continue
+                s,i,m=f['source'],f['identifier'],f['manga_url']; ti=clean_manga_title(f.get('title',''),i)
+                lc=f.get('last_chapter',"0"); ln=get_latest_chapter_number(s,i,m)
+                try: lnum=float(re.search(r'(\d+(?:\.\d+)?)',str(lc)).group(1)) if re.search(r'(\d+(?:\.\d+)?)',str(lc)) else 0
+                except: lnum=0
+                if ln>lnum:
+                    if s=="mangalik": c=StarzManga.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
+                    elif s=="mesh": c=MeshManga.get_latest_chapter(int(i)); d=c.get('display_text','?') if c else '?'
+                    elif s=="azora": c=AzoraFly.get_latest_chapter(i); d=str(c.get('number','?')) if c else '?'
+                    elif s=="lavascans": c=LavaScans.get_latest_chapter(m); d=c.get('num_str','?') if c else '?'
+                    else: continue
+                    set_fav_last_chapter(uid, i, s, d)
+                    try: await app.send_message(uid,f"📢 **{ti}**\n📌 `{d}`",parse_mode=ParseMode.MARKDOWN)
+                    except: pass
+            except: pass
+
+async def check_vip_expiry():
+    for u in get_expired_vips():
+        try: await app.send_message(int(u),"⚠️ **انتهى VIP**",parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        remove_vip(u)
+
+async def periodic_check():
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL); print("🔄...")
+        await check_new_chapters(); await check_vip_expiry()
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 بوت المانجا — النسخة النهائية المصححة")
+    print("=" * 60)
+    async def _bootstrap():
+        global BOT_USERNAME
+        try:
+            if not app.is_connected: await app.start()
+        except Exception as e: print(f"❌ {e}"); return
+        for attempt in range(3):
+            try:
+                me = await app.get_me(); BOT_USERNAME = me.username
+                print(f"🤖 @{BOT_USERNAME}"); break
+            except Exception as e:
+                print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
+        asyncio.create_task(periodic_check())
+        asyncio.create_task(auto_backup_task())
+        asyncio.create_task(latest_manga_refresh_task())
+        asyncio.create_task(gift_channel_publisher_task())
+        await idle()
+    app.run(_bootstrap())
