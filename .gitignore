@@ -1,0 +1,14 @@
+# Runtime database and Telegram session files
+bot.db
+bot.db-*
+*.session
+*.session-journal
+backups/
+bot.log
+
+# Local secrets and Python artifacts
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
