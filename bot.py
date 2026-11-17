@@ -2519,7 +2519,8 @@ async def unified_callback(client,callback):
             await callback.answer("✅"); return
         if data=="admin_set_sub_message":
             await msg.delete(); await msg.reply_text("📝\n\n/cancel")
-            user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return        if data=="admin_set_sub_image":
+            user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return
+        if data=="admin_set_sub_image":
             await msg.delete(); await msg.reply_text("🖼️\n\n/cancel")
             user_data[uid]={'awaiting_sub_image':True}; await callback.answer("🖼️"); return
         if data=="admin_add_bdf":
