@@ -1083,44 +1083,59 @@ set_notify_callback(_send_renewal_notify)
 
 # ============ المصادر ============
 def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
+    # Always expose the complete chapter list, including when opened from latest updates.
     latest_mode = bool(uid is not None and user_data.get(uid,{}).get("latest_mode"))
-    per=10
-    if latest_mode:
-        s=max(0,len(chs)-10); cur=chs[s:s+10]; page=0; total=1
-    else:
-        total=math.ceil(len(chs)/per) if len(chs)>0 else 1; s=page*per
-        cur=chs[s:s+per]
-    kb,row=[],[]
+    per = 10
+    total = max(1, math.ceil(len(chs) / per))
+    page = max(0, min(int(page or 0), total - 1))
+    s = page * per
+    cur = chs[s:s + per]
+
+    kb, row = [], []
     src_short = source_code(src)
-    for i,ch in enumerate(cur):
-        idx=s+i
+    for i, ch in enumerate(cur):
+        idx = s + i
         d = str(ch.get("display_text") or ch.get("number") or ch.get("num_str") or ch.get("title") or "?")[:12]
-        row.append(InlineKeyboardButton(f"📖 {d}",callback_data=f"ch_{src_short}_{idx}"))
-        if len(row)==4: kb.append(row); row=[]
-    if row: kb.append(row)
-    if not latest_mode:
-        nav=[]
-        if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"pg_{src_short}_{page-1}"))
-        if page<total-1: nav.append(InlineKeyboardButton("التالي ➡️",callback_data=f"pg_{src_short}_{page+1}"))
-        if nav: kb.append(nav)
-        qk=[]
-        if page>0: qk.append(InlineKeyboardButton("🏠 الأول",callback_data=f"f_{src_short}"))
-        if page<total-1: qk.append(InlineKeyboardButton("🔝 الأخير",callback_data=f"l_{src_short}"))
-        if qk: kb.append(qk)
+        row.append(InlineKeyboardButton(f"📖 {d}", callback_data=f"ch_{src_short}_{idx}"))
+        if len(row) == 4:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+
+    # Navigation is available in every mode: previous/next and first/last.
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"pg_{src_short}_{page-1}"))
+    if page < total - 1:
+        nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"pg_{src_short}_{page+1}"))
+    if nav:
+        kb.append(nav)
+
+    ends = []
+    if page > 0:
+        ends.append(InlineKeyboardButton("⏮ أول فصل", callback_data=f"f_{src_short}"))
+    if page < total - 1:
+        ends.append(InlineKeyboardButton("آخر فصل ⏭", callback_data=f"l_{src_short}"))
+    if ends:
+        kb.append(ends)
+
     if uid is not None and is_vip(uid):
-        if is_favorite(uid,ident,src):
-            kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة",callback_data=f"fav_remove_{src_short}")])
-            kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid,ident,src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
-        else: kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة",callback_data=f"fav_add_{src_short}")])
-    kb.append([InlineKeyboardButton("🧩 دمج الفصول",callback_data=f"mrg_{src_short}")])
+        if is_favorite(uid, ident, src):
+            kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة", callback_data=f"fav_remove_{src_short}")])
+            kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid, ident, src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
+        else:
+            kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة", callback_data=f"fav_add_{src_short}")])
+
+    kb.append([InlineKeyboardButton("🧩 دمج الفصول", callback_data=f"mrg_{src_short}")])
     if ident and BOT_USERNAME:
         kb.append([InlineKeyboardButton("🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
     if latest_mode:
-        latest_source = str(user_data.get(uid,{}).get("latest_source_id") or src)
-        kb.append([InlineKeyboardButton("⬅️ مصادر أحدث الفصول",callback_data=f"latest_src_{latest_source}")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
-    kb.append([InlineKeyboardButton("🔄 تحديث",callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-    return InlineKeyboardMarkup(kb),page,total
+        latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
+        kb.append([InlineKeyboardButton("⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="latest_home")])
+    kb.append([InlineKeyboardButton("🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+    return InlineKeyboardMarkup(kb), page, total
 
 def pack_share_url(url):
     raw = zlib.compress(str(url).encode("utf-8"), 9)
