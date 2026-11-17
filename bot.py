@@ -343,6 +343,7 @@ def chapter_page_markup(mid, page, total, murl, extra_top=None):
         nav.append(InlineKeyboardButton("➡️", callback_data=f"cp:{mid}:{page+1}"))
         nav.append(InlineKeyboardButton("آخر صفحة ⏭", callback_data=f"cp:{mid}:{pages}"))
     if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("📚 كل الفصول PDF", callback_data=f"pdfmenu:{mid}")])
     btns.append([InlineKeyboardButton("🔙", callback_data="m")])
     return InlineKeyboardMarkup(btns)
 
@@ -620,7 +621,6 @@ async def on_cb(c, q: CallbackQuery):
             ch = get_chapter(murl, prog)
             if ch:
                 progress_btn.append([InlineKeyboardButton(f"▶️ {ch[0]}", callback_data=f"p:{mid}:{prog}")])
-        progress_btn.append([InlineKeyboardButton("📚 كل الفصول PDF", callback_data=f"pdfmenu:{mid}")])
 
         pages_count = max(1, (total + 9)//10)
         text = f"📚 <b>{html.escape(title)}</b>\n\n{html.escape(desc)}\n\n📖 {total} | 1/{pages_count}"
