@@ -1384,6 +1384,7 @@ async def unified_callback(client,callback):
             idx=int(data.split("_")[1])
             if idx>=len(latest_manga_cache): return
             item=latest_manga_cache[idx]; src="mangalik"; ident=item[2]
+            user_data.setdefault(uid, {})["search_results"]=[(item[0], item[1], item[2]) ]
         await callback.answer("⏳"); await safe_edit(msg,"⏳ **جاري التحميل...**")
         try:
             if src=="mangalik":
@@ -2264,9 +2265,10 @@ async def handle_all_text(client,message):
     if user_data.get(uid,{}).get("awaiting_merge_max"):
         try:
             v=int(message.text.strip())
-            if v<2: await message.reply_text("⚠️ min 2"); return
+            if v<2 or v>PDF_MAX_CHAPTERS:
+                await message.reply_text("⚠️ الحد المسموح من 2 إلى 10"); return
             settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
-            await message.reply_text(f"✅ `{v}`")
+            await message.reply_text(f"✅ الحد لكل ملف: `{v}`")
         except: await message.reply_text("⚠️")
         return
     if user_data.get(uid,{}).get("awaiting_daily_amount"):
