@@ -300,7 +300,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                     return
                     except Exception as exc:
                         if attempt == 3:
-                            
+                            pass
                     if attempt < 3:
                         await asyncio.sleep(0.5 * (attempt + 1))
 
@@ -323,7 +323,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         if supported:
             candidates.append((position, blob))
         else:
-            
+            pass
 
     if not candidates:
         return None
@@ -335,7 +335,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             img2pdf.convert(BytesIO(blob))
             valid.append(blob)
         except Exception as exc:
-            
+            pass
 
     if not valid:
         return None
@@ -360,7 +360,7 @@ def get_all_latest():
     try:
         sources = get_sources()
     except Exception as exc:
-        
+        pass
         raise
     for source in sources:
         source_id = str(source.get("id") or "")
@@ -382,7 +382,7 @@ def get_all_latest():
                 )
                 rows.append((title, str(url), ident, str(latest_chapter), source_id))
         except Exception as exc:
-            
+            pass
     return rows
 
 
@@ -403,7 +403,7 @@ def install_package(p):
     except: return False
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
-        ; install_package(p)
+        install_package(p)
 for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
     ensure_installed(pkg)
 
@@ -1057,7 +1057,7 @@ async def publish_gift_now(client, admin_uid, code):
         m = await client.send_message(old_channel, "\n".join(parts), reply_markup=kb,
                                       parse_mode=ParseMode.MARKDOWN, disable_notification=True)
     except Exception as e:
-        
+        pass
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, f'فشل النشر: {e}', None
     _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.id, time.time() + interval * 3600, new_code))
@@ -1367,7 +1367,7 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
             reply_markup=markup, parse_mode=ParseMode.MARKDOWN
         )
     except Exception as direct_error:
-        
+        pass
     # Some manga CDNs block Telegram's fetcher. Download with browser-like headers instead.
     try:
         timeout = aiohttp.ClientTimeout(total=25, connect=10)
@@ -1393,9 +1393,9 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
                             reply_markup=markup, parse_mode=ParseMode.MARKDOWN
                         )
                 else:
-                    
+                    pass
     except Exception as exc:
-        
+        pass
     # Keep the manga usable even if its source has no accessible cover.
     return await client.send_message(
         cid, caption, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
@@ -1611,7 +1611,7 @@ async def send_zip_via_added_bots(manual=False):
                 await temp_bot.stop(); success+=1
                 if not manual: update_bot_last_sent(bid, time.time())
             except Exception as e:
-                ; failed+=1
+                failed+=1
                 try: await temp_bot.stop()
                 except: pass
             try: os.remove(zp)
@@ -1638,11 +1638,11 @@ async def latest_manga_refresh_task():
             # Keep the last good cache if the API temporarily returns an empty/failed result.
             if fresh_latest:
                 latest_manga_cache = fresh_latest
-                
+                pass
             else:
-                
+                pass
         except Exception as e:
-            
+            pass
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def gift_channel_publisher_task():
@@ -1742,11 +1742,11 @@ async def start_cmd(client, message):
     except Exception as exc:
         import traceback
         details = traceback.format_exc()
-        
+        pass
         try:
             await message.reply_text("⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.")
         except Exception as send_exc:
-            
+            pass
         try:
             await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\\n" + details[-3000:])
         except Exception:
@@ -1894,7 +1894,7 @@ async def unified_callback(client,callback):
         try:
             sources = await asyncio.to_thread(get_sources)
         except Exception as e:
-            ; sources = []
+            sources = []
         if not sources:
             await safe_edit(msg,"❌ تعذر تحميل قائمة المصادر")
             return
@@ -1930,7 +1930,7 @@ async def unified_callback(client,callback):
                 selected=[(i,item) for i,item in enumerate(latest_manga_cache)
                           if len(item)>4 and str(item[4])==src]
         except Exception as e:
-            
+            pass
             await safe_edit(msg,"❌ تعذر تحميل أحدث الفصول من هذا المصدر")
             return
         if not selected:
@@ -2054,7 +2054,7 @@ async def unified_callback(client,callback):
             except: pass
             await send_cover_message(msg,cover,cap,markup,referer=api.BASE)
         except Exception as e:
-            
+            pass
             await safe_edit(msg,f"❌ {str(e)[:180]}")
         return
 
@@ -2765,7 +2765,7 @@ async def handle_all_text(client,message):
                     try:
                         urls = await asyncio.to_thread(api.get_chapter_images, chapter)
                     except Exception as exc:
-                        
+                        pass
                 async with progress_lock:
                     progress["done"] += 1
                     if urls:
@@ -3120,7 +3120,7 @@ async def check_new_chapters():
                 if latest != previous:
                     set_fav_last_chapter(uid, fav["identifier"], fav["source"], latest)
             except Exception as e:
-                
+                pass
 
 async def check_vip_expiry():
     for u in get_expired_vips():
@@ -3134,9 +3134,9 @@ async def periodic_check():
         await check_new_chapters(); await check_vip_expiry()
 
 if __name__ == "__main__":
-    
-    
-    
+    pass
+    pass
+    pass
 
     async def _bootstrap():
         global BOT_USERNAME
@@ -3152,7 +3152,7 @@ if __name__ == "__main__":
                     me = await app.get_me()
                     break
                 except Exception as exc:
-                    
+                    pass
                     if attempt == 3:
                         raise
                     await asyncio.sleep(2)
@@ -3165,7 +3165,7 @@ if __name__ == "__main__":
             ]
             await idle()
         except Exception as exc:
-            
+            pass
             raise
         finally:
             for task in background_tasks:
@@ -3174,15 +3174,15 @@ if __name__ == "__main__":
             if background_tasks:
                 await asyncio.gather(*background_tasks, return_exceptions=True)
             if started and app.is_connected:
-                
+                pass
                 try:
                     await app.stop()
                 except Exception as exc:
-                    
+                    pass
 
     try:
         # Client was created before this block. Use Pyrogram's own loop runner
         # instead of asyncio.run(), which creates a different event loop.
         app.run(_bootstrap())
     except KeyboardInterrupt:
-        
+        pass
