@@ -110,6 +110,41 @@ def _items(obj, keys=("results", "items", "mangas", "chapters")):
         return _items(data, keys)
     return []
 
+def _cover_value(value):
+    """Normalize cover values returned as URLs or nested image objects."""
+    if isinstance(value, dict):
+        for key in ("url", "src", "href", "original", "large", "full", "image", "cover"):
+            candidate = value.get(key)
+            if candidate:
+                found = _cover_value(candidate)
+                if found:
+                    return found
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith(("https://", "http://", "//")):
+            return "https:" + value if value.startswith("//") else value
+    return None
+
+def _extract_cover_url(*objects):
+    keys = ("cover_url", "coverUrl", "cover_sd_url", "cover_image_url", "cover_image",
+            "cover", "image_url", "image", "thumbnail_url", "thumbnail", "thumb",
+            "poster", "featured_image", "manga_cover")
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for key in keys:
+            candidate = _cover_value(obj.get(key))
+            if candidate:
+                return candidate
+        for nested_key in ("manga", "data", "metadata", "images", "media"):
+            nested = obj.get(nested_key)
+            if isinstance(nested, dict):
+                candidate = _extract_cover_url(nested)
+                if candidate:
+                    return candidate
+    return None
+
 def _manga(item):
     if isinstance(item, (list, tuple)):
         vals = list(item) + ["", ""]
@@ -119,7 +154,7 @@ def _manga(item):
     url = item.get("url") or item.get("manga_url") or item.get("link") or item.get("href")
     ident = item.get("id") or item.get("slug") or url
     return dict(item, title=str(item.get("title") or item.get("name") or "Manga"),
-        url=url, id=str(ident or url or ""), cover_url=item.get("cover_url") or item.get("cover") or item.get("image"))
+        url=url, id=str(ident or url or ""), cover_url=_extract_cover_url(item))
 
 def _chapter(item, index):
     if isinstance(item, str):
@@ -180,7 +215,9 @@ class MangaSource:
         info = dict(info)
         info["name"] = info.get("name") or info.get("title") or "Manga"
         info["title"] = info.get("title") or info["name"]
-        info["cover_url"] = info.get("cover_url") or info.get("cover") or info.get("image")
+        info["cover_url"] = _extract_cover_url(info, raw)
+        if info["cover_url"] and not info["cover_url"].startswith(("http://", "https://")):
+            info["cover_url"] = urljoin(str(info.get("url") or manga_url), info["cover_url"])
         info["description"] = info.get("description") or info.get("story") or ""
         info["genres"] = info.get("genres") or []
         info["url"] = info.get("url") or str(manga_url)
@@ -1315,6 +1352,55 @@ async def check_subscription_and_continue(client,cb,pending=None):
 
 app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
 
+async def _send_shared_manga_card(client, cid, info, caption, markup):
+    """Send the shared manga cover when available, with URL and downloaded-file fallbacks."""
+    cover = _extract_cover_url(info)
+    if not cover:
+        return await client.send_message(
+            cid, caption, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+        )
+    cover = urljoin(str(info.get("url") or ""), cover)
+    # First let Telegram fetch the image directly; this is fastest for public image URLs.
+    try:
+        return await client.send_photo(
+            chat_id=cid, photo=cover, caption=caption,
+            reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as direct_error:
+        print(f"⚠️ shared cover direct send failed: {direct_error}")
+    # Some manga CDNs block Telegram's fetcher. Download with browser-like headers instead.
+    try:
+        timeout = aiohttp.ClientTimeout(total=25, connect=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Referer": str(info.get("url") or ""),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(cover, allow_redirects=True) as response:
+                if response.status == 200:
+                    data = await response.read()
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    is_image = content_type.startswith("image/") or data.startswith(
+                        (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a", b"RIFF")
+                    )
+                    if data and len(data) > 100 and is_image:
+                        photo = io.BytesIO(data)
+                        photo.name = "manga_cover.jpg"
+                        photo.seek(0)
+                        return await client.send_photo(
+                            chat_id=cid, photo=photo, caption=caption,
+                            reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+                        )
+                else:
+                    print(f"⚠️ shared cover HTTP {response.status}: {cover}")
+    except Exception as exc:
+        print(f"⚠️ shared cover download failed: {exc}")
+    # Keep the manga usable even if its source has no accessible cover.
+    return await client.send_message(
+        cid, caption, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+    )
+
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
     src = source_from_code(src_short)
     if not src:
@@ -1338,13 +1424,16 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
             if progress:
                 await progress("pdf", len(urls))
             return result
+        cover_url = _extract_cover_url(info)
+        if cover_url:
+            cover_url = urljoin(str(info.get("url") or manga_url), cover_url)
         user_data[uid] = {"chapters": chapters, "title": title, "identifier": info.get("id") or manga_url,
             "page": 0, "source": src, "create_pdf_func": pdf, "manga_url": manga_url,
-            "cover_url": info.get("cover_url"), "genres": info.get("genres", []), "kind": info.get("kind", "")}
+            "cover_url": cover_url, "genres": info.get("genres", []), "kind": info.get("kind", "")}
         cap = f"**{title}**\n\n{(info.get('description') or '')[:300]}\n\n📖 **{len(chapters)} فصل**"
         user_data[uid]["base_caption"] = cap
         markup,_,_ = create_chapters_markup(chapters, 0, user_data[uid]["identifier"], src, uid)
-        await client.send_message(cid, cap, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        await _send_shared_manga_card(client, cid, info, cap, markup)
     except Exception as e:
         await client.send_message(cid, f"❌ تعذر فتح المانجا: {str(e)[:180]}")
 
