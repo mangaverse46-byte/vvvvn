@@ -339,7 +339,6 @@ async def run():
     if not API_ID or not API_HASH:
         raise SystemExit("أضف API_ID و API_HASH إلى ملف .env من my.telegram.org")
 
-    await api.start()
     app = Client(
         "manga_virus",
         api_id=API_ID,
@@ -348,16 +347,35 @@ async def run():
         workers=16,
         sleep_threshold=30,
     )
+
     try:
+        await api.start()
         await app.start()
         me = await app.get_me()
-        log.info("Manga Virus started as @%s using Pyrogram", me.username)
+        log.info("Manga Virus started as @%s using Pyrogram. Press Ctrl+C to stop.", me.username)
         await idle()
     finally:
+        # Always attempt to close both clients, even if startup or shutdown fails.
         if app.is_connected:
-            await app.stop()
-        await api.close()
+            try:
+                await asyncio.wait_for(app.stop(), timeout=10)
+                log.info("Pyrogram client stopped.")
+            except asyncio.TimeoutError:
+                log.error("Pyrogram shutdown timed out after 10 seconds.")
+            except Exception:
+                log.exception("Error while stopping Pyrogram client.")
+
+        try:
+            await asyncio.wait_for(api.close(), timeout=5)
+            log.info("Manga API session closed.")
+        except asyncio.TimeoutError:
+            log.error("Manga API shutdown timed out after 5 seconds.")
+        except Exception:
+            log.exception("Error while closing Manga API session.")
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        log.info("Ctrl+C received. Manga Virus stopped.")
