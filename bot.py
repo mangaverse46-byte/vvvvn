@@ -439,6 +439,7 @@ def _init_db():
     CREATE TABLE IF NOT EXISTS daily_usage (uid INTEGER PRIMARY KEY, last_reset REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0, bonus INTEGER NOT NULL DEFAULT 0, reset_expires REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS vip_users (uid INTEGER PRIMARY KEY, plan TEXT NOT NULL, started REAL NOT NULL, expires REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS referrals (owner_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, ts REAL NOT NULL, rewarded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (owner_id, referred_id));
+    CREATE TABLE IF NOT EXISTS manga_share_links (code TEXT PRIMARY KEY, source TEXT NOT NULL, identifier TEXT NOT NULL, created_at REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS bots (bid TEXT PRIMARY KEY, token TEXT NOT NULL, name TEXT NOT NULL, target_id INTEGER, added REAL NOT NULL, added_by INTEGER, last_sent REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS admins (uid INTEGER PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS banned (uid INTEGER PRIMARY KEY);
@@ -1184,6 +1185,27 @@ def unpack_share_url(token):
             pass
     return unquote(str(token))
 
+def create_manga_share_code(source, identifier):
+    """Create a compact, persistent deep-link code for sharing one manga."""
+    for _ in range(8):
+        code = secrets.token_urlsafe(6).rstrip("=")
+        try:
+            _execute(
+                "INSERT INTO manga_share_links (code, source, identifier, created_at) VALUES (?, ?, ?, ?)",
+                (code, str(source), str(identifier), time.time())
+            )
+            return code
+        except sqlite3.IntegrityError:
+            continue
+    raise RuntimeError("تعذر إنشاء رابط مشاركة قصير")
+
+def get_manga_share(code):
+    row = _execute(
+        "SELECT source, identifier FROM manga_share_links WHERE code=?",
+        (str(code),)
+    ).fetchone()
+    return dict(row) if row else None
+
 def create_fav_list_markup(uid):
     favs=get_favorites(uid); n=is_notifications_enabled(uid)
     tt="🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة"
@@ -1593,6 +1615,10 @@ async def _start_cmd_impl(client,message):
             parts = pl[5:].split("_", 1)
             if len(parts) == 2:
                 show_data = {'src': parts[0], 'ident': unpack_share_url(parts[1])}
+        elif pl.startswith("m_"):
+            shared = get_manga_share(pl[2:])
+            if shared:
+                show_data = {'src': source_code(shared['source']), 'ident': shared['identifier']}
     if is_new and ref_owner and already_referred(uid) is None:
         add_referral(ref_owner,uid); user_data.setdefault(uid,{})["pending_referral_owner"]=ref_owner
     if is_new:
@@ -1951,8 +1977,12 @@ async def unified_callback(client,callback):
         if not ident:
             await callback.answer("⚠️ لا توجد بيانات، افتح المانجا أولاً", show_alert=True)
             return
-        share_token = pack_share_url(ident)
-        share_url = f"https://t.me/{BOT_USERNAME}?start=show_{src_short}_{share_token}"
+        source_id = source_from_code(src_short)
+        if not source_id:
+            await callback.answer("⚠️ مصدر المانجا غير متاح", show_alert=True)
+            return
+        share_code = create_manga_share_code(source_id, ident)
+        share_url = f"https://t.me/{BOT_USERNAME}?start=m_{share_code}"
         txt = (
             f"🔗 **رابط مشاركة المانجا**\n\n"
             f"📚 **{title}**\n\n"
