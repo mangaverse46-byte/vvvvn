@@ -3016,22 +3016,59 @@ async def periodic_check():
         await check_new_chapters(); await check_vip_expiry()
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🚀 بوت المانجا — النسخة النهائية المصححة")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("🚀 بوت المانجا — بدء التشغيل", flush=True)
+    print("=" * 60, flush=True)
+
     async def _bootstrap():
         global BOT_USERNAME
+        background_tasks = []
+        started = False
         try:
-            if not app.is_connected: await app.start()
-        except Exception as e: print(f"❌ {e}"); return
-        for attempt in range(3):
-            try:
-                me = await app.get_me(); BOT_USERNAME = me.username
-                print(f"🤖 @{BOT_USERNAME}"); break
-            except Exception as e:
-                print(f"⚠️ {attempt+1}: {e}"); await asyncio.sleep(2)
-        asyncio.create_task(periodic_check())
-        asyncio.create_task(auto_backup_task())
-        await idle()
+            # Client is created at module import time; bind it to the loop
+            # created by asyncio.run() before starting Pyrogram workers.
+            app.loop = asyncio.get_running_loop()
+            print("🔌 جاري الاتصال بتيليجرام...", flush=True)
+            await app.start()
+            started = True
 
-    asyncio.run(_bootstrap())
+            me = None
+            for attempt in range(1, 4):
+                try:
+                    me = await app.get_me()
+                    break
+                except Exception as exc:
+                    print(f"⚠️ فشل get_me ({attempt}/3): {exc}", flush=True)
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(2)
+
+            BOT_USERNAME = me.username
+            print(f"✅ تم الاتصال بنجاح: @{BOT_USERNAME}", flush=True)
+
+            background_tasks = [
+                asyncio.create_task(periodic_check(), name="periodic_check"),
+                asyncio.create_task(auto_backup_task(), name="auto_backup_task"),
+            ]
+            print("✅ البوت جاهز ويستقبل الرسائل.", flush=True)
+            await idle()
+        except Exception as exc:
+            print(f"❌ خطأ أثناء تشغيل البوت: {exc!r}", flush=True)
+            raise
+        finally:
+            for task in background_tasks:
+                if not task.done():
+                    task.cancel()
+            if background_tasks:
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+            if started and app.is_connected:
+                print("🛑 جاري إيقاف اتصال تيليجرام...", flush=True)
+                try:
+                    await app.stop()
+                except Exception as exc:
+                    print(f"⚠️ خطأ أثناء إيقاف Pyrogram: {exc!r}", flush=True)
+
+    try:
+        asyncio.run(_bootstrap())
+    except KeyboardInterrupt:
+        print("🛑 تم إيقاف البوت بواسطة المستخدم.", flush=True)
