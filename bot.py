@@ -3143,7 +3143,6 @@ if __name__ == "__main__":
         background_tasks = []
         started = False
         try:
-            print("🔌 جاري الاتصال بتيليجرام...", flush=True)
             await app.start()
             started = True
 
@@ -3159,14 +3158,11 @@ if __name__ == "__main__":
                     await asyncio.sleep(2)
 
             BOT_USERNAME = me.username
-            print(f"✅ تم الاتصال بنجاح: @{BOT_USERNAME}", flush=True)
-            print("📡 تم تشغيل استقبال تحديثات Pyrogram.", flush=True)
 
             background_tasks = [
                 asyncio.create_task(periodic_check(), name="periodic_check"),
                 asyncio.create_task(auto_backup_task(), name="auto_backup_task"),
             ]
-            print("✅ البوت جاهز ويستقبل الرسائل.", flush=True)
             await idle()
         except Exception as exc:
             print(f"❌ خطأ أثناء تشغيل البوت: {exc!r}", flush=True)
