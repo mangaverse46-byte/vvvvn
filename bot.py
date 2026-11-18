@@ -3032,9 +3032,6 @@ if __name__ == "__main__":
         background_tasks = []
         started = False
         try:
-            # Client is created at module import time; bind it to the loop
-            # created by asyncio.run() before starting Pyrogram workers.
-            app.loop = asyncio.get_running_loop()
             print("🔌 جاري الاتصال بتيليجرام...", flush=True)
             await app.start()
             started = True
@@ -3052,6 +3049,7 @@ if __name__ == "__main__":
 
             BOT_USERNAME = me.username
             print(f"✅ تم الاتصال بنجاح: @{BOT_USERNAME}", flush=True)
+            print("📡 تم تشغيل استقبال تحديثات Pyrogram.", flush=True)
 
             background_tasks = [
                 asyncio.create_task(periodic_check(), name="periodic_check"),
@@ -3076,6 +3074,8 @@ if __name__ == "__main__":
                     print(f"⚠️ خطأ أثناء إيقاف Pyrogram: {exc!r}", flush=True)
 
     try:
-        asyncio.run(_bootstrap())
+        # Client was created before this block. Use Pyrogram's own loop runner
+        # instead of asyncio.run(), which creates a different event loop.
+        app.run(_bootstrap())
     except KeyboardInterrupt:
         print("🛑 تم إيقاف البوت بواسطة المستخدم.", flush=True)
