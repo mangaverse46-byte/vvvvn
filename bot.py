@@ -367,13 +367,20 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         print(f"📦 {p}..."); install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper"]:
+for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
     ensure_installed(pkg)
 
-API_ID = 5442915
-API_HASH = "b6a556aba92ae96f271b936cacd930a6"
-BOT_TOKEN = "8812455288:AAFDdZveDQX6RFI6PqSpsGtAKpDiqzPWbK0"
-OWNER_ID = 8926481513
+from dotenv import load_dotenv
+load_dotenv()
+
+# Credentials are read from the local .env file; never commit real secrets.
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+if not API_ID or not API_HASH or not BOT_TOKEN or not OWNER_ID:
+    raise RuntimeError("Missing API_ID, API_HASH, BOT_TOKEN or OWNER_ID in .env")
+
 ADMINS = [OWNER_ID]; OWNER_IDS = [OWNER_ID]
 MAX_WORKERS = 15
 CHECK_INTERVAL = 15*60
