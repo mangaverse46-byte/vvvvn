@@ -1776,12 +1776,10 @@ async def search_cmd(client,message):
         sources = await asyncio.to_thread(get_sources)
     except Exception as e:
         await message.reply_text(f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}"); return
-    rows, row = [], []
+    rows = []
     for source in sources:
         sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
-        row.append(InlineKeyboardButton(label, callback_data=f"src_{sid}"))
-        if len(row) == 2: rows.append(row); row = []
-    if row: rows.append(row)
+        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}")])
     rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text("❌ لا توجد مصادر مفعلة داخل المحرك."); return
