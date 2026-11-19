@@ -9,7 +9,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
     BOT_TOKEN, MANGA_API_BASE, DATABASE_PATH, ADMIN_IDS,
-    SOURCE_CACHE_SECONDS,
+    SOURCE_CACHE_SECONDS, CHECK_INTERVAL,
 )
 from api.manga_api import MangaAPI
 from database.db import Database
@@ -53,6 +53,54 @@ def source_keyboard(sources, action):
     return InlineKeyboardMarkup(
         rows or [[InlineKeyboardButton("لا توجد مصادر مفعّلة", callback_data="noop")]]
     )
+
+
+async def check_new_chapters(client):
+    """Check followed manga periodically; the first item is treated as newest."""
+    while True:
+        try:
+            for item in db.list_followed_manga():
+                try:
+                    result = await api.details(item["source_id"], item["manga_url"])
+                    manga = result.get("manga") or {}
+                    chapters = manga.get("chapters") or []
+                    if not chapters:
+                        continue
+                    latest = chapters[0]
+                    chapter_url = latest.get("url") or latest.get("id")
+                    if not chapter_url:
+                        continue
+                    chapter_url = str(chapter_url)
+                    chapter_title = str(latest.get("title") or "فصل جديد")
+                    checkpoint = db.get_follow_checkpoint(item["source_id"], item["manga_url"])
+                    if not checkpoint:
+                        db.set_follow_checkpoint(item["source_id"], item["manga_url"], chapter_url)
+                        continue
+                    if checkpoint == chapter_url:
+                        continue
+                    notice = (
+                        "🆕 **نزل فصل جديد!**\\n"
+                        f"📚 {item['title'] or manga.get('title') or 'مانجا'}\\n"
+                        f"📖 {chapter_title}\\n"
+                        "افتح البوت لمشاهدة الفصل."
+                    )
+                    for user_id in item["user_ids"]:
+                        try:
+                            await client.send_message(user_id, notice)
+                        except Exception:
+                            log.exception("Could not notify user_id=%s", user_id)
+                    db.set_follow_checkpoint(item["source_id"], item["manga_url"], chapter_url)
+                    log.info("New chapter detected: %s / %s", item["title"], chapter_title)
+                except Exception:
+                    log.exception("Follow check failed: %s", item["manga_url"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Periodic chapter checker failed")
+        try:
+            await asyncio.sleep(CHECK_INTERVAL)
+        except asyncio.CancelledError:
+            raise
 
 
 async def show_results(client, message, user_id, results, source):
@@ -306,8 +354,17 @@ async def callback_handler(client, query):
                 added = db.toggle(
                     table, user_id, current["source"], current["url"], current["title"]
                 )
+                if table == "follows" and added:
+                    chapters = state.get("chapters") or []
+                    if chapters and chapters[0].get("url"):
+                        db.set_follow_checkpoint(
+                            current["source"], current["url"], str(chapters[0]["url"])
+                        )
                 await message.reply_text(
-                    "تمت الإضافة إلى القائمة." if added else "تم حذفها من القائمة."
+                    ("تمت الإضافة إلى القائمة. 🔔 ستصلك إشعارات عند نزول فصل جديد."
+                     if table == "follows" and added else
+                     "تمت الإضافة إلى القائمة." if added else
+                     "تم حذفها من القائمة.")
                 )
         elif data.startswith("chapter:"):
             index = int(data.split(":", 1)[1])
@@ -348,13 +405,19 @@ async def run():
         sleep_threshold=30,
     )
 
+    checker_task = None
     try:
         await api.start()
         await app.start()
         me = await app.get_me()
         log.info("Manga Virus started as @%s using Pyrogram. Press Ctrl+C to stop.", me.username)
+        checker_task = asyncio.create_task(check_new_chapters(app))
         await idle()
     finally:
+        if checker_task:
+            checker_task.cancel()
+            await asyncio.gather(checker_task, return_exceptions=True)
+
         # Always attempt to close both clients, even if startup or shutdown fails.
         if app.is_connected:
             try:
