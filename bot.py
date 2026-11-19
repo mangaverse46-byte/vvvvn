@@ -2003,7 +2003,18 @@ async def unified_callback(client,callback):
     if data=="latest_home":
         await callback.answer("🏠")
         welcome=settings.get("welcome_message","🌟 **مرحباً بك في بوت المانجا**")
-        await safe_edit(msg,welcome,await build_main_keyboard(uid))
+        # A manga details message is a photo; editing its caption leaves the old cover visible.
+        # Delete that media message and send the main menu as a clean text message instead.
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await client.send_message(
+            chat_id=cid,
+            text=welcome,
+            reply_markup=await build_main_keyboard(uid),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     if data=="main_categories" or data.startswith("cat_pg_"):
