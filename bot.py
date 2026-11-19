@@ -222,6 +222,24 @@ class MangaSource:
         info["genres"] = info.get("genres") or []
         info["url"] = info.get("url") or str(manga_url)
         info["chapters"] = [c for i, x in enumerate(chapters or []) if (c := _chapter(x, i)) and c.get("url")]
+
+        # MangaLik may expose its page's "إلغاء الرد" control as if it were a chapter.
+        # Remove that UI artifact only for MangaLik; keep every real chapter intact.
+        if self.SOURCE.lower() == "mangalik":
+            def _is_reply_cancel_item(chapter):
+                label = str(
+                    chapter.get("title") or chapter.get("name")
+                    or chapter.get("display_text") or ""
+                ).strip().casefold()
+                compact = re.sub(r"[\\sـ]+", "", label)
+                return compact in {
+                    "إلغاءالرد", "الغاءالرد", "إلغاءرد", "الغاءرد",
+                    "cancelreply", "cancelresponse",
+                }
+            info["chapters"] = [
+                chapter for chapter in info["chapters"]
+                if not _is_reply_cancel_item(chapter)
+            ]
         return info
 
     def get_chapters(self, manga_url):
