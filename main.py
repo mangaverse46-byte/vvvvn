@@ -82,7 +82,7 @@ async def check_new_chapters(client):
                         "🆕 **نزل فصل جديد!**\n"
                         f"📚 {item['title'] or manga.get('title') or 'مانجا'}\n"
                         f"📖 {chapter_title}\n"
-                        "افتح البوت لمشاهدة الفصل."
+                        f"🔗 {item['manga_url']}"
                     )
                     for user_id in item["user_ids"]:
                         try:
