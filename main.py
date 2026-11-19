@@ -79,9 +79,9 @@ async def check_new_chapters(client):
                     if checkpoint == chapter_url:
                         continue
                     notice = (
-                        "🆕 **نزل فصل جديد!**\\n"
-                        f"📚 {item['title'] or manga.get('title') or 'مانجا'}\\n"
-                        f"📖 {chapter_title}\\n"
+                        "🆕 **نزل فصل جديد!**\n"
+                        f"📚 {item['title'] or manga.get('title') or 'مانجا'}\n"
+                        f"📖 {chapter_title}\n"
                         "افتح البوت لمشاهدة الفصل."
                     )
                     for user_id in item["user_ids"]:
