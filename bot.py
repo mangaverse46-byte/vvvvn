@@ -1132,12 +1132,13 @@ def build_caption(template_key,**kwargs):
 def _chapter_tracking_value(chapter):
     if not isinstance(chapter, dict):
         return str(chapter or "")
+    # Keep title/number first to remain compatible with checkpoints saved by older bot versions.
     return str(
-        chapter.get("id")
-        or chapter.get("url")
-        or chapter.get("title")
+        chapter.get("title")
         or chapter.get("number")
         or chapter.get("chapter_number")
+        or chapter.get("id")
+        or chapter.get("url")
         or ""
     )
 
