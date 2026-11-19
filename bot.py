@@ -7,7 +7,8 @@ import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
+import signal
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import MessageNotModified
@@ -3227,15 +3228,26 @@ async def periodic_check():
         await check_new_chapters(); await check_vip_expiry()
 
 if __name__ == "__main__":
-    pass
-    pass
-    pass
-
     async def _bootstrap():
         global BOT_USERNAME
         background_tasks = []
         started = False
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+        installed_signals = []
+
+        def request_shutdown():
+            stop_event.set()
+
         try:
+            # Handle Ctrl+C explicitly in the active asyncio loop.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, request_shutdown)
+                    installed_signals.append(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
+
             await app.start()
             started = True
 
@@ -3244,8 +3256,7 @@ if __name__ == "__main__":
                 try:
                     me = await app.get_me()
                     break
-                except Exception as exc:
-                    pass
+                except Exception:
                     if attempt == 3:
                         raise
                     await asyncio.sleep(2)
@@ -3256,26 +3267,33 @@ if __name__ == "__main__":
                 asyncio.create_task(periodic_check(), name="periodic_check"),
                 asyncio.create_task(auto_backup_task(), name="auto_backup_task"),
             ]
-            await idle()
-        except Exception as exc:
-            pass
-            raise
+
+            print("✅ البوت يعمل. لإيقافه اضغط Ctrl+C", flush=True)
+            await stop_event.wait()
+
         finally:
+            # Remove custom signal handlers before closing the event loop.
+            for sig in installed_signals:
+                try:
+                    loop.remove_signal_handler(sig)
+                except Exception:
+                    pass
+
+            # Cancel and await all background jobs before disconnecting Telegram.
             for task in background_tasks:
                 if not task.done():
                     task.cancel()
             if background_tasks:
                 await asyncio.gather(*background_tasks, return_exceptions=True)
+
             if started and app.is_connected:
-                pass
                 try:
                     await app.stop()
-                except Exception as exc:
+                except Exception:
                     pass
 
     try:
-        # Client was created before this block. Use Pyrogram's own loop runner
-        # instead of asyncio.run(), which creates a different event loop.
         app.run(_bootstrap())
     except KeyboardInterrupt:
-        pass
+        # A fallback for interrupts received before the async handlers are ready.
+        print("\n🛑 تم إيقاف البوت.", flush=True)
