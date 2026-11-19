@@ -28,6 +28,11 @@ class Database:
                 user_id INTEGER NOT NULL, source_id TEXT NOT NULL, manga_url TEXT NOT NULL,
                 title TEXT, PRIMARY KEY(user_id, source_id, manga_url)
             );
+            CREATE TABLE IF NOT EXISTS follow_checkpoints(
+                source_id TEXT NOT NULL, manga_url TEXT NOT NULL,
+                chapter_url TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(source_id, manga_url)
+            );
             """)
 
     def touch_user(self, user):
@@ -57,6 +62,37 @@ class Database:
             con.execute(f"INSERT OR IGNORE INTO {table}(user_id,source_id,manga_url,title) VALUES(?,?,?,?)",
                         (user_id, source, url, title))
             return True
+
+    def list_followed_manga(self):
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT source_id, manga_url, MAX(title) AS title, "
+                "GROUP_CONCAT(user_id) AS user_ids FROM follows "
+                "GROUP BY source_id, manga_url"
+            ).fetchall()
+            return [{
+                "source_id": row["source_id"],
+                "manga_url": row["manga_url"],
+                "title": row["title"] or "",
+                "user_ids": [int(value) for value in (row["user_ids"] or "").split(",") if value],
+            } for row in rows]
+
+    def get_follow_checkpoint(self, source, manga_url):
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT chapter_url FROM follow_checkpoints WHERE source_id=? AND manga_url=?",
+                (source, manga_url),
+            ).fetchone()
+            return row["chapter_url"] if row else None
+
+    def set_follow_checkpoint(self, source, manga_url, chapter_url):
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO follow_checkpoints(source_id,manga_url,chapter_url) "
+                "VALUES(?,?,?) ON CONFLICT(source_id,manga_url) DO UPDATE SET "
+                "chapter_url=excluded.chapter_url, updated_at=CURRENT_TIMESTAMP",
+                (source, manga_url, chapter_url),
+            )
 
     def list_items(self, table, user_id):
         if table not in ("favorites", "follows"):
