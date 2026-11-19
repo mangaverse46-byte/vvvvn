@@ -166,7 +166,14 @@ def _chapter(item, index):
     title = str(item.get("title") or item.get("name") or item.get("chapter") or item.get("number") or f"Chapter {index + 1}")
     number = str(item.get("number") or item.get("chapter_number") or item.get("num") or "")
     if not re.fullmatch(r"\d+(?:\.\d+)?", number):
-        match = re.search(r"(\d+(?:\.\d+)?)", title)
+        # Do not mistake relative publish times (e.g. "1 hour ago" / "ساعة واحدة")
+        # for chapter numbers.
+        time_label = re.search(
+            r"\b(?:ago|hour|hours|minute|minutes|day|days|week|weeks|month|months|year|years)\b|"
+            r"(?:منذ|ساعة|ساعات|دقيقة|دقائق|يوم|أيام|اسبوع|أسبوع|شهر|سنة)",
+            title, re.IGNORECASE
+        )
+        match = re.search(r"(\d+(?:\.\d+)?)", title) if not time_label else None
         number = match.group(1) if match else ""
     return dict(item, url=url, id=str(item.get("id") or item.get("chapter_id") or url or index),
         title=title, number=number, num_str=number, display_text=number or title,
@@ -2110,7 +2117,18 @@ async def unified_callback(client,callback):
             parts.extend(["",f"📖 **{len(chs)} فصل**"])
             if chs:
                 latest=chs[-1]
-                label=latest.get("display_text") or latest.get("number") or latest.get("num_str") or latest.get("title","")
+                label=latest.get("number") or latest.get("num_str") or latest.get("chapter_number") or ""
+                if not label:
+                    candidate=str(latest.get("title") or "").strip()
+                    # Never show relative publication time as the chapter number.
+                    time_label=re.search(
+                        r"\b(?:ago|hour|hours|minute|minutes|day|days|week|weeks|month|months|year|years)\b|"
+                        r"(?:منذ|ساعة|ساعات|دقيقة|دقائق|يوم|أيام|اسبوع|أسبوع|شهر|سنة)",
+                        candidate, re.IGNORECASE
+                    )
+                    match=re.search(r"(?:chapter|ch\.?|فصل)\s*#?\s*(\d+(?:\.\d+)?)", candidate, re.IGNORECASE)
+                    if match and not time_label:
+                        label=match.group(1)
                 if label: parts.append(f"📌 آخر فصل: `{label}`")
             cap="\n".join(parts); user_data[uid]["base_caption"]=cap
             markup,_,_=create_chapters_markup(chs,0,ident,src,uid)
