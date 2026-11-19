@@ -231,7 +231,7 @@ class MangaSource:
                     chapter.get("title") or chapter.get("name")
                     or chapter.get("display_text") or ""
                 ).strip().casefold()
-                compact = re.sub(r"[\\sـ]+", "", label)
+                compact = re.sub(r"[\sـ]+", "", label)
                 return compact in {
                     "إلغاءالرد", "الغاءالرد", "إلغاءرد", "الغاءرد",
                     "cancelreply", "cancelresponse",
