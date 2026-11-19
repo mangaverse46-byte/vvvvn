@@ -1161,7 +1161,7 @@ def get_latest_chapter_info(source, ident, murl):
 
 def get_latest_chapter_number(source, ident, murl):
     latest = get_latest_chapter_info(source, ident, murl)
-    match = re.search(r"(\\d+(?:\\.\\d+)?)", str(latest))
+    match = re.search(r"(\d+(?:\.\d+)?)", str(latest))
     return float(match.group(1)) if match else 0
 
 _notify_callback = None
@@ -3165,12 +3165,12 @@ async def check_new_chapters():
                 chapter_title = _chapter_display_value(newest)
                 chapter_url = newest.get("url") if isinstance(newest, dict) else None
                 notification = (
-                    "🆕 فصل جديد متوفر!\\n\\n"
-                    + "📚 " + str(fav.get("title") or "مانجا") + "\\n"
+                    "🆕 فصل جديد متوفر!\n\n"
+                    + "📚 " + str(fav.get("title") or "مانجا") + "\n"
                     + "📖 " + chapter_title
                 )
                 if chapter_url:
-                    notification += "\\n🔗 " + str(chapter_url)
+                    notification += "\n🔗 " + str(chapter_url)
 
                 # Advance the saved chapter only after Telegram confirms delivery.
                 await app.send_message(uid, notification, disable_web_page_preview=True)
