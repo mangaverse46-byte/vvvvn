@@ -22,3 +22,6 @@ MAX_DOWNLOAD_CONCURRENCY = max(1, min(30, int(os.getenv("MAX_DOWNLOAD_CONCURRENC
 MAX_MERGE_CHAPTERS = max(1, int(os.getenv("MAX_MERGE_CHAPTERS", "10")))
 MAX_PDF_PAGES = max(1, int(os.getenv("MAX_PDF_PAGES", "500")))
 SOURCE_CACHE_SECONDS = max(30, int(os.getenv("SOURCE_CACHE_SECONDS", "300")))
+
+# Periodic new-chapter check interval (default: 15 minutes).
+CHECK_INTERVAL = max(60, int(os.getenv("CHECK_INTERVAL", "900")))
