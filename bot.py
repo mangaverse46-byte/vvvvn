@@ -1160,8 +1160,13 @@ def get_latest_chapter_info(source, ident, murl):
     return _chapter_tracking_value(chapters[0]) if chapters else "0"
 
 def get_latest_chapter_number(source, ident, murl):
-    latest = get_latest_chapter_info(source, ident, murl)
-    match = re.search(r"(\d+(?:\.\d+)?)", str(latest))
+    api = get_source(source)
+    info = api.get_details(murl or ident)
+    chapters = (info or {}).get("chapters") or []
+    if not chapters:
+        return 0
+    display = _chapter_display_value(chapters[0])
+    match = re.search(r"(\d+(?:\.\d+)?)", display)
     return float(match.group(1)) if match else 0
 
 _notify_callback = None
