@@ -1129,10 +1129,40 @@ def build_caption(template_key,**kwargs):
         kwargs.update({"date":time.strftime("%Y-%m-%d"),"time":time.strftime("%H:%M")})
         return template.format(**kwargs)
     except Exception as e: return ""
-def get_latest_chapter_info(source,ident,murl):
-    return "0"
-def get_latest_chapter_number(source,ident,murl):
-    return 0
+def _chapter_tracking_value(chapter):
+    if not isinstance(chapter, dict):
+        return str(chapter or "")
+    return str(
+        chapter.get("id")
+        or chapter.get("url")
+        or chapter.get("title")
+        or chapter.get("number")
+        or chapter.get("chapter_number")
+        or ""
+    )
+
+def _chapter_display_value(chapter):
+    if not isinstance(chapter, dict):
+        return str(chapter or "فصل جديد")
+    return str(
+        chapter.get("title")
+        or chapter.get("number")
+        or chapter.get("chapter_number")
+        or chapter.get("name")
+        or "فصل جديد"
+    )
+
+def get_latest_chapter_info(source, ident, murl):
+    """Read the newest chapter from the active Manga Engine source adapter."""
+    api = get_source(source)
+    info = api.get_details(murl or ident)
+    chapters = (info or {}).get("chapters") or []
+    return _chapter_tracking_value(chapters[0]) if chapters else "0"
+
+def get_latest_chapter_number(source, ident, murl):
+    latest = get_latest_chapter_info(source, ident, murl)
+    match = re.search(r"(\\d+(?:\\.\\d+)?)", str(latest))
+    return float(match.group(1)) if match else 0
 
 _notify_callback = None
 def set_notify_callback(cb):
@@ -2199,7 +2229,12 @@ async def unified_callback(client,callback):
         if not src or not ident: return
         if data.startswith("fav_add_"):
             info=user_data.get(uid,{})
-            lc=get_latest_chapter_info(src,ident,info.get('manga_url',''))
+            try:
+                lc = await asyncio.to_thread(
+                    get_latest_chapter_info, src, ident, info.get("manga_url", "")
+                )
+            except Exception:
+                lc = "0"
             if add_to_favorites(uid,info.get('title','?'),ident,src,info.get('manga_url',''),info.get('cover_url',''),lc): await callback.answer("✅")
             else: await callback.answer("⚠️ موجود",show_alert=True)
         elif data.startswith("fav_remove_"):
@@ -3094,31 +3129,56 @@ async def handle_documents(client,message):
     user_data.pop(uid, None)
 
 async def check_new_chapters():
+    """Poll the Manga Engine for the newest chapter of VIP members' favorites."""
     for uid in get_all_user_ids():
-        if not is_notifications_enabled(uid):
+        # Favorites and chapter notifications are a VIP-only feature.
+        if not is_vip(uid) or not is_notifications_enabled(uid):
             continue
+
         for fav in get_fav_items(uid):
             if not fav.get("notify", True):
                 continue
+
             try:
-                api = await asyncio.to_thread(get_source, fav.get("source"))
-                info = await asyncio.to_thread(api.get_details, fav.get("manga_url") or fav.get("identifier"))
+                source = fav.get("source")
+                manga_url = fav.get("manga_url") or fav.get("identifier")
+                api = await asyncio.to_thread(get_source, source)
+                info = await asyncio.to_thread(api.get_details, manga_url)
                 chapters = (info or {}).get("chapters") or []
                 if not chapters:
                     continue
-                latest = str(chapters[0].get("title") or chapters[0].get("number") or "")
+
+                newest = chapters[0]
+                latest = _chapter_tracking_value(newest)
                 previous = str(fav.get("last_chapter") or "")
                 if not latest:
                     continue
-                if previous and previous != "0" and latest != previous:
-                    try:
-                        await app.send_message(uid, "🆕 **فصل جديد متوفر!**\n\n📚 " + fav.get("title", "مانجا") + "\n📖 " + latest, parse_mode=ParseMode.MARKDOWN)
-                    except Exception:
-                        pass
-                if latest != previous:
-                    set_fav_last_chapter(uid, fav["identifier"], fav["source"], latest)
-            except Exception as e:
-                pass
+
+                # First successful check establishes a baseline without a false alert.
+                if not previous or previous == "0":
+                    set_fav_last_chapter(uid, fav["identifier"], source, latest)
+                    continue
+
+                if latest == previous:
+                    continue
+
+                chapter_title = _chapter_display_value(newest)
+                chapter_url = newest.get("url") if isinstance(newest, dict) else None
+                notification = (
+                    "🆕 فصل جديد متوفر!\\n\\n"
+                    + "📚 " + str(fav.get("title") or "مانجا") + "\\n"
+                    + "📖 " + chapter_title
+                )
+                if chapter_url:
+                    notification += "\\n🔗 " + str(chapter_url)
+
+                # Advance the saved chapter only after Telegram confirms delivery.
+                await app.send_message(uid, notification, disable_web_page_preview=True)
+                set_fav_last_chapter(uid, fav["identifier"], source, latest)
+
+            except Exception:
+                # Keep the previous checkpoint so a failed fetch/send is retried next cycle.
+                continue
 
 async def check_vip_expiry():
     for u in get_expired_vips():
