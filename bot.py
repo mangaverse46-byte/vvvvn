@@ -2412,25 +2412,43 @@ async def unified_callback(client,callback):
             lt = f"⏳ **جاري تحميل الفصل {disp}...**"
             if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
             lm=await msg.reply_text(lt)
+            stage_clock = {"started": time.perf_counter()}
             async def single_progress(stage, image_count):
+                now = time.perf_counter()
+                elapsed = now - stage_clock["started"]
                 if stage == "extract":
-                    status = f"📖 **الفصل 1/1 — {disp}**\n🔗 تم استخراج `{image_count}` صورة"
+                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
+                              f"🔗 تم استخراج `{image_count}` صورة "
+                              f"خلال `{elapsed:.1f}` ثانية")
                 else:
-                    status = f"📖 **الفصل 1/1 — {disp}**\n📦 تم تجهيز PDF من `{image_count}` صورة"
+                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
+                              f"📦 تم تجهيز PDF من `{image_count}` صورة "
+                              f"خلال `{elapsed:.1f}` ثانية")
+                stage_clock["started"] = now
                 await lm.edit_text(status)
-            try: buf=await pdf_func(target, progress=single_progress)
-            except Exception as e: buf=None
+            try:
+                buf = await pdf_func(target, progress=single_progress)
+            except Exception:
+                buf = None
             if not buf:
-                refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
-            increment_download_count(uid); await lm.edit_text("📤 **جاري الرفع...**")
+                refund_chapter(uid)
+                await lm.edit_text("❌ **فشل التحميل**")
+                return
+            increment_download_count(uid)
+            upload_started = time.perf_counter()
+            await lm.edit_text("📤 **جاري الرفع...**")
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
                 await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
-                await lm.delete()
-            except Exception as e: await lm.edit_text(f"❌ {e}")
-            del buf; gc.collect(); return
+                upload_elapsed = time.perf_counter() - upload_started
+                await lm.edit_text(f"✅ **اكتمل رفع الفصل**\n⏱️ وقت الرفع: `{upload_elapsed:.1f}` ثانية")
+            except Exception as e:
+                await lm.edit_text(f"❌ {e}")
+            del buf
+            gc.collect()
+            return
         finally:
             if locked: unlock_download(uid)
 
