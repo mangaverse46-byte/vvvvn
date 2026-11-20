@@ -3138,7 +3138,7 @@ async def handle_all_text(client,message):
         try:
             h=int(message.text.strip()); settings["daily_reward_interval"]=h*3600; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ {h} ساعة")
-        except: await message.reply_text("⏰ **مدة التجديد غير صحيحة.** أرسل عدد ساعات صحيحاً.
+        except: await message.reply_text("⏰ **مدة التجديد غير صحيحة.** أرسل عدد ساعات صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_gift_all"):
         try: a=int(message.text.strip())
