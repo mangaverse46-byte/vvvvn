@@ -2443,7 +2443,8 @@ async def unified_callback(client,callback):
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
                 await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
                 upload_elapsed = time.perf_counter() - upload_started
-                await lm.edit_text(f"✅ **اكتمل رفع الفصل**\n⏱️ وقت الرفع: `{upload_elapsed:.1f}` ثانية")
+                print(f"[SINGLE TIMING] chapter={disp!r} upload={upload_elapsed:.1f}s")
+                await lm.delete()
             except Exception as e:
                 await lm.edit_text(f"❌ {e}")
             del buf
