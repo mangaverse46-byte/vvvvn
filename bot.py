@@ -2370,9 +2370,6 @@ async def unified_callback(client,callback):
             if not buf:
                 refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
             increment_download_count(uid); await lm.edit_text("📤 **جاري الرفع...**")
-            try:
-                await lm.delete()
-            except: pass
             await send_message_with_image(client,cid,"📄 **ملف الفصل جاهز للتحميل**","bdf_image")
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
@@ -3000,6 +2997,7 @@ async def handle_all_text(client,message):
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
+            await send_message_with_image(client,message.chat.id,"📄 **ملف PDF المدمج جاهز للتحميل**","bdf_image")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
                 caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
