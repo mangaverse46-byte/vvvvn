@@ -1947,7 +1947,7 @@ async def search_cmd(client,message):
     rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text("❌ لا توجد مصادر مفعلة داخل المحرك."); return
-    await message.reply_text("🔍 اختر المصدر للبحث عن:\n" + query, reply_markup=InlineKeyboardMarkup(rows))
+    await send_message_with_image(client, message.chat.id, "🔍 **اختر المصدر للبحث عن:**\n" + query, "sources_image", InlineKeyboardMarkup(rows))
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
@@ -2067,7 +2067,9 @@ async def unified_callback(client,callback):
             name=str(source.get("name") or sid)
             kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}")])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
-        await safe_edit_fresh_text(client,msg,cid,"📚 **اختر مصدر أحدث الفصول:**",InlineKeyboardMarkup(kb)); return
+        try: await msg.delete()
+        except: pass
+        await send_message_with_image(client,cid,"📚 **اختر مصدر أحدث الفصول:**","sources_image",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("latest_src_"):
         await callback.answer("⏳")
@@ -2108,7 +2110,9 @@ async def unified_callback(client,callback):
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
         kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
-        await safe_edit_fresh_text(client,msg,cid,"🔥 **أحدث الفصول في المصدر المحدد:**",InlineKeyboardMarkup(kb)); return
+        try: await msg.delete()
+        except: pass
+        await send_message_with_image(client,cid,"🔥 **أحدث الفصول في المصدر المحدد:**","results_image",InlineKeyboardMarkup(kb)); return
 
     if data=="latest_home":
         await callback.answer("🏠")
@@ -2367,6 +2371,10 @@ async def unified_callback(client,callback):
                 refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
             increment_download_count(uid); await lm.edit_text("📤 **جاري الرفع...**")
             try:
+                await lm.delete()
+            except: pass
+            await send_message_with_image(client,cid,"📄 **ملف الفصل جاهز للتحميل**","bdf_image")
+            try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
@@ -2438,7 +2446,9 @@ async def unified_callback(client,callback):
             title=str(item.get("title") or "Manga")
             kb.append([InlineKeyboardButton(f"📖 {title[:45]}",callback_data=f"sel_{src}_{i}")])
         kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-        await safe_edit(msg,f"✅ **{len(res)} نتيجة**\n`{q}`",InlineKeyboardMarkup(kb)); return
+        try: await msg.delete()
+        except: pass
+        await send_message_with_image(client,cid,f"✅ **{len(res)} نتيجة**\n`{q}`","results_image",InlineKeyboardMarkup(kb)); return
 
     # ============ ADMIN ============
     if is_admin_any(uid):
