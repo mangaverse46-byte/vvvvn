@@ -2612,7 +2612,7 @@ async def unified_callback(client,callback):
             await callback.answer("🔙"); return
         if data=="sec_broadcast_stats":
             await msg.edit_text(
-                f"📊 **لوحة الإحصائيات العامة**\n\n👥 `{get_users_count()}`\n📥 `{get_download_count()}`\n👑 VIP `{len(get_all_vips())}`\n👮 `{len(get_all_added_admins())}`\n🚫 `{len(get_all_banned())}`\n🤖 `{len(get_all_bots())}`\n📬 `{count_complaints()}`\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`",
+                f"📊 **لوحة الإحصائيات العامة – Manga Virus** 🦠\n\n✨ **نظرة شاملة على نشاط البوت وأرقامه:**\n\n👥 **إجمالي المستخدمين:** `{get_users_count()}`\n📥 **عمليات التحميل:** `{get_download_count()}`\n👑 **أعضاء VIP:** `{len(get_all_vips())}`\n👮 **المشرفون المضافون:** `{len(get_all_added_admins())}`\n🚫 **المحظورون:** `{len(get_all_banned())}`\n🤖 **البوتات المسجلة:** `{len(get_all_bots())}`\n📬 **الشكاوى الواردة:** `{count_complaints()}`\n📖 **الحد اليومي لتحميل الفصول:** `{settings.get('daily_reward_amount',100)}`\n🧩 **حد دمج الفصول اليومي:** `{settings.get('merge_daily_limit',50)}`\n\n━━━━━━━━━━━━━━━━━━\n\n🚀 **Manga Virus في تطوّر مستمر!**\n\nكل رقم يمثل خطوة جديدة في رحلتنا لتوفير أفضل تجربة لعشاق المانجا والمانهوا.\n\n🖤 شكراً لكل من اختار Manga Virus، والقادم أفضل بإذن الله! 🦠",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
             await callback.answer("📊"); return
         if data=="admin_broadcast":
