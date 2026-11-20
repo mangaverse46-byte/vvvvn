@@ -451,6 +451,31 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         except Exception as exc:
             pass
 
+    # Add the configured BDF image as the first PDF page (cover).
+    # If it cannot be downloaded or is not a supported image, keep the PDF usable
+    # and continue without a cover.
+    bdf_file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
+    if client is not None and bdf_file_id:
+        try:
+            cover_file = await client.download_media(bdf_file_id, in_memory=True)
+            if cover_file:
+                if hasattr(cover_file, "getvalue"):
+                    cover_blob = cover_file.getvalue()
+                elif hasattr(cover_file, "read"):
+                    cover_blob = cover_file.read()
+                else:
+                    cover_blob = b""
+                if cover_blob and (
+                    cover_blob.startswith(b"\\xff\\xd8\\xff")
+                    or cover_blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+                    or cover_blob.startswith((b"\\x00\\x00\\x00\\x0cjP  ", b"\\xffO\\xffQ"))
+                    or cover_blob.startswith((b"II*\\x00", b"MM\\x00*"))
+                ):
+                    img2pdf.convert(BytesIO(cover_blob))
+                    valid.insert(0, cover_blob)
+        except Exception:
+            pass
+
     if not valid:
         return None
 
