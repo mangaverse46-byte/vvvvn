@@ -466,10 +466,10 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                 else:
                     cover_blob = b""
                 if cover_blob and (
-                    cover_blob.startswith(b"\\xff\\xd8\\xff")
-                    or cover_blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
-                    or cover_blob.startswith((b"\\x00\\x00\\x00\\x0cjP  ", b"\\xffO\\xffQ"))
-                    or cover_blob.startswith((b"II*\\x00", b"MM\\x00*"))
+                    cover_blob.startswith(b"\xff\xd8\xff")
+                    or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
+                    or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+                    or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
                 ):
                     img2pdf.convert(BytesIO(cover_blob))
                     valid.insert(0, cover_blob)
