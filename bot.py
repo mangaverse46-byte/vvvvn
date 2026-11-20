@@ -32,14 +32,67 @@ WORKERS = 24
 _SOURCE_CACHE = []
 _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 
-def _request(action, params=None, payload=None):
+# Successful GET responses are cached by action + complete URL.
+_API_RESPONSE_CACHE = {}
+_API_CACHE_LOCK = threading.RLock()
+_API_CACHE_TTL = {
+    "sources": 3600, "latest": 300, "search": 90,
+    "genres": 3600, "genre-manga": 300, "details": 1800,
+}
+_API_CACHE_MAX_ITEMS = 1500
+
+def _api_cache_get(key):
+    now = time.time()
+    with _API_CACHE_LOCK:
+        entry = _API_RESPONSE_CACHE.get(key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if expires_at <= now:
+            _API_RESPONSE_CACHE.pop(key, None)
+            return None
+        return json.loads(json.dumps(value, ensure_ascii=False))
+
+def _api_cache_set(key, value, ttl):
+    if not ttl:
+        return
+    now = time.time()
+    with _API_CACHE_LOCK:
+        for old_key in [k for k, (expiry, _) in _API_RESPONSE_CACHE.items() if expiry <= now]:
+            _API_RESPONSE_CACHE.pop(old_key, None)
+        if len(_API_RESPONSE_CACHE) >= _API_CACHE_MAX_ITEMS:
+            oldest = min(_API_RESPONSE_CACHE, key=lambda k: _API_RESPONSE_CACHE[k][0])
+            _API_RESPONSE_CACHE.pop(oldest, None)
+        _API_RESPONSE_CACHE[key] = (
+            now + ttl, json.loads(json.dumps(value, ensure_ascii=False))
+        )
+
+def clear_api_cache(action=None):
+    with _API_CACHE_LOCK:
+        if action is None:
+            _API_RESPONSE_CACHE.clear()
+        else:
+            prefix = str(action) + "|"
+            for key in list(_API_RESPONSE_CACHE):
+                if key.startswith(prefix):
+                    _API_RESPONSE_CACHE.pop(key, None)
+
+def _request(action, params=None, payload=None, use_cache=True):
     if payload is None:
         q = {"action": action}
         q.update(params or {})
         url = API + "?" + urllib.parse.urlencode(q)
         data = None
         headers = {"User-Agent": "Mozilla/5.0 MangaVirus", "Accept": "application/json"}
+        cache_key = str(action) + "|" + url
+        ttl = _API_CACHE_TTL.get(str(action), 0)
+        if use_cache and ttl:
+            cached = _api_cache_get(cache_key)
+            if cached is not None:
+                return cached
     else:
+        cache_key = None
+        ttl = 0
         body = {"action": action}
         body.update(payload)
         url = API
@@ -56,6 +109,8 @@ def _request(action, params=None, payload=None):
             result = json.loads(raw.decode("utf-8"))
             if isinstance(result, dict) and result.get("error"):
                 raise RuntimeError(str(result.get("error"))[:250])
+            if cache_key is not None and use_cache and ttl:
+                _api_cache_set(cache_key, result, ttl)
             return result
         except urllib.error.HTTPError as exc:
             last_error = exc
@@ -70,10 +125,10 @@ def _request(action, params=None, payload=None):
 
 def get_sources(force=False):
     global _SOURCE_CACHE
-    raw = _request("sources")
+    raw = _request("sources", use_cache=not force)
     items = raw.get("sources", []) if isinstance(raw, dict) else []
     _SOURCE_CACHE = [dict(x) for x in items if isinstance(x, dict) and x.get("enabled") is True and x.get("id")]
-    return list(_SOURCE_CACHE)
+    return [dict(x) for x in _SOURCE_CACHE]
 
 def source_code(source_id):
     source_id = str(source_id)
@@ -193,8 +248,8 @@ class MangaSource:
         raw = _request("search", {"source": self.SOURCE, "q": query, "page": page})
         return [_manga(x) for x in _items(raw)]
 
-    def get_latest_updates(self, page=1):
-        raw = _request("latest", {"source": self.SOURCE, "page": page})
+    def get_latest_updates(self, page=1, force=False):
+        raw = _request("latest", {"source": self.SOURCE, "page": page}, use_cache=not force)
         return [_manga(x) for x in _items(raw)]
 
     def get_genres(self):
@@ -3287,6 +3342,7 @@ if __name__ == "__main__":
             background_tasks = [
                 asyncio.create_task(periodic_check(), name="periodic_check"),
                 asyncio.create_task(auto_backup_task(), name="auto_backup_task"),
+                asyncio.create_task(latest_manga_refresh_task(), name="latest_manga_refresh_task"),
             ]
 
             print("✅ البوت يعمل. لإيقافه اضغط Ctrl+C", flush=True)
