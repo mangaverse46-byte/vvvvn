@@ -2678,7 +2678,7 @@ async def unified_callback(client,callback):
             user_data[uid]={"awaiting_vip_contact":True}; await callback.answer("👥"); return
         if data=="admin_del_vip_contact":
             settings["vip_contact_second"]=None; save_settings(); user_data.pop(uid,None)
-            await msg.edit_text("✅",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await msg.edit_text("👥 **تم حذف جهة التواصل الإضافية الخاصة بـ VIP.**",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("✅"); return
         if data=="admin_vip_all_1day":
             await msg.edit_text(f"منح VIP ليوم لـ {get_users_count()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_vip_all_1day_yes")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
@@ -3048,7 +3048,7 @@ async def handle_all_text(client,message):
             if v<2: await message.reply_text("⚠️ min 2"); return
             settings["merge_daily_limit"]=v; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ `{v}`")
-        except: await message.reply_text("⚠️")
+        except: await message.reply_text("🔢 **قيمة حد الدمج غير صالحة.** أرسل رقماً صحيحاً لا يقل عن 2.")
         return
     if user_data.get(uid,{}).get("awaiting_merge_max"):
         try:
@@ -3057,7 +3057,7 @@ async def handle_all_text(client,message):
                 await message.reply_text("⚠️ الحد المسموح من 2 إلى 10"); return
             settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ الحد لكل ملف: `{v}`")
-        except: await message.reply_text("⚠️")
+        except: await message.reply_text("🔢 **قيمة حد الفصول في الملف غير صالحة.** أرسل رقماً ضمن الحد المسموح.")
         return
     if user_data.get(uid,{}).get("awaiting_daily_amount"):
         try:
@@ -3065,33 +3065,33 @@ async def handle_all_text(client,message):
             if v<=0: raise ValueError
             settings["daily_reward_amount"]=v; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ `{v}`")
-        except: await message.reply_text("⚠️")
+        except: await message.reply_text("🔢 **عدد الفصول اليومي غير صالح.** أرسل رقماً أكبر من صفر.")
         return
     if user_data.get(uid,{}).get("awaiting_ref_single_amount"):
-        try: settings["referral_bonus_single"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
-        except: await message.reply_text("⚠️")
+        try: settings["referral_bonus_single"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🔗 **تم تحديث مكافأة الإحالة للفصول الفردية بنجاح.**")
+        except: await message.reply_text("🔢 **قيمة مكافأة الإحالة الفردية غير صحيحة.** أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_ref_merge_amount"):
-        try: settings["referral_bonus_merge"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
-        except: await message.reply_text("⚠️")
+        try: settings["referral_bonus_merge"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🧩 **تم تحديث مكافأة الإحالة للفصول المدمجة بنجاح.**")
+        except: await message.reply_text("🔢 **قيمة مكافأة الإحالة للدمج غير صحيحة.** أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_id"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"✅ `{tid}`\nالعدد:"); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد فصول الدمج التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_amount"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("⚠️"); return
+        except: await message.reply_text("🔢 **عدد فصول الدمج غير صالح.** أرسل رقماً صحيحاً."); return
         tid=user_data[uid]["awaiting_merge_gift_one_amount"]; add_merge_bonus(tid,a)
-        await message.reply_text(f"✅ {a}")
+        await message.reply_text(f"🧩 **تمت إضافة {a} من فصول الدمج إلى المستخدم** `{tid}`.")
         try: await client.send_message(tid,f"🧩 +{a} دمج",parse_mode=ParseMode.MARKDOWN)
         except: pass
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_merge_gift_all"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("⚠️"); return
-        await message.reply_text(f"⏳ {a}")
+        except: await message.reply_text("🔢 **عدد الهدية غير صالح.** أرسل رقماً صحيحاً."); return
+        await message.reply_text(f"🎁 **جارٍ توزيع {a} من فصول الدمج على جميع المستخدمين...**\nيرجى الانتظار حتى تظهر نتيجة الإرسال.")
         s=f=0
         for u in get_all_user_ids():
             try:
@@ -3100,18 +3100,18 @@ async def handle_all_text(client,message):
                 except: f+=1
                 await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+        user_data.pop(uid,None); await message.reply_text(f"🎉 **اكتمل توزيع هدية الدمج**\n✅ وصل إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
     if user_data.get(uid,{}).get("awaiting_vip_contact"):
         t=message.text.strip()
         if t.startswith("@") and len(t)>=4: settings["vip_contact_second"]=t; save_settings(); user_data.pop(uid,None); await message.reply_text(f"✅ `{t}`"); return
-        await message.reply_text("⚠️"); return
+        await message.reply_text("👤 **اسم المستخدم غير صحيح.** أرسل معرفاً يبدأ بـ @ مثل @username."); return
     if user_data.get(uid,{}).get('awaiting_broadcast'):
         t=message.text; await message.reply_text("📢 **بدأ إرسال الإعلان إلى المستخدمين.**\nسأعرض لك عدد الرسائل الناجحة والفاشلة بعد الانتهاء.")
         s=f=0
         for u in get_all_user_ids():
             try: await client.send_message(u,f"📢 **إعلان**\n\n{t}",parse_mode=ParseMode.MARKDOWN); s+=1; await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+        user_data.pop(uid,None); await message.reply_text(f"📢 **اكتمل إرسال الإعلان**\n✅ تم الإرسال إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
     for k in ['awaiting_bdf','awaiting_welcome_image','awaiting_favorites_image','awaiting_results_image','awaiting_sources_image','awaiting_sub_image']:
         if user_data.get(uid,{}).get(k): await message.reply_text("🖼️ **مطلوب إرسال صورة**\nأرسل الصورة كصورة داخل تيليجرام، وليس كنص.\n\nللإلغاء أرسل /cancel"); return
     if user_data.get(uid,{}).get('awaiting_welcome'):
@@ -3120,7 +3120,7 @@ async def handle_all_text(client,message):
         ch=message.text.strip(); ch=ch[1:] if ch.startswith("@") else ch; c2="@"+ch
         chs=settings.get("force_sub_channels",[])
         if c2 not in chs: chs.append(c2); settings["force_sub_channels"]=chs; save_settings()
-        user_data.pop(uid,None); await message.reply_text(f"✅ `{c2}`"); return
+        user_data.pop(uid,None); await message.reply_text(f"📢 **تمت إضافة قناة الاشتراك الإجباري** `{c2}` بنجاح."); return
     if user_data.get(uid,{}).get("awaiting_sub_btn_name"):
         ch=user_data[uid]["awaiting_sub_btn_name"]; b=settings.get("force_sub_buttons",{}); b[ch]=message.text.strip()
         settings["force_sub_buttons"]=b; save_settings(); user_data.pop(uid,None); await message.reply_text("🔘 **تم تحديث اسم زر الاشتراك بنجاح.**"); return
@@ -3131,19 +3131,19 @@ async def handle_all_text(client,message):
         if "{chapter}" not in txt and "{title}" not in txt: await message.reply_text("⚠️ {chapter}/{title}"); return
         settings["single_caption"]=make_quote(txt); save_settings(); user_data.pop(uid,None); await message.reply_text("📄 **تم حفظ وصف ملف الفصل الجديد.**"); return
     if user_data.get(uid,{}).get("awaiting_reward_amount"):
-        try: settings["daily_reward_amount"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("✅")
-        except: await message.reply_text("⚠️")
+        try: settings["daily_reward_amount"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("💰 **تم تحديث مكافأة الفصول اليومية بنجاح.**")
+        except: await message.reply_text("🔢 **قيمة المكافأة اليومية غير صحيحة.** أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_reward_interval"):
         try:
             h=int(message.text.strip()); settings["daily_reward_interval"]=h*3600; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ {h} ساعة")
-        except: await message.reply_text("⚠️")
+        except: await message.reply_text("⏰ **مدة التجديد غير صحيحة.** أرسل عدد ساعات صحيحاً.
         return
     if user_data.get(uid,{}).get("awaiting_gift_all"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("⚠️"); return
-        await message.reply_text(f"⏳ {a}")
+        except: await message.reply_text("🔢 **عدد الفصول المجانية غير صالح.** أرسل رقماً صحيحاً."); return
+        await message.reply_text(f"🎁 **جارٍ توزيع {a} من الفصول المجانية على المستخدمين...**\nيرجى الانتظار حتى يكتمل التوزيع.")
         s=f=0
         for u in get_all_user_ids():
             try:
@@ -3152,84 +3152,84 @@ async def handle_all_text(client,message):
                 except: f+=1
                 await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"✅ {s}\n❌ {f}"); return
+        user_data.pop(uid,None); await message.reply_text(f"🎁 **اكتمل توزيع الفصول المجانية**\n✅ وصل إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_id"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"✅ `{tid}`\nالعدد:"); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد الفصول المجانية التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_amount"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("⚠️"); return
+        except: await message.reply_text("🔢 **عدد الفصول المجانية غير صالح.** أرسل رقماً صحيحاً."); return
         tid=user_data[uid]["awaiting_gift_one_amount"]; add_bonus(tid,a)
-        await message.reply_text(f"✅ {a}")
+        await message.reply_text(f"🎁 **تمت إضافة {a} من الفصول المجانية إلى المستخدم** `{tid}`.")
         try: await client.send_message(tid,f"🎁 +{a}",parse_mode=ParseMode.MARKDOWN)
         except: pass
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_reset_user"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        reset_user_balance(tid); await message.reply_text(f"✅ `{tid}`"); user_data.pop(uid,None); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        reset_user_balance(tid); await message.reply_text(f"♻️ **تم تصفير رصيد المستخدم** `{tid}` بنجاح."); user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_ban_user"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("⚠️ أدمن"); user_data.pop(uid,None); return
-        if ban_user(tid): await message.reply_text(f"✅ `{tid}`")
-        else: await message.reply_text("⚠️")
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("🛡️ **لا يمكن حظر أدمن أو مالك البوت.**"); user_data.pop(uid,None); return
+        if ban_user(tid): await message.reply_text(f"🚫 **تم حظر المستخدم** `{tid}` بنجاح.")
+        else: await message.reply_text("⚠️ **لم يتم حظر المستخدم.** ربما هو محظور مسبقاً أو آيديه غير صحيح.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_unban_user"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        if unban_user(tid): await message.reply_text(f"✅ `{tid}`")
-        else: await message.reply_text("⚠️")
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        if unban_user(tid): await message.reply_text(f"🔓 **تم رفع الحظر عن المستخدم** `{tid}` بنجاح.")
+        else: await message.reply_text("⚠️ **لم يتم رفع الحظر.** تأكد من أن المستخدم موجود في قائمة المحظورين.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_add_admin"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
         ok,m=add_added_admin(tid)
         if ok:
-            await message.reply_text(f"✅ `{tid}`")
-            try: await client.send_message(tid,"👮",parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(f"👮 **تمت إضافة المستخدم** `{tid}` **كمشرف بنجاح.**")
+            try: await client.send_message(tid,"👮 **تمت إضافتك إلى فريق إدارة البوت.**\nيمكنك استخدام /admin لعرض لوحة الأدمن المتاحة لك.",parse_mode=ParseMode.MARKDOWN)
             except: pass
-        else: await message.reply_text(f"⚠️ {m}")
+        else: await message.reply_text(f"⚠️ **تعذرت إضافة الأدمن:** {m}")
         user_data.pop(uid,None); return
     plan=user_data.get(uid,{}).get("awaiting_vip_user")
     if plan:
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
         if add_vip(tid,plan):
             info=get_vip_info(tid); dy=max(0,int((info["expires"]-time.time())//86400))
-            await message.reply_text(f"✅ `{tid}` — {VIP_PLAN_NAMES[plan]} — {dy} يوم")
-            try: await client.send_message(tid,f"🎉 VIP: {VIP_PLAN_NAMES[plan]}",parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(f"👑 **تم تفعيل VIP للمستخدم** `{tid}`\n📅 الخطة: {VIP_PLAN_NAMES[plan]}\n⏳ المدة المتبقية: `{dy}` يوم")
+            try: await client.send_message(tid,f"🎉 **تم تفعيل اشتراك VIP لك!**\n👑 الخطة: {VIP_PLAN_NAMES[plan]}",parse_mode=ParseMode.MARKDOWN)
             except: pass
-        else: await message.reply_text("⚠️")
+        else: await message.reply_text("⚠️ **تعذّر تفعيل VIP.** تحقق من آيدي المستخدم وحالة اشتراكه.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_vip_remove"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("⚠️"); return
-        if remove_vip(tid): await message.reply_text(f"✅ `{tid}`")
-        else: await message.reply_text("⚠️")
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        if remove_vip(tid): await message.reply_text(f"👑 **تم إلغاء اشتراك VIP للمستخدم** `{tid}`.")
+        else: await message.reply_text("⚠️ **لم يتم إلغاء VIP.** قد لا يكون المستخدم مشتركاً حالياً.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_bot_token"):
         parts=[p.strip() for p in message.text.strip().split("|")]
-        if len(parts)!=3: await message.reply_text("⚠️ `اسم | توكن | آيدي`"); return
+        if len(parts)!=3: await message.reply_text("🤖 **صيغة إضافة البوت غير صحيحة.** أرسل البيانات بهذا الترتيب:\n`اسم البوت | التوكن | آيدي الهدف`"); return
         bn,tk,tid_s=parts
         try: target_id=int(tid_s)
-        except: await message.reply_text("⚠️ آيدي"); return
-        await message.reply_text("⏳")
+        except: await message.reply_text("🆔 **آيدي الهدف غير صحيح.** أرسل آيدياً رقمياً."); return
+        await message.reply_text("🔎 **جارٍ التحقق من توكن البوت عبر تيليجرام...**\nيرجى الانتظار.")
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get(f"https://api.telegram.org/bot{tk}/getMe",timeout=10) as r:
                     d=await r.json()
-                    if not d.get("ok"): await message.reply_text("❌"); user_data.pop(uid,None); return
+                    if not d.get("ok"): await message.reply_text("🤖 **التوكن غير صالح أو لم يقبله تيليجرام.**"); user_data.pop(uid,None); return
                     ru=d["result"].get("username","?")
-        except: await message.reply_text("❌"); user_data.pop(uid,None); return
+        except: await message.reply_text("🌐 **تعذّر الاتصال بواجهة تيليجرام للتحقق من التوكن.** حاول مرة أخرى."); user_data.pop(uid,None); return
         ok,m,bid=add_bot_token(tk,bn,uid,target_id=target_id)
         if ok: await message.reply_text(f"✅ @{ru}")
         else: await message.reply_text(f"⚠️ {m}")
