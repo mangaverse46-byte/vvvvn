@@ -9,7 +9,18 @@ from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
 from pyrogram import Client, filters
 import signal
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+
+# Add a clear icon to any inline button label that does not already contain one.
+def InlineKeyboardButton(text, *args, **kwargs):
+    label = str(text)
+    has_icon = any(ord(ch) >= 0x1F000 or ord(ch) in (0x2190, 0x2192, 0x21A9, 0x21AA, 0x23F0, 0x23F3, 0x25B6, 0x25C0, 0x2600, 0x2601, 0x2611, 0x2620, 0x263A, 0x2640, 0x2642, 0x2665, 0x267B, 0x2699, 0x26A0, 0x2705, 0x2709, 0x2714, 0x274C, 0x274E, 0x2753, 0x2754, 0x2755, 0x2757, 0x2795, 0x2796, 0x2797, 0x27A1, 0x27B0, 0x27BF) for ch in label)
+    if not has_icon:
+        lower = label.casefold()
+        icon = "🔙" if any(x in lower for x in ("رجوع", "السابق", "عودة")) else "🏠" if any(x in lower for x in ("الرئيسية", "الرئيس", "home")) else "🔍" if any(x in lower for x in ("بحث", "search")) else "📚" if any(x in lower for x in ("مانجا", "فصول", "مصادر", "manga", "chapter")) else "⚙️" if any(x in lower for x in ("إعداد", "ادمن", "إدارة", "admin")) else "🔹"
+        label = f"{icon} {label}"
+    return _TelegramInlineKeyboardButton(label, *args, **kwargs)
+
 from pyrogram.enums import ParseMode, ChatMemberStatus
 from pyrogram.errors import MessageNotModified
 import gc
@@ -1406,6 +1417,17 @@ async def send_cover_message(msg,cover,text,markup,referer=None):
             except: pass
     return await msg.reply_text(text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
 
+async def safe_edit_fresh_text(client, msg, chat_id, text, markup=None):
+    """Show a text-only screen; never leave an old manga cover behind a list."""
+    if msg.photo or msg.video or msg.document or msg.animation:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        return await client.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    return await safe_edit(msg, text, markup)
+
+
 async def safe_edit(msg,text,markup=None):
     if msg.photo or msg.video or msg.document or msg.animation:
         try: return await msg.edit_caption(caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
@@ -2023,7 +2045,7 @@ async def unified_callback(client,callback):
             name=str(source.get("name") or sid)
             kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}")])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
-        await safe_edit(msg,"📚 **اختر مصدر أحدث الفصول:**",InlineKeyboardMarkup(kb)); return
+        await safe_edit_fresh_text(client,msg,cid,"📚 **اختر مصدر أحدث الفصول:**",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("latest_src_"):
         await callback.answer("⏳")
@@ -2049,10 +2071,10 @@ async def unified_callback(client,callback):
                           if len(item)>4 and str(item[4])==src]
         except Exception as e:
             pass
-            await safe_edit(msg,"❌ تعذر تحميل أحدث الفصول من هذا المصدر")
+            await safe_edit_fresh_text(client,msg,cid,"❌ تعذر تحميل أحدث الفصول من هذا المصدر")
             return
         if not selected:
-            await safe_edit(msg,"❌ لا توجد مانجا حديثة في هذا المصدر",
+            await safe_edit_fresh_text(client,msg,cid,"❌ لا توجد مانجا حديثة في هذا المصدر",
                 InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")],
                                       [InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")]]))
             return
@@ -2064,7 +2086,7 @@ async def unified_callback(client,callback):
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
         kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
-        await safe_edit(msg,"🔥 **أحدث الفصول في المصدر المحدد:**",InlineKeyboardMarkup(kb)); return
+        await safe_edit_fresh_text(client,msg,cid,"🔥 **أحدث الفصول في المصدر المحدد:**",InlineKeyboardMarkup(kb)); return
 
     if data=="latest_home":
         await callback.answer("🏠")
