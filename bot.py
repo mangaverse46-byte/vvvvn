@@ -380,21 +380,22 @@ def get_source(source_id):
     return MangaSource(source_id)
 
 
+LATEST_PER_SOURCE = 10
+
 def get_all_latest():
-    """Return latest manga rows; one unavailable source must not block others."""
+    """Return at most the 10 newest manga from each enabled source."""
     rows = []
-    try:
-        sources = get_sources()
-    except Exception as exc:
-        pass
-        raise
+    sources = get_sources()
     for source in sources:
         source_id = str(source.get("id") or "")
         if not source_id:
             continue
         try:
             api = MangaSource(source_id)
-            for item in api.get_latest_updates():
+            # Source latest endpoints are already ordered newest-first.
+            items = api.get_latest_updates(page=1)[:LATEST_PER_SOURCE]
+            source_rows = []
+            for item in items:
                 title = str(item.get("title") or item.get("name") or "Manga")
                 url = item.get("url") or item.get("manga_url") or item.get("link")
                 if not url:
@@ -406,9 +407,11 @@ def get_all_latest():
                     or item.get("chapter")
                     or ""
                 )
-                rows.append((title, str(url), ident, str(latest_chapter), source_id))
-        except Exception as exc:
-            pass
+                source_rows.append((title, str(url), ident, str(latest_chapter), source_id))
+            rows.extend(source_rows[:LATEST_PER_SOURCE])
+        except Exception:
+            # A failing source must not prevent other sources from returning results.
+            continue
     return rows
 
 
@@ -1979,7 +1982,7 @@ async def unified_callback(client,callback):
             if not selected:
                 fresh = await asyncio.to_thread(get_source(src).get_latest_updates)
                 refreshed=[]
-                for item in fresh:
+                for item in fresh[:LATEST_PER_SOURCE]:
                     title=str(item.get("title") or item.get("name") or "Manga")
                     url=item.get("url") or item.get("manga_url") or item.get("link")
                     if not url: continue
