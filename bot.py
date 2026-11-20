@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
-import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib
+import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib
 import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
@@ -362,6 +362,44 @@ class MangaSource:
     def get_cover_image(self, info):
         return (info or {}).get("cover_url")
 
+async def _get_cached_bdf_cover(client):
+    """Return BDF cover bytes, downloading from Telegram only once per image ID."""
+    file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
+    if not file_id or client is None:
+        return None
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_name = "bdf_cover_" + hashlib.sha256(str(file_id).encode("utf-8")).hexdigest()[:20] + ".img"
+    cache_path = os.path.join(cache_dir, cache_name)
+    try:
+        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 100:
+            with open(cache_path, "rb") as cached:
+                return cached.read()
+        downloaded = await client.download_media(file_id, in_memory=True)
+        if not downloaded:
+            return None
+        if hasattr(downloaded, "getvalue"):
+            blob = downloaded.getvalue()
+        elif hasattr(downloaded, "read"):
+            blob = downloaded.read()
+        else:
+            blob = b""
+        if not blob or len(blob) <= 100:
+            return None
+        with open(cache_path, "wb") as cached:
+            cached.write(blob)
+        # Keep only the current configured BDF cover in the cache.
+        for name in os.listdir(cache_dir):
+            if name.startswith("bdf_cover_") and name.endswith(".img") and name != cache_name:
+                try:
+                    os.remove(os.path.join(cache_dir, name))
+                except OSError:
+                    pass
+        return blob
+    except Exception:
+        return None
+
+
 async def create_pdf_from_images(urls, client=None, headers=None):
     """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
@@ -451,28 +489,18 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         except Exception as exc:
             pass
 
-    # Add the configured BDF image as the first PDF page (cover).
-    # If it cannot be downloaded or is not a supported image, keep the PDF usable
-    # and continue without a cover.
-    bdf_file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
-    if client is not None and bdf_file_id:
+    # Use the server-cached BDF cover as the first PDF page.
+    cover_blob = await _get_cached_bdf_cover(client)
+    if cover_blob:
         try:
-            cover_file = await client.download_media(bdf_file_id, in_memory=True)
-            if cover_file:
-                if hasattr(cover_file, "getvalue"):
-                    cover_blob = cover_file.getvalue()
-                elif hasattr(cover_file, "read"):
-                    cover_blob = cover_file.read()
-                else:
-                    cover_blob = b""
-                if cover_blob and (
-                    cover_blob.startswith(b"\xff\xd8\xff")
-                    or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
-                    or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
-                    or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
-                ):
-                    img2pdf.convert(BytesIO(cover_blob))
-                    valid.insert(0, cover_blob)
+            if (
+                cover_blob.startswith(b"\xff\xd8\xff")
+                or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
+                or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+                or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
+            ):
+                img2pdf.convert(BytesIO(cover_blob))
+                valid.insert(0, cover_blob)
         except Exception:
             pass
 
@@ -2395,7 +2423,6 @@ async def unified_callback(client,callback):
             if not buf:
                 refund_chapter(uid); await lm.edit_text("❌ **فشل التحميل**"); return
             increment_download_count(uid); await lm.edit_text("📤 **جاري الرفع...**")
-            await send_message_with_image(client,cid,"📄 **ملف الفصل جاهز للتحميل**","bdf_image")
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
@@ -3022,7 +3049,6 @@ async def handle_all_text(client,message):
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
-            await send_message_with_image(client,message.chat.id,"📄 **ملف PDF المدمج جاهز للتحميل**","bdf_image")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
                 caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
