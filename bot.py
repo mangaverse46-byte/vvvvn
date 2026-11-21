@@ -1663,7 +1663,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
             if progress:
                 await progress("extract", len(urls))
-            result = await download_images_parallel(urls, client=client)
+            result = await download_images_parallel(urls, client=client, debug=True)
             if progress:
                 await progress("pdf", len(urls))
             return result
@@ -2288,7 +2288,7 @@ async def unified_callback(client,callback):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
                 if progress:
                     await progress("extract", len(image_urls))
-                result=await download_images_parallel(image_urls,client=_client)
+                result=await download_images_parallel(image_urls,client=_client,debug=True)
                 if progress:
                     await progress("pdf", len(image_urls))
                 return result
