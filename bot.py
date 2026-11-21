@@ -9,6 +9,7 @@ from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
 from pyrogram import Client, filters
 import signal
+import traceback
 from pyrogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
 # Add a clear icon to any inline button label that does not already contain one.
@@ -400,8 +401,12 @@ async def _get_cached_bdf_cover(client):
         return None
 
 
-async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download images concurrently and assemble them with img2pdf only."""
+async def create_pdf_from_images(urls, client=None, headers=None, debug=False):
+    """Download images concurrently and assemble them with img2pdf only.
+
+    debug=True is used by single-chapter downloads only; merge keeps the
+    existing quiet behavior and the same download/conversion pipeline.
+    """
     import aiohttp
     import img2pdf
 
@@ -417,6 +422,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         if url
     ]
     if not indexed_urls:
+        if debug:
+            print("[SINGLE PDF] No image URLs were supplied.", flush=True)
         return None
 
     timeout = aiohttp.ClientTimeout(total=90, connect=20)
@@ -450,9 +457,14 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                 if data and len(data) > 100:
                                     downloaded[position] = data
                                     return
+                                if debug and attempt == 3:
+                                    print(f"[SINGLE PDF] Empty/small response: image={position + 1}, status={response.status}, bytes={len(data or b'')}", flush=True)
+                            elif debug and attempt == 3:
+                                print(f"[SINGLE PDF] HTTP failure: image={position + 1}, status={response.status}, url={url}", flush=True)
                     except Exception as exc:
                         if attempt == 3:
-                            pass
+                            if debug:
+                                print(f"[SINGLE PDF] Download exception: image={position + 1}, error={type(exc).__name__}: {exc}", flush=True)
                     if attempt < 3:
                         await asyncio.sleep(0.5 * (attempt + 1))
 
@@ -477,7 +489,11 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         else:
             pass
 
+    if debug:
+        print(f"[SINGLE PDF] Downloaded {sum(1 for item in downloaded if item)} / {len(indexed_urls)} images; supported={len(candidates)}", flush=True)
     if not candidates:
+        if debug:
+            print("[SINGLE PDF] No supported image formats were downloaded.", flush=True)
         return None
 
     # Validate each candidate separately; a corrupt page will not cancel the chapter.
@@ -487,7 +503,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             img2pdf.convert(BytesIO(blob))
             valid.append(blob)
         except Exception as exc:
-            pass
+            if debug:
+                print(f"[SINGLE PDF] Invalid image skipped: index={position + 1}, bytes={len(blob)}, error={type(exc).__name__}: {exc}", flush=True)
 
     # Use the server-cached BDF cover as the first PDF page.
     cover_blob = await _get_cached_bdf_cover(client)
@@ -505,16 +522,25 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             pass
 
     if not valid:
+        if debug:
+            print("[SINGLE PDF] All downloaded images failed img2pdf validation.", flush=True)
         return None
 
-    result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+    if debug:
+        print(f"[SINGLE PDF] Creating PDF from {len(valid)} valid images.", flush=True)
+    try:
+        result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+    except Exception as exc:
+        if debug:
+            print(f"[SINGLE PDF] Final PDF conversion failed: {type(exc).__name__}: {exc}", flush=True)
+        raise
     buf = BytesIO(result)
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
 
-async def download_images_parallel(urls, client=None, headers=None):
-    return await create_pdf_from_images(urls, client=client, headers=headers)
+async def download_images_parallel(urls, client=None, headers=None, debug=False):
+    return await create_pdf_from_images(urls, client=client, headers=headers, debug=debug)
 
 def get_source(source_id):
     """Return the API-backed adapter for one enabled manga source."""
@@ -1637,7 +1663,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
             if progress:
                 await progress("extract", len(urls))
-            result = await download_images_parallel(urls, client=client)
+            result = await download_images_parallel(urls, client=client, debug=True)
             if progress:
                 await progress("pdf", len(urls))
             return result
@@ -2262,7 +2288,7 @@ async def unified_callback(client,callback):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
                 if progress:
                     await progress("extract", len(image_urls))
-                result=await download_images_parallel(image_urls,client=_client)
+                result=await download_images_parallel(image_urls,client=_client,debug=True)
                 if progress:
                     await progress("pdf", len(image_urls))
                 return result
@@ -2368,7 +2394,7 @@ async def unified_callback(client,callback):
                 urls=await asyncio.to_thread(_api.get_chapter_images,ch)
                 if progress:
                     await progress("extract", len(urls))
-                result=await download_images_parallel(urls,client=_c)
+                result=await download_images_parallel(urls,client=_c,debug=True)
                 if progress:
                     await progress("pdf", len(urls))
                 return result
@@ -2428,7 +2454,9 @@ async def unified_callback(client,callback):
                 await lm.edit_text(status)
             try:
                 buf = await pdf_func(target, progress=single_progress)
-            except Exception:
+            except Exception as exc:
+                print(f"[SINGLE DOWNLOAD ERROR] chapter={disp!r}: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
                 buf = None
             if not buf:
                 refund_chapter(uid)
