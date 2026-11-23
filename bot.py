@@ -61,7 +61,6 @@ from io import BytesIO
 
 API = "https://pixelflow-callback-harbor.lovable.app/api/public/manga"
 API_IMAGE = "https://pixelflow-callback-harbor.lovable.app/api/public/image"
-WORKERS = 24
 _SOURCE_CACHE = []
 _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 
@@ -353,12 +352,11 @@ class MangaSource:
         # and returns ordered JPEG endpoint URLs. The bot only downloads them.
         raw = _request("convert", payload={"source": self.SOURCE, "chapter_url": chapter_url})
         images = raw.get("images", []) if isinstance(raw, dict) else []
-        # Prefer the engine's explicit download URL (attachment filename);
-        # keep the inline URL as a backward-compatible fallback.
+        # Use only the engine's explicit download URL.
         urls = [
-            x.get("download_url") or x.get("url")
+            x.get("download_url")
             for x in images
-            if isinstance(x, dict) and x.get("ok") and (x.get("download_url") or x.get("url"))
+            if isinstance(x, dict) and x.get("ok") and x.get("download_url")
         ]
         if not urls:
             errors = [x.get("error") for x in images if isinstance(x, dict) and x.get("error")]
@@ -369,18 +367,21 @@ class MangaSource:
         return (info or {}).get("cover_url")
 
 async def _get_cached_bdf_cover(client):
-    """Return BDF cover bytes, downloading from Telegram only once per image ID."""
+    """Cache only the configured BDF cover on disk to avoid downloading it repeatedly."""
     file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
     if not file_id or client is None:
         return None
+
     cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(cache_dir, exist_ok=True)
     cache_name = "bdf_cover_" + hashlib.sha256(str(file_id).encode("utf-8")).hexdigest()[:20] + ".img"
     cache_path = os.path.join(cache_dir, cache_name)
+
     try:
         if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 100:
             with open(cache_path, "rb") as cached:
                 return cached.read()
+
         downloaded = await client.download_media(file_id, in_memory=True)
         if not downloaded:
             return None
@@ -392,9 +393,11 @@ async def _get_cached_bdf_cover(client):
             blob = b""
         if not blob or len(blob) <= 100:
             return None
+
         with open(cache_path, "wb") as cached:
             cached.write(blob)
-        # Keep only the current configured BDF cover in the cache.
+
+        # Keep only the currently configured BDF cover cached.
         for name in os.listdir(cache_dir):
             if name.startswith("bdf_cover_") and name.endswith(".img") and name != cache_name:
                 try:
@@ -404,7 +407,6 @@ async def _get_cached_bdf_cover(client):
         return blob
     except Exception:
         return None
-
 
 async def create_pdf_from_images(urls, client=None, headers=None):
     """Download images concurrently and assemble them with img2pdf only."""
@@ -427,40 +429,39 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
     timeout = aiohttp.ClientTimeout(total=90, connect=20)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    # limit=0 disables aiohttp's connector caps: all image requests can run concurrently.
     connector = aiohttp.TCPConnector(
-        limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
+        limit=0, limit_per_host=0, ttl_dns_cache=300,
         keepalive_timeout=30, enable_cleanup_closed=True,
     )
-    semaphore = asyncio.Semaphore(WORKERS)
     downloaded = [None] * len(indexed_urls)
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
         async def fetch(position, url):
-            async with semaphore:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 429:
-                                retry = response.headers.get("Retry-After", "2")
-                                try:
-                                    delay = min(20, max(1, int(retry)))
-                                except (TypeError, ValueError):
-                                    delay = 2
-                                if attempt < 3:
-                                    await asyncio.sleep(delay)
-                                    continue
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    downloaded[position] = data
-                                    return
-                    except Exception as exc:
-                        if attempt == 3:
-                            pass
-                    if attempt < 3:
-                        await asyncio.sleep(0.5 * (attempt + 1))
+            for attempt in range(4):
+                try:
+                    async with session.get(url, allow_redirects=True) as response:
+                        if response.status == 429:
+                            retry = response.headers.get("Retry-After", "2")
+                            try:
+                                delay = min(20, max(1, int(retry)))
+                            except (TypeError, ValueError):
+                                delay = 2
+                            if attempt < 3:
+                                await asyncio.sleep(delay)
+                                continue
+                        if response.status == 200:
+                            data = await response.read()
+                            if data and len(data) > 100:
+                                downloaded[position] = data
+                                return
+                except Exception:
+                    if attempt == 3:
+                        pass
+                if attempt < 3:
+                    await asyncio.sleep(0.5 * (attempt + 1))
 
         await asyncio.gather(
             *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
@@ -514,7 +515,15 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         return None
 
     result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+
+    # PDF is built: release the source image byte buffers immediately.
+    valid.clear()
+    candidates.clear()
+    downloaded.clear()
+    cover_blob = None
+
     buf = BytesIO(result)
+    result = None
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
@@ -2453,6 +2462,10 @@ async def unified_callback(client,callback):
                 await lm.delete()
             except Exception as e:
                 await lm.edit_text(f"❌ {e}")
+            try:
+                buf.close()
+            except Exception:
+                pass
             del buf
             gc.collect()
             return
@@ -3070,16 +3083,21 @@ async def handle_all_text(client,message):
                 await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
                 return
             await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n📥 جارٍ تنزيل `{total_images}` صورة بالتوازي وتجهيز ملف PDF...")
-            # One shared HTTP session; global image concurrency is capped at 24.
+            # One shared HTTP session; all chapter image requests run concurrently.
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
-            await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+            finally:
+                try: buf.close()
+                except Exception: pass
+                del buf
+                gc.collect()
             try: await lm.delete()
             except: pass
-            del buf; gc.collect()
         finally:
             if locked: unlock_download(uid)
         return
