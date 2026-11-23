@@ -372,6 +372,15 @@ async def _get_cached_bdf_cover(client):
     if not file_id or client is None:
         return None
     try:
+        # Remove legacy on-disk cover caches created by older bot versions.
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        if os.path.isdir(cache_dir):
+            for name in os.listdir(cache_dir):
+                if name.startswith("bdf_cover_") and name.endswith(".img"):
+                    try:
+                        os.remove(os.path.join(cache_dir, name))
+                    except OSError:
+                        pass
         downloaded = await client.download_media(file_id, in_memory=True)
         if not downloaded:
             return None
@@ -500,6 +509,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     cover_blob = None
 
     buf = BytesIO(result)
+    result = None
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
@@ -3059,7 +3069,7 @@ async def handle_all_text(client,message):
                 await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
                 return
             await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n📥 جارٍ تنزيل `{total_images}` صورة بالتوازي وتجهيز ملف PDF...")
-            # One shared HTTP session; global image concurrency is capped at 24.
+            # One shared HTTP session; all chapter image requests run concurrently.
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
@@ -3074,7 +3084,6 @@ async def handle_all_text(client,message):
                 gc.collect()
             try: await lm.delete()
             except: pass
-            del buf; gc.collect()
         finally:
             if locked: unlock_download(uid)
         return
