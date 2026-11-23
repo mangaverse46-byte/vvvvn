@@ -61,7 +61,6 @@ from io import BytesIO
 
 API = "https://pixelflow-callback-harbor.lovable.app/api/public/manga"
 API_IMAGE = "https://pixelflow-callback-harbor.lovable.app/api/public/image"
-WORKERS = 24
 _SOURCE_CACHE = []
 _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 
@@ -426,40 +425,39 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
     timeout = aiohttp.ClientTimeout(total=90, connect=20)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    # limit=0 disables aiohttp's connector caps: all image requests can run concurrently.
     connector = aiohttp.TCPConnector(
-        limit=WORKERS, limit_per_host=WORKERS, ttl_dns_cache=300,
+        limit=0, limit_per_host=0, ttl_dns_cache=300,
         keepalive_timeout=30, enable_cleanup_closed=True,
     )
-    semaphore = asyncio.Semaphore(WORKERS)
     downloaded = [None] * len(indexed_urls)
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
         async def fetch(position, url):
-            async with semaphore:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 429:
-                                retry = response.headers.get("Retry-After", "2")
-                                try:
-                                    delay = min(20, max(1, int(retry)))
-                                except (TypeError, ValueError):
-                                    delay = 2
-                                if attempt < 3:
-                                    await asyncio.sleep(delay)
-                                    continue
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    downloaded[position] = data
-                                    return
-                    except Exception as exc:
-                        if attempt == 3:
-                            pass
-                    if attempt < 3:
-                        await asyncio.sleep(0.5 * (attempt + 1))
+            for attempt in range(4):
+                try:
+                    async with session.get(url, allow_redirects=True) as response:
+                        if response.status == 429:
+                            retry = response.headers.get("Retry-After", "2")
+                            try:
+                                delay = min(20, max(1, int(retry)))
+                            except (TypeError, ValueError):
+                                delay = 2
+                            if attempt < 3:
+                                await asyncio.sleep(delay)
+                                continue
+                        if response.status == 200:
+                            data = await response.read()
+                            if data and len(data) > 100:
+                                downloaded[position] = data
+                                return
+                except Exception:
+                    if attempt == 3:
+                        pass
+                if attempt < 3:
+                    await asyncio.sleep(0.5 * (attempt + 1))
 
         await asyncio.gather(
             *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
