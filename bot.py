@@ -367,18 +367,11 @@ class MangaSource:
         return (info or {}).get("cover_url")
 
 async def _get_cached_bdf_cover(client):
-    """Return BDF cover bytes, downloading from Telegram only once per image ID."""
+    """Download the configured BDF cover into memory only; never persist image files."""
     file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
     if not file_id or client is None:
         return None
-    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_name = "bdf_cover_" + hashlib.sha256(str(file_id).encode("utf-8")).hexdigest()[:20] + ".img"
-    cache_path = os.path.join(cache_dir, cache_name)
     try:
-        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 100:
-            with open(cache_path, "rb") as cached:
-                return cached.read()
         downloaded = await client.download_media(file_id, in_memory=True)
         if not downloaded:
             return None
@@ -388,21 +381,9 @@ async def _get_cached_bdf_cover(client):
             blob = downloaded.read()
         else:
             blob = b""
-        if not blob or len(blob) <= 100:
-            return None
-        with open(cache_path, "wb") as cached:
-            cached.write(blob)
-        # Keep only the current configured BDF cover in the cache.
-        for name in os.listdir(cache_dir):
-            if name.startswith("bdf_cover_") and name.endswith(".img") and name != cache_name:
-                try:
-                    os.remove(os.path.join(cache_dir, name))
-                except OSError:
-                    pass
-        return blob
+        return blob if blob and len(blob) > 100 else None
     except Exception:
         return None
-
 
 async def create_pdf_from_images(urls, client=None, headers=None):
     """Download images concurrently and assemble them with img2pdf only."""
@@ -511,6 +492,13 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         return None
 
     result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+
+    # PDF is built: release the source image byte buffers immediately.
+    valid.clear()
+    candidates.clear()
+    downloaded.clear()
+    cover_blob = None
+
     buf = BytesIO(result)
     buf.name = "manga.pdf"
     buf.seek(0)
@@ -2450,6 +2438,10 @@ async def unified_callback(client,callback):
                 await lm.delete()
             except Exception as e:
                 await lm.edit_text(f"❌ {e}")
+            try:
+                buf.close()
+            except Exception:
+                pass
             del buf
             gc.collect()
             return
@@ -3072,8 +3064,14 @@ async def handle_all_text(client,message):
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
-            await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+            finally:
+                try: buf.close()
+                except Exception: pass
+                del buf
+                gc.collect()
             try: await lm.delete()
             except: pass
             del buf; gc.collect()
