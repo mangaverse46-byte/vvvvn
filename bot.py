@@ -367,20 +367,21 @@ class MangaSource:
         return (info or {}).get("cover_url")
 
 async def _get_cached_bdf_cover(client):
-    """Download the configured BDF cover into memory only; never persist image files."""
+    """Cache only the configured BDF cover on disk to avoid downloading it repeatedly."""
     file_id = settings.get("bdf_image") if isinstance(settings, dict) else None
     if not file_id or client is None:
         return None
+
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_name = "bdf_cover_" + hashlib.sha256(str(file_id).encode("utf-8")).hexdigest()[:20] + ".img"
+    cache_path = os.path.join(cache_dir, cache_name)
+
     try:
-        # Remove legacy on-disk cover caches created by older bot versions.
-        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-        if os.path.isdir(cache_dir):
-            for name in os.listdir(cache_dir):
-                if name.startswith("bdf_cover_") and name.endswith(".img"):
-                    try:
-                        os.remove(os.path.join(cache_dir, name))
-                    except OSError:
-                        pass
+        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 100:
+            with open(cache_path, "rb") as cached:
+                return cached.read()
+
         downloaded = await client.download_media(file_id, in_memory=True)
         if not downloaded:
             return None
@@ -390,7 +391,20 @@ async def _get_cached_bdf_cover(client):
             blob = downloaded.read()
         else:
             blob = b""
-        return blob if blob and len(blob) > 100 else None
+        if not blob or len(blob) <= 100:
+            return None
+
+        with open(cache_path, "wb") as cached:
+            cached.write(blob)
+
+        # Keep only the currently configured BDF cover cached.
+        for name in os.listdir(cache_dir):
+            if name.startswith("bdf_cover_") and name.endswith(".img") and name != cache_name:
+                try:
+                    os.remove(os.path.join(cache_dir, name))
+                except OSError:
+                    pass
+        return blob
     except Exception:
         return None
 
