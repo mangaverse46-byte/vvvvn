@@ -522,7 +522,15 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not valid:
         return None
 
-    result = img2pdf.convert(*(BytesIO(blob) for blob in valid))
+    result = img2pdf.convert(
+        *(BytesIO(blob) for blob in valid),
+        title="Manga Virus",
+        author="Manga Virus Bot",
+        creator="Manga Virus",
+        producer="Manga Virus PDF Engine",
+        subject="MANGA_VIRUS_ORIGINAL_V1",
+        keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
+    )
 
     # PDF is built: release the source image byte buffers immediately.
     valid.clear()
