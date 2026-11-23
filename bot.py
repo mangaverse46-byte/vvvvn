@@ -353,7 +353,13 @@ class MangaSource:
         # and returns ordered JPEG endpoint URLs. The bot only downloads them.
         raw = _request("convert", payload={"source": self.SOURCE, "chapter_url": chapter_url})
         images = raw.get("images", []) if isinstance(raw, dict) else []
-        # Prefer the engine's explicit download URL (attachment filename);\n        # keep the inline URL as a backward-compatible fallback.\n        urls = [\n            x.get("download_url") or x.get("url")\n            for x in images\n            if isinstance(x, dict) and x.get("ok") and (x.get("download_url") or x.get("url"))\n        ]
+        # Prefer the engine's explicit download URL (attachment filename);
+        # keep the inline URL as a backward-compatible fallback.
+        urls = [
+            x.get("download_url") or x.get("url")
+            for x in images
+            if isinstance(x, dict) and x.get("ok") and (x.get("download_url") or x.get("url"))
+        ]
         if not urls:
             errors = [x.get("error") for x in images if isinstance(x, dict) and x.get("error")]
             raise RuntimeError("لم يستخرج المحرك صوراً صالحة" + (": " + "; ".join(errors[:2]) if errors else ""))
