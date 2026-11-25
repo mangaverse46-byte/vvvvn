@@ -518,6 +518,9 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                             await asyncio.sleep(
                                 (retry_delay or 0.25) + (0.05 * (position % 7))
                             )
+                except Exception:
+                    # One malformed URL or unexpected response must not kill a worker.
+                    pass
                 finally:
                     queue.task_done()
 
