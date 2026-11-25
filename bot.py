@@ -409,7 +409,7 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download images concurrently and assemble them with img2pdf only."""
+    """Fetch chapter images with bounded workers, then assemble an ordered PDF."""
     import aiohttp
     import img2pdf
 
@@ -433,58 +433,103 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         "Accept": "image/jpeg,image/*;q=0.9,*/*;q=0.8",
     }
 
-    # Tunable parallel image retrieval with a pooled HTTP connection session.
+    # A fixed worker pool avoids creating thousands of waiting tasks for very
+    # large chapters. Global and per-host limits are independently configurable.
     try:
         download_concurrency = max(
-            16, min(96, int(os.getenv("IMAGE_DOWNLOAD_CONCURRENCY", "64")))
+            16, min(128, int(os.getenv("IMAGE_DOWNLOAD_CONCURRENCY", "96")))
         )
     except (TypeError, ValueError):
-        download_concurrency = 48
+        download_concurrency = 64
+    try:
+        per_host_concurrency = max(
+            8, min(download_concurrency, int(os.getenv(
+                "IMAGE_DOWNLOAD_PER_HOST", str(min(64, download_concurrency))
+            )))
+        )
+    except (TypeError, ValueError):
+        per_host_concurrency = min(48, download_concurrency)
 
     connector = aiohttp.TCPConnector(
-        limit=download_concurrency * 2,
-        limit_per_host=download_concurrency,
-        ttl_dns_cache=600,
-        keepalive_timeout=60,
+        limit=download_concurrency,
+        limit_per_host=per_host_concurrency,
+        ttl_dns_cache=900,
+        keepalive_timeout=75,
         enable_cleanup_closed=True,
     )
-    download_sem = asyncio.Semaphore(download_concurrency)
     downloaded = [None] * len(indexed_urls)
+    host_semaphores = {}
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
-        async def fetch(position, url):
-            async with download_sem:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    downloaded[position] = data
-                                    return
-                            elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
-                                retry = response.headers.get("Retry-After", "2")
-                                try:
-                                    delay = min(20.0, max(0.5, float(retry)))
-                                except (TypeError, ValueError):
-                                    delay = min(8.0, 0.5 * (2 ** attempt))
-                                if attempt < 3:
-                                    await asyncio.sleep(delay)
-                                    continue
-                            else:
-                                # Permanent HTTP errors should not be retried.
-                                return
-                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                        if attempt == 3:
-                            return
-                    if attempt < 3:
-                        await asyncio.sleep(0.25 * (attempt + 1))
+        queue = asyncio.Queue()
+        for position, (_, _, url) in enumerate(indexed_urls):
+            queue.put_nowait((position, url))
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
-        )
+        async def worker():
+            while True:
+                item = await queue.get()
+                try:
+                    if item is None:
+                        return
+                    position, url = item
+                    host = urllib.parse.urlsplit(str(url)).netloc.lower() or "_unknown"
+                    host_sem = host_semaphores.get(host)
+                    if host_sem is None:
+                        host_sem = host_semaphores[host] = asyncio.Semaphore(
+                            per_host_concurrency
+                        )
+
+                    for attempt in range(4):
+                        retry_delay = None
+                        try:
+                            async with host_sem:
+                                async with session.get(
+                                    url, allow_redirects=True
+                                ) as response:
+                                    if response.status == 200:
+                                        blob = await response.read()
+                                        if blob and len(blob) > 100:
+                                            downloaded[position] = blob
+                                            return
+                                    elif response.status in (
+                                        408, 425, 429, 500, 502, 503, 504
+                                    ):
+                                        retry = response.headers.get("Retry-After")
+                                        try:
+                                            retry_delay = min(
+                                                20.0, max(0.5, float(retry))
+                                            ) if retry else min(
+                                                8.0, 0.5 * (2 ** attempt)
+                                            )
+                                        except (TypeError, ValueError):
+                                            retry_delay = min(
+                                                8.0, 0.5 * (2 ** attempt)
+                                            )
+                                    else:
+                                        # Permanent HTTP errors are not retried.
+                                        return
+                        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                            retry_delay = min(8.0, 0.35 * (2 ** attempt))
+
+                        # Release the host slot before waiting for a retry.
+                        if attempt < 3:
+                            await asyncio.sleep(
+                                (retry_delay or 0.25) + (0.05 * (position % 7))
+                            )
+                finally:
+                    queue.task_done()
+
+        worker_count = min(download_concurrency, len(indexed_urls))
+        workers = [
+            asyncio.create_task(worker(), name=f"image-download-{i}")
+            for i in range(worker_count)
+        ]
+        await queue.join()
+        for _ in workers:
+            queue.put_nowait(None)
+        await asyncio.gather(*workers)
 
     # Manga engine image URLs are expected to be JPEG. img2pdf also supports
     # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
@@ -500,17 +545,13 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         )
         if supported:
             candidates.append((position, blob))
-        else:
-            pass
 
     if not candidates:
         return None
 
-    # Preserve original page order. Engine URLs are processed JPEGs, so avoid
-    # decoding every image twice on the normal all-valid path.
+    # List order is the original chapter/page order, regardless of completion.
     page_blobs = [blob for _, blob in candidates]
 
-    # Use the cached BDF cover as the first page when it is a supported image.
     cover_blob = await _get_cached_bdf_cover(client)
     if cover_blob and (
         cover_blob.startswith(b"\xff\xd8\xff")
@@ -532,7 +573,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         )
 
     def _validate_and_build_pdf(blobs):
-        # Slow fallback only: isolate a corrupt page if bulk conversion fails.
         valid_blobs = []
         for blob in blobs:
             try:
@@ -544,16 +584,11 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             raise RuntimeError("No valid images for PDF")
         return _build_pdf(valid_blobs)
 
-    if not page_blobs:
-        return None
-
     try:
-        # Run CPU-heavy PDF assembly off the bot's event loop.
         result = await asyncio.to_thread(_build_pdf, page_blobs)
     except Exception:
         result = await asyncio.to_thread(_validate_and_build_pdf, page_blobs)
 
-    # PDF is built: release the source image byte buffers immediately.
     page_blobs.clear()
     candidates.clear()
     downloaded.clear()
@@ -564,7 +599,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
-
 async def download_images_parallel(urls, client=None, headers=None):
     return await create_pdf_from_images(urls, client=client, headers=headers)
 
