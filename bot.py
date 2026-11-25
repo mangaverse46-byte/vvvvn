@@ -469,9 +469,24 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                     f"(pages={pages}, failed={len(failed) if isinstance(failed, list) else failed})"
                 )
 
+            # Ask storage to return the signed PDF as a downloadable attachment.
+            parsed_pdf_url = urllib.parse.urlsplit(pdf_url)
+            pdf_query = urllib.parse.parse_qsl(
+                parsed_pdf_url.query, keep_blank_values=True
+            )
+            pdf_query = [(key, value) for key, value in pdf_query if key != "download"]
+            pdf_query.append(("download", "manga.pdf"))
+            pdf_url = urllib.parse.urlunsplit((
+                parsed_pdf_url.scheme,
+                parsed_pdf_url.netloc,
+                parsed_pdf_url.path,
+                urllib.parse.urlencode(pdf_query),
+                parsed_pdf_url.fragment,
+            ))
+
         # Fetch only the completed PDF. Never print or decode its binary body as text.
         async with session.get(pdf_url, allow_redirects=True) as response:
-            if response.status != 200:
+            if response.status not in (200, 206):
                 raise RuntimeError(f"تعذر تنزيل PDF من Picture Pile (HTTP {response.status})")
             pdf_data = await response.read()
             content_type = response.headers.get("Content-Type", "").lower()
