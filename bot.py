@@ -427,17 +427,28 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not indexed_urls:
         return None
 
-    timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
-    request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    timeout = aiohttp.ClientTimeout(total=90, connect=12, sock_read=60)
+    request_headers = headers or {
+        "User-Agent": "Mozilla/5.0 MangaVirus",
+        "Accept": "image/jpeg,image/*;q=0.9,*/*;q=0.8",
+    }
 
-    # Keep a single reusable HTTP session, but avoid opening an unlimited
-    # number of simultaneous sockets (which can slow CDNs and cause timeouts).
-    # 48 active downloads is a conservative starting point for chapter images.
+    # Tunable parallel image retrieval with a pooled HTTP connection session.
+    try:
+        download_concurrency = max(
+            16, min(96, int(os.getenv("IMAGE_DOWNLOAD_CONCURRENCY", "64")))
+        )
+    except (TypeError, ValueError):
+        download_concurrency = 48
+
     connector = aiohttp.TCPConnector(
-        limit=64, limit_per_host=48, ttl_dns_cache=600,
-        keepalive_timeout=60, enable_cleanup_closed=True,
+        limit=download_concurrency * 2,
+        limit_per_host=download_concurrency,
+        ttl_dns_cache=600,
+        keepalive_timeout=60,
+        enable_cleanup_closed=True,
     )
-    download_sem = asyncio.Semaphore(48)
+    download_sem = asyncio.Semaphore(download_concurrency)
     downloaded = [None] * len(indexed_urls)
 
     async with aiohttp.ClientSession(
@@ -495,42 +506,52 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not candidates:
         return None
 
-    # Validate each candidate separately; a corrupt page will not cancel the chapter.
-    valid = []
-    for position, blob in candidates:
-        try:
-            img2pdf.convert(BytesIO(blob))
-            valid.append(blob)
-        except Exception as exc:
-            pass
+    # Preserve original page order. Engine URLs are processed JPEGs, so avoid
+    # decoding every image twice on the normal all-valid path.
+    page_blobs = [blob for _, blob in candidates]
 
-    # Use the server-cached BDF cover as the first PDF page.
+    # Use the cached BDF cover as the first page when it is a supported image.
     cover_blob = await _get_cached_bdf_cover(client)
-    if cover_blob:
-        try:
-            if (
-                cover_blob.startswith(b"\xff\xd8\xff")
-                or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
-                or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
-                or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
-            ):
-                img2pdf.convert(BytesIO(cover_blob))
-                valid.insert(0, cover_blob)
-        except Exception:
-            pass
+    if cover_blob and (
+        cover_blob.startswith(b"\\xff\\xd8\\xff")
+        or cover_blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+        or cover_blob.startswith((b"\\x00\\x00\\x00\\x0cjP  ", b"\\xffO\\xffQ"))
+        or cover_blob.startswith((b"II*\\x00", b"MM\\x00*"))
+    ):
+        page_blobs.insert(0, cover_blob)
 
-    if not valid:
+    def _build_pdf(blobs):
+        return img2pdf.convert(
+            *(BytesIO(blob) for blob in blobs),
+            title="Manga Virus",
+            author="Manga Virus Bot",
+            creator="Manga Virus",
+            producer="Manga Virus PDF Engine",
+            subject="MANGA_VIRUS_ORIGINAL_V1",
+            keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
+        )
+
+    def _validate_and_build_pdf(blobs):
+        # Slow fallback only: isolate a corrupt page if bulk conversion fails.
+        valid_blobs = []
+        for blob in blobs:
+            try:
+                img2pdf.convert(BytesIO(blob))
+                valid_blobs.append(blob)
+            except Exception:
+                continue
+        if not valid_blobs:
+            raise RuntimeError("No valid images for PDF")
+        return _build_pdf(valid_blobs)
+
+    if not page_blobs:
         return None
 
-    result = img2pdf.convert(
-        *(BytesIO(blob) for blob in valid),
-        title="Manga Virus",
-        author="Manga Virus Bot",
-        creator="Manga Virus",
-        producer="Manga Virus PDF Engine",
-        subject="MANGA_VIRUS_ORIGINAL_V1",
-        keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
-    )
+    try:
+        # Run CPU-heavy PDF assembly off the bot's event loop.
+        result = await asyncio.to_thread(_build_pdf, page_blobs)
+    except Exception:
+        result = await asyncio.to_thread(_validate_and_build_pdf, page_blobs)
 
     # PDF is built: release the source image byte buffers immediately.
     valid.clear()
@@ -605,7 +626,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv","telethon"]:
+for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv","telethon","TgCrypto","cryptg"]:
     ensure_installed(pkg)
 
 from telethon import TelegramClient
@@ -1624,21 +1645,27 @@ async def send_pdf_via_telethon(chat_id, document, file_name, caption=None,
         if not progress_message or not total:
             return
         percent = min(100, int(current * 100 / total))
-        now = time.monotonic()
-        if percent < 5 or (percent < 100 and now - last_update[0] < 4):
-            return
-        last_update[0] = now
         try:
             await progress_message.edit_text(
-                f"📤 **جاري رفع PDF عبر Telethon...**\n"
-                f"📊 التقدم: `{percent}%`\n"
+                f"📤 **جاري رفع PDF عبر Telethon...**\\n"
+                f"📊 التقدم: `{percent}%`\\n"
                 f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
             )
         except Exception:
             pass
 
     def progress_callback(current, total):
-        loop.create_task(update_progress(current, total))
+        if not progress_message or not total:
+            return
+        now = time.monotonic()
+        percent = min(100, int(current * 100 / total))
+        # Throttle before scheduling tasks; large uploads generate many callbacks.
+        if percent < 5 or (percent < 100 and now - last_update[0] < 2):
+            return
+        last_update[0] = now
+        loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(update_progress(current, total))
+        )
 
     return await mtproto_client.send_file(
         entity=chat_id,
