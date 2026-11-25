@@ -492,7 +492,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                         blob = await response.read()
                                         if blob and len(blob) > 100:
                                             downloaded[position] = blob
-                                            return
+                                            break
                                     elif response.status in (
                                         408, 425, 429, 500, 502, 503, 504
                                     ):
@@ -508,8 +508,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                                 8.0, 0.5 * (2 ** attempt)
                                             )
                                     else:
-                                        # Permanent HTTP errors are not retried.
-                                        return
+                                        # Skip this URL but keep the worker alive for the queue.
+                                        break
                         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                             retry_delay = min(8.0, 0.35 * (2 ** attempt))
 
