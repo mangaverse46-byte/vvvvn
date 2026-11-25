@@ -1647,8 +1647,8 @@ async def send_pdf_via_telethon(chat_id, document, file_name, caption=None,
         percent = min(100, int(current * 100 / total))
         try:
             await progress_message.edit_text(
-                f"📤 **جاري رفع PDF عبر Telethon...**\\n"
-                f"📊 التقدم: `{percent}%`\\n"
+                f"📤 **جاري رفع PDF عبر Telethon...**\n"
+                f"📊 التقدم: `{percent}%`\n"
                 f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
             )
         except Exception:
