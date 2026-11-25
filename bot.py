@@ -605,9 +605,10 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
+for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv","telethon"]:
     ensure_installed(pkg)
 
+from telethon import TelegramClient
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -1599,6 +1600,54 @@ async def check_subscription_and_continue(client,cb,pending=None):
         await send_subscription_prompt(client,uid,cid,pending)
 
 app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
+# Dedicated MTProto client: Pyrogram continues handling updates and callbacks.
+mtproto_client = TelegramClient("manga_upload", API_ID, API_HASH, receive_updates=False)
+
+async def send_pdf_via_telethon(chat_id, document, file_name, caption=None,
+                                parse_mode="md", progress_message=None):
+    """Send a PDF through MTProto and report upload progress without duplicating its bytes."""
+    if not mtproto_client.is_connected():
+        raise RuntimeError("اتصال Telethon غير متصل")
+    try:
+        document.seek(0)
+    except Exception:
+        pass
+    try:
+        document.name = file_name
+    except Exception:
+        pass
+
+    loop = asyncio.get_running_loop()
+    last_update = [0.0]
+
+    async def update_progress(current, total):
+        if not progress_message or not total:
+            return
+        percent = min(100, int(current * 100 / total))
+        now = time.monotonic()
+        if percent < 5 or (percent < 100 and now - last_update[0] < 4):
+            return
+        last_update[0] = now
+        try:
+            await progress_message.edit_text(
+                f"📤 **جاري رفع PDF عبر Telethon...**\n"
+                f"📊 التقدم: `{percent}%`\n"
+                f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
+            )
+        except Exception:
+            pass
+
+    def progress_callback(current, total):
+        loop.create_task(update_progress(current, total))
+
+    return await mtproto_client.send_file(
+        entity=chat_id,
+        file=document,
+        caption=caption,
+        parse_mode=parse_mode,
+        force_document=True,
+        progress_callback=progress_callback,
+    )
 
 async def _send_shared_manga_card(client, cid, info, caption, markup):
     """Send the shared manga cover when available, with URL and downloaded-file fallbacks."""
@@ -1996,7 +2045,7 @@ async def start_cmd(client, message):
         except Exception as send_exc:
             pass
         try:
-            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\\n" + details[-3000:])
+            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\n" + details[-3000:])
         except Exception:
             pass
 
@@ -2472,7 +2521,7 @@ async def unified_callback(client,callback):
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
-                await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_via_telethon(cid, buf, f"{disp} - {safe_title}.pdf", caption=caption_text, parse_mode="md", progress_message=lm)
                 upload_elapsed = time.perf_counter() - upload_started
 
                 await lm.delete()
@@ -3105,8 +3154,8 @@ async def handle_all_text(client,message):
             increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
-                await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_via_telethon(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode="md", progress_message=lm)
             finally:
                 try: buf.close()
                 except Exception: pass
@@ -3488,6 +3537,8 @@ if __name__ == "__main__":
 
             await app.start()
             started = True
+            await mtproto_client.start(bot_token=BOT_TOKEN)
+            print("✅ Telethon MTProto upload client connected.", flush=True)
 
             me = None
             for attempt in range(1, 4):
@@ -3524,6 +3575,12 @@ if __name__ == "__main__":
                     task.cancel()
             if background_tasks:
                 await asyncio.gather(*background_tasks, return_exceptions=True)
+
+            if mtproto_client.is_connected():
+                try:
+                    await mtproto_client.disconnect()
+                except Exception:
+                    pass
 
             if started and app.is_connected:
                 try:
