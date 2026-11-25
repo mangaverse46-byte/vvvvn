@@ -513,10 +513,10 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     # Use the cached BDF cover as the first page when it is a supported image.
     cover_blob = await _get_cached_bdf_cover(client)
     if cover_blob and (
-        cover_blob.startswith(b"\\xff\\xd8\\xff")
-        or cover_blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
-        or cover_blob.startswith((b"\\x00\\x00\\x00\\x0cjP  ", b"\\xffO\\xffQ"))
-        or cover_blob.startswith((b"II*\\x00", b"MM\\x00*"))
+        cover_blob.startswith(b"\xff\xd8\xff")
+        or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
+        or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+        or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
     ):
         page_blobs.insert(0, cover_blob)
 
@@ -554,7 +554,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         result = await asyncio.to_thread(_validate_and_build_pdf, page_blobs)
 
     # PDF is built: release the source image byte buffers immediately.
-    valid.clear()
+    page_blobs.clear()
     candidates.clear()
     downloaded.clear()
     cover_blob = None
