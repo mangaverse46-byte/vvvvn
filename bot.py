@@ -409,137 +409,79 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download images concurrently and assemble them with img2pdf only."""
+    """
+    Send ordered image URLs to Picture Pile PDF service.
+    The bot downloads only the final PDF, never the chapter images.
+    """
     import aiohttp
-    import img2pdf
 
     if urls and isinstance(urls[0], (list, tuple)):
         chapter_groups = [list(group) for group in urls if group]
     else:
         chapter_groups = [list(urls or [])]
 
-    indexed_urls = [
-        (chapter_index, image_index, url)
-        for chapter_index, group in enumerate(chapter_groups)
-        for image_index, url in enumerate(group)
-        if url
+    ordered_urls = [
+        str(url).strip()
+        for group in chapter_groups
+        for url in group
+        if isinstance(url, str) and url.strip().startswith(("https://", "http://"))
     ]
-    if not indexed_urls:
+    if not ordered_urls:
         return None
 
-    timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
-    request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    api_url = "https://picture-pile-pdf.lovable.app/api/public/images-to-pdf"
+    timeout = aiohttp.ClientTimeout(total=240, connect=20, sock_read=180)
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 MangaVirus",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if headers:
+        request_headers.update(headers)
 
-    # Keep a single reusable HTTP session, but avoid opening an unlimited
-    # number of simultaneous sockets (which can slow CDNs and cause timeouts).
-    # 48 active downloads is a conservative starting point for chapter images.
-    connector = aiohttp.TCPConnector(
-        limit=64, limit_per_host=48, ttl_dns_cache=600,
-        keepalive_timeout=60, enable_cleanup_closed=True,
-    )
-    download_sem = asyncio.Semaphore(48)
-    downloaded = [None] * len(indexed_urls)
+    payload = {
+        "images": ordered_urls,
+        "expires_in": 3600,
+        "lazy": False,
+    }
 
-    async with aiohttp.ClientSession(
-        timeout=timeout, connector=connector, headers=request_headers
-    ) as session:
-        async def fetch(position, url):
-            async with download_sem:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    downloaded[position] = data
-                                    return
-                            elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
-                                retry = response.headers.get("Retry-After", "2")
-                                try:
-                                    delay = min(20.0, max(0.5, float(retry)))
-                                except (TypeError, ValueError):
-                                    delay = min(8.0, 0.5 * (2 ** attempt))
-                                if attempt < 3:
-                                    await asyncio.sleep(delay)
-                                    continue
-                            else:
-                                # Permanent HTTP errors should not be retried.
-                                return
-                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                        if attempt == 3:
-                            return
-                    if attempt < 3:
-                        await asyncio.sleep(0.25 * (attempt + 1))
+    async with aiohttp.ClientSession(timeout=timeout, headers=request_headers) as session:
+        async with session.post(api_url, json=payload, allow_redirects=True) as response:
+            response_text = await response.text()
+            try:
+                result = json.loads(response_text)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"Picture Pile أعاد استجابة غير JSON (HTTP {response.status})"
+                )
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
-        )
+            if response.status < 200 or response.status >= 300:
+                error = result.get("error") or result.get("message") or result.get("detail") or "فشل إنشاء PDF"
+                raise RuntimeError(f"Picture Pile HTTP {response.status}: {str(error)[:220]}")
 
-    # Manga engine image URLs are expected to be JPEG. img2pdf also supports
-    # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
-    candidates = []
-    for position, blob in enumerate(downloaded):
-        if not blob:
-            continue
-        supported = (
-            blob.startswith(b"\xff\xd8\xff")
-            or blob.startswith(b"\x89PNG\r\n\x1a\n")
-            or blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
-            or blob.startswith((b"II*\x00", b"MM\x00*"))
-        )
-        if supported:
-            candidates.append((position, blob))
-        else:
-            pass
+            pdf_url = result.get("pdf_url")
+            pages = int(result.get("pages") or 0)
+            failed = result.get("failed") or []
+            if not pdf_url or pages <= 0:
+                error = result.get("error") or result.get("message") or "لم يُنشأ ملف PDF صالح"
+                raise RuntimeError(
+                    f"Picture Pile: {str(error)[:180]} "
+                    f"(pages={pages}, failed={len(failed) if isinstance(failed, list) else failed})"
+                )
 
-    if not candidates:
-        return None
+        # Fetch only the completed PDF. Never print or decode its binary body as text.
+        async with session.get(pdf_url, allow_redirects=True) as response:
+            if response.status != 200:
+                raise RuntimeError(f"تعذر تنزيل PDF من Picture Pile (HTTP {response.status})")
+            pdf_data = await response.read()
+            content_type = response.headers.get("Content-Type", "").lower()
+            if not pdf_data.startswith(b"%PDF-"):
+                raise RuntimeError(
+                    "رابط Picture Pile لم يُرجع ملف PDF صالحاً "
+                    f"(Content-Type: {content_type[:80] or 'unknown'})"
+                )
 
-    # Validate each candidate separately; a corrupt page will not cancel the chapter.
-    valid = []
-    for position, blob in candidates:
-        try:
-            img2pdf.convert(BytesIO(blob))
-            valid.append(blob)
-        except Exception as exc:
-            pass
-
-    # Use the server-cached BDF cover as the first PDF page.
-    cover_blob = await _get_cached_bdf_cover(client)
-    if cover_blob:
-        try:
-            if (
-                cover_blob.startswith(b"\xff\xd8\xff")
-                or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
-                or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
-                or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
-            ):
-                img2pdf.convert(BytesIO(cover_blob))
-                valid.insert(0, cover_blob)
-        except Exception:
-            pass
-
-    if not valid:
-        return None
-
-    result = img2pdf.convert(
-        *(BytesIO(blob) for blob in valid),
-        title="Manga Virus",
-        author="Manga Virus Bot",
-        creator="Manga Virus",
-        producer="Manga Virus PDF Engine",
-        subject="MANGA_VIRUS_ORIGINAL_V1",
-        keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
-    )
-
-    # PDF is built: release the source image byte buffers immediately.
-    valid.clear()
-    candidates.clear()
-    downloaded.clear()
-    cover_blob = None
-
-    buf = BytesIO(result)
-    result = None
+    buf = BytesIO(pdf_data)
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
@@ -3098,7 +3040,7 @@ async def handle_all_text(client,message):
                 refund_merge(uid,count)
                 await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
                 return
-            await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n📥 جارٍ تنزيل `{total_images}` صورة بالتوازي وتجهيز ملف PDF...")
+            await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n☁️ جارٍ إرسال روابط `{total_images}` صورة إلى محرك Picture Pile لإنشاء PDF...")
             # One shared HTTP session; all chapter image requests run concurrently.
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
