@@ -1630,8 +1630,8 @@ async def send_pdf_via_telethon(chat_id, document, file_name, caption=None,
         last_update[0] = now
         try:
             await progress_message.edit_text(
-                f"📤 **جاري رفع PDF عبر Telethon...**\\n"
-                f"📊 التقدم: `{percent}%`\\n"
+                f"📤 **جاري رفع PDF عبر Telethon...**\n"
+                f"📊 التقدم: `{percent}%`\n"
                 f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
             )
         except Exception:
@@ -2045,7 +2045,7 @@ async def start_cmd(client, message):
         except Exception as send_exc:
             pass
         try:
-            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\\n" + details[-3000:])
+            await client.send_message(OWNER_ID, "❌ خطأ في أمر /start:\n" + details[-3000:])
         except Exception:
             pass
 
