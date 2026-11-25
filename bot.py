@@ -804,6 +804,13 @@ def save_settings():
             c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v, ensure_ascii=False)))
         c.commit()
 settings = load_settings()
+
+def get_pdf_max_chapters():
+    try:
+        return max(2, int(settings.get("merge_max_per_file", PDF_MAX_CHAPTERS)))
+    except (TypeError, ValueError):
+        return PDF_MAX_CHAPTERS
+
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
 save_settings()
@@ -2206,7 +2213,7 @@ async def unified_callback(client,callback):
         await msg.reply_text(
             f"❓ **مساعدة**\n\n🔍 `/search الاسم`\n📚 4 مصادر\n\n"
             f"📖 فردي: `{settings.get('daily_reward_amount',100)}`\n🧩 دمج: `{settings.get('merge_daily_limit',50)}`\n"
-            f"📎 حد الملف: `{PDF_MAX_CHAPTERS}`\n"
+            f"📎 حد الملف: `{get_pdf_max_chapters()}`\n"
             f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
             f"👑 VIP: بلا حدود",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
@@ -2637,7 +2644,7 @@ async def unified_callback(client,callback):
         if not chs: await callback.answer("لا فصول", show_alert=True); return
         user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
         mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
-        mmax = PDF_MAX_CHAPTERS
+        mmax = get_pdf_max_chapters()
         await msg.reply_text(f"🧩 **دمج الفصول**\n\n📚 `{len(chs)}` فصل\n🔢 `{mmax}` حد أقصى\n💳 رصيد: `{mr}`\n\n📝 أرسل: `البداية-النهاية`\nمثال: `1-{mmax}`\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
         await callback.answer("⏳"); return
 
@@ -2792,14 +2799,14 @@ async def unified_callback(client,callback):
             user_data[uid]["gift_expiry_unit"]="minutes"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
             await msg.reply_text("⏱️ **الدقائق:**\nمثال: `30`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏱️"); return
         if data=="admin_merge_counters":
-            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{PDF_MAX_CHAPTERS}`",
+            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{get_pdf_max_chapters()}`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
             await callback.answer("🧮"); return
         if data=="admin_edit_merge_limit":
             await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_daily_limit',50)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_limit":True}; await callback.answer("✏️"); return
         if data=="admin_edit_merge_max":
-            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{PDF_MAX_CHAPTERS}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{get_pdf_max_chapters()}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_max":True}; await callback.answer("✏️"); return
         if data=="admin_edit_daily_amount":
             await msg.delete(); await msg.reply_text(f"✏️ الحالي: `{settings.get('daily_reward_amount',100)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
@@ -3151,7 +3158,7 @@ async def handle_all_text(client,message):
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
         if not selected: await message.reply_text("📚 **لم يتم العثور على فصول ضمن هذا النطاق.**\nتحقق من أرقام الفصول وأرسل نطاقاً آخر."); return
-        count = len(selected); mmax = PDF_MAX_CHAPTERS
+        count = len(selected); mmax = get_pdf_max_chapters()
         if count > mmax: await message.reply_text(f"📄 **عدد الفصول يتجاوز الحد المسموح.**\nطلبت `{count}` فصلاً، والحد الأقصى لهذا الملف `{mmax}` فصول."); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
@@ -3301,8 +3308,8 @@ async def handle_all_text(client,message):
     if user_data.get(uid,{}).get("awaiting_merge_max"):
         try:
             v=int(message.text.strip())
-            if v<2 or v>PDF_MAX_CHAPTERS:
-                await message.reply_text("⚠️ الحد المسموح من 2 إلى 10"); return
+            if v<2:
+                await message.reply_text("⚠️ حد الملف يجب أن يكون 2 فصلاً على الأقل."); return
             settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ الحد لكل ملف: `{v}`")
         except: await message.reply_text("🔢 **قيمة حد الفصول في الملف غير صالحة.** أرسل رقماً ضمن الحد المسموح.")
