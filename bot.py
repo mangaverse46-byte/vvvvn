@@ -1422,7 +1422,7 @@ async def publish_gift_now(client, admin_uid, code):
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(url)}&text={quote('🎁 هدية!')}")],
                     [InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{new_code}")],
-                    [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]))
+                    [InlineKeyboardButton("❌ Close" if en else "❌ إغلاق", callback_data="close_list")]]))
             return True, None, new_code
         except Exception as e:
             return False, f'فشل: {e}', None
@@ -1591,36 +1591,37 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
 
     # Navigation is available in every mode: previous/next and first/last.
     nav = []
+    en = get_user_language(uid) == "en" if uid is not None else False
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"pg_{src_short}_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Previous" if en else "⬅️ السابق", callback_data=f"pg_{src_short}_{page-1}"))
     if page < total - 1:
-        nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"pg_{src_short}_{page+1}"))
+        nav.append(InlineKeyboardButton("Next ➡️" if en else "التالي ➡️", callback_data=f"pg_{src_short}_{page+1}"))
     if nav:
         kb.append(nav)
 
     ends = []
     if page > 0:
-        ends.append(InlineKeyboardButton("⏮ أول فصل", callback_data=f"f_{src_short}"))
+        ends.append(InlineKeyboardButton("⏮ First chapter" if en else "⏮ أول فصل", callback_data=f"f_{src_short}"))
     if page < total - 1:
-        ends.append(InlineKeyboardButton("آخر فصل ⏭", callback_data=f"l_{src_short}"))
+        ends.append(InlineKeyboardButton("Last chapter ⏭" if en else "آخر فصل ⏭", callback_data=f"l_{src_short}"))
     if ends:
         kb.append(ends)
 
     if uid is not None and is_vip(uid):
         if is_favorite(uid, ident, src):
-            kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة", callback_data=f"fav_remove_{src_short}")])
-            kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid, ident, src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
+            kb.append([InlineKeyboardButton("🗑️ Remove from favorites" if en else "🗑️ إزالة من المفضلة", callback_data=f"fav_remove_{src_short}")])
+            kb.append([InlineKeyboardButton(("🔔 Notifications enabled" if get_fav_notify(uid, ident, src) else "🔕 Notifications disabled") if en else ("🔔 الإشعارات مفعلة" if get_fav_notify(uid, ident, src) else "🔕 الإشعارات معطلة"), callback_data=f"toggle_notify_{src_short}")])
         else:
-            kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة", callback_data=f"fav_add_{src_short}")])
+            kb.append([InlineKeyboardButton("⭐ Add to favorites" if en else "⭐ إضافة للمفضلة", callback_data=f"fav_add_{src_short}")])
 
-    kb.append([InlineKeyboardButton("🧩 دمج الفصول", callback_data=f"mrg_{src_short}")])
+    kb.append([InlineKeyboardButton("🧩 Merge chapters" if en else "🧩 دمج الفصول", callback_data=f"mrg_{src_short}")])
     if ident and BOT_USERNAME:
-        kb.append([InlineKeyboardButton("🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
+        kb.append([InlineKeyboardButton("🔗 Share manga" if en else "🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
     if latest_mode:
         latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
-        kb.append([InlineKeyboardButton("⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="latest_home")])
-    kb.append([InlineKeyboardButton("🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if en else "🏠 القائمة الرئيسية", callback_data="latest_home")])
+    kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
     return InlineKeyboardMarkup(kb), page, total
 
 def pack_share_url(url):
@@ -1936,12 +1937,13 @@ async def build_main_keyboard(uid):
             rows.append([InlineKeyboardButton("🎬 آخر فيديو تعليمي", url=settings["tutorial_video_url"])])
     return InlineKeyboardMarkup(rows)
 
-def _account_keyboard():
+def _account_keyboard(uid=None):
+    en = uid is not None and get_user_language(uid) == "en"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 رصيدي",callback_data="acc_chapters"), InlineKeyboardButton("🔗 مشاركة",callback_data="acc_share")],
-        [InlineKeyboardButton("⏰ وقت التجديد",callback_data="acc_daily_timer"), InlineKeyboardButton("👑 ترقية VIP",callback_data="acc_upgrade")],
-        [InlineKeyboardButton("💎 تفاصيل VIP",callback_data="acc_vip_details"), InlineKeyboardButton("🔄 تحديث",callback_data="my_account_refresh")],
-        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")],
+        [InlineKeyboardButton("📊 My balance" if en else "📊 رصيدي",callback_data="acc_chapters"), InlineKeyboardButton("🔗 Share" if en else "🔗 مشاركة",callback_data="acc_share")],
+        [InlineKeyboardButton("⏰ Reset timer" if en else "⏰ وقت التجديد",callback_data="acc_daily_timer"), InlineKeyboardButton("👑 Upgrade to VIP" if en else "👑 ترقية VIP",callback_data="acc_upgrade")],
+        [InlineKeyboardButton("💎 VIP details" if en else "💎 تفاصيل VIP",callback_data="acc_vip_details"), InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث",callback_data="my_account_refresh")],
+        [InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")],
     ])
 
 async def _show_my_account(client,msg,uid,edit=False):
@@ -1953,11 +1955,11 @@ async def _show_my_account(client,msg,uid,edit=False):
     except: un="—"
     text=(f"👤 حسابي\n\n{type_line}\n\n🆔 المعرّف: {uid}\n📝 اليوزر: {un}\n"
           f"📅 مسجل: {joined}\n⬇️ التحميلات: {get_user_downloads(uid)}")
-    if edit: await safe_edit(msg, text, _account_keyboard())
+    if edit: await safe_edit(msg, text, _account_keyboard(uid))
     else:
         try: await msg.delete()
         except: pass
-        await msg.reply_text(text,reply_markup=_account_keyboard())
+        await msg.reply_text(text,reply_markup=_account_keyboard(uid))
 
 async def _show_chapters_balance(client,msg,uid):
     kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
