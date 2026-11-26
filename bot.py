@@ -1240,6 +1240,111 @@ def translate_ui_text(uid, value):
         "📖 فردي": "📖 Single downloads",
         "🧩 دمج": "🧩 Merges",
         "📚": "📚",
+        "📊 رصيد الفصول": "📊 Chapter balance",
+        "📊 رصيدي": "📊 My balance",
+        "📖 فردي": "📖 Single downloads",
+        "🧩 دمج": "🧩 Merges",
+        "👤 عضو عادي": "👤 Standard member",
+        "👑 عضو VIP — تحميل غير محدود": "👑 VIP member — Unlimited downloads",
+        "📅 الخطة:": "📅 Plan:",
+        "📅 أسبوع": "📅 Week",
+        "📆 شهر": "📆 Month",
+        "🗓️ سنة": "🗓️ Year",
+        "⏳ المدة المتبقية:": "⏳ Time remaining:",
+        "⏰ تجديد:": "⏰ Resets in:",
+        "⚡ تصفير:": "⚡ Reset in:",
+        "🔗 مشاركة البوت": "🔗 Share the bot",
+        "احصل على مكافآت لكل صديق:": "Earn rewards for every friend:",
+        "رابطك:": "Your link:",
+        "👑 ترقية VIP": "👑 Upgrade to VIP",
+        "💎 تفاصيل VIP": "💎 VIP details",
+        "❌ لست VIP": "❌ You are not a VIP member.",
+        "💡 يمكنك الترقية": "💡 You can upgrade.",
+        "⏰ VIP — بلا انتظار": "⏰ VIP — No waiting",
+        "⏰ الوقت": "⏰ Timers",
+        "⏱️ مدة التجديد:": "⏱️ Reset interval:",
+        "📅 مسجل:": "📅 Joined:",
+        "⬇️ التحميلات:": "⬇️ Downloads:",
+        "🆔 المعرّف:": "🆔 User ID:",
+        "📝 اليوزر:": "📝 Username:",
+        "⚠️ أرسل اسم مانجا صحيحاً للبحث.": "⚠️ Please send a valid manga title to search.",
+        "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
+        "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
+        "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
+        "أرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.": "Send the starting chapter, a hyphen, then the ending chapter. Example: 1-10.",
+        "📚 لم يتم العثور على فصول ضمن هذا النطاق.": "📚 No chapters were found in this range.",
+        "تحقق من أرقام الفصول وأرسل نطاقاً آخر.": "Check the chapter numbers and send another range.",
+        "📄 عدد الفصول يتجاوز الحد المسموح.": "📄 The chapter count exceeds the allowed limit.",
+        "طلبت": "Requested",
+        "فصلاً، والحد الأقصى لهذا الملف": "chapters; the maximum allowed in this file is",
+        "💳 رصيد الدمج غير كافٍ.": "💳 Not enough merge credits.",
+        "المطلوب:": "Required:",
+        "المتاح:": "Available:",
+        "يمكنك تجديد الرصيد أو ترقية حسابك إلى VIP.": "You can renew your balance or upgrade to VIP.",
+        "⏳ يوجد تحميل آخر قيد التنفيذ.": "⏳ Another download is already in progress.",
+        "انتظر حتى يكتمل ثم حاول مجدداً.": "Please wait until it finishes, then try again.",
+        "❌ تعذّر بدء تحميل الفصل.": "❌ Could not start the chapter download.",
+        "لم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.": "No credits were deducted. Please try again shortly.",
+        "🧩 بدأ تجهيز ملف دمج الفصول": "🧩 Preparing the merged chapter file",
+        "📚 النطاق:": "📚 Range:",
+        "🔢 عدد الفصول:": "🔢 Number of chapters:",
+        "⏳ يرجى الانتظار...": "⏳ Please wait...",
+        "🧩 استخراج الفصول": "🧩 Extracting chapters",
+        "📚 المكتمل:": "📚 Completed:",
+        "✅ الناجح:": "✅ Successful:",
+        "🖼️ الصور المستخرجة:": "🖼️ Images extracted:",
+        "❌ لم يستخرج المحرك صور الفصول": "❌ The engine could not extract chapter images.",
+        "🧩 جاري تجهيز ملف الفصول المدمجة...": "🧩 Preparing the merged chapter file...",
+        "❌ فشل تجهيز ملف دمج الفصول.": "❌ Failed to create the merged chapter file.",
+        "تمت إعادة الرصيد إلى حسابك.": "Your credits have been refunded.",
+        "📤 يتم إرسال الملف إلى تيليجرام...": "📤 Sending the file to Telegram...",
+        "⚡ نسبة الإنجاز:": "⚡ Progress:",
+        "📦 الحجم المرسل:": "📦 Uploaded size:",
+        "❌ تعذّر رفع ملف PDF إلى تيليجرام.": "❌ Could not upload the PDF to Telegram.",
+        "تم إرجاع رصيد الدمج إلى حسابك؛ حاول مرة أخرى لاحقاً.": "Your merge credits have been refunded. Please try again later.",
+        "🧩 ملف مدمج": "🧩 Merged file",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "🎉 مبروك!": "🎉 Congratulations!",
+        "حصلت على:": "You received:",
+        "🎁 تم تجديد رصيدك!": "🎁 Your balance has been renewed!",
+        "📖 فصل جديد": "📖 New chapter",
+        "🔔 دخل شخص عبر رابط الهدية": "🔔 Someone joined through your gift link",
+        "⏰ انتهت مدة الرابط، اسف": "⏰ Sorry, this gift link has expired.",
+        "⚠️ وصل للحد الأقصى، اسف": "⚠️ Sorry, this gift link has reached its maximum number of uses.",
+        "ℹ️ استلمت من هذا الرابط مسبقاً": "ℹ️ You have already claimed this gift.",
+        "❌ رابط غير موجود أو محذوف": "❌ This gift link does not exist or has been deleted.",
+        "🔒 مخصص لمستخدمين معينين": "🔒 This gift is restricted to specific users.",
+        "📢 اشترك في": "📢 Join",
+        "⚠️ اشترك في جميع القنوات أولاً": "⚠️ Please join all required channels first.",
+        "تم التحقق!": "Verified!",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled in the engine.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "التالي ➡️": "Next ➡️",
+        "⬅️ السابق": "⬅️ Previous",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "🔙 رجوع": "🔙 Back",
+        "❌ إغلاق": "❌ Close",
+        "❌ إلغاء": "❌ Cancel",
+        "🔍 بحث جديد": "🔍 New search",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "🔥 أحدث المانجا": "🔥 Latest Manga",
+        "👤 حسابي": "👤 My Account",
+        "❓ مساعدة": "❓ Help",
+        "⭐ مفضلاتي": "⭐ My Favorites",
     }
     result = value
     for ar, en in sorted(translations.items(), key=lambda item: len(item[0]), reverse=True):
@@ -2558,7 +2663,7 @@ async def _try_reward_referral(client,new_uid):
     if not mark_rewarded(po,new_uid): return
     add_bonus(po,settings.get("referral_bonus_single",50)); add_merge_bonus(po,settings.get("referral_bonus_merge",20))
     try:
-        await client.send_message(po,f"🎉 مبروك!\n\nحصلت على:\n📖 +{settings.get('referral_bonus_single',50)}\n🧩 +{settings.get('referral_bonus_merge',20)}")
+        await client.send_message(po,translate_ui_text(po,f"🎉 مبروك!\n\nحصلت على:\n📖 +{settings.get('referral_bonus_single',50)}\n🧩 +{settings.get('referral_bonus_merge',20)}"))
     except: pass
     user_data.get(new_uid,{}).pop("pending_referral_owner",None)
 
@@ -2585,7 +2690,7 @@ async def search_cmd(client,message,query_override=None):
         # Cycle through Telegram's three supported button colors so adjacent sources differ.
         style = source_styles[index % len(source_styles)]
         rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}", style=style)])
-    rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+    rows.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text(translate_ui_text(uid, "❌ لا توجد مصادر مفعلة داخل المحرك.")); return
     await send_message_with_image(client, message.chat.id, translate_ui_text(uid, "🔍 اختر المصدر للبحث عن:\n") + query, "sources_image", InlineKeyboardMarkup(rows))
@@ -2796,8 +2901,8 @@ async def unified_callback(client,callback):
             chapter=item[3] if len(item)>3 else ""
             label=f"📖 {str(title)[:32]}" + (f" — {str(chapter)[:12]}" if chapter else "")
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
-        kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list",style="danger")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+        kb.append([InlineKeyboardButton("⬅️ Sources" if get_user_language(uid)=="en" else "⬅️ المصادر",callback_data="latest_manga_list",style="danger")])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
         await send_message_with_image(client,cid,translate_ui_text(uid,"🔥 أحدث الفصول في المصدر المحدد:"),"results_image",InlineKeyboardMarkup(kb)); return
@@ -2832,7 +2937,7 @@ async def unified_callback(client,callback):
         if page>0: nav.append(InlineKeyboardButton("⬅️",callback_data=f"cat_pg_{page-1}"))
         if page<tp-1: nav.append(InlineKeyboardButton("➡️",callback_data=f"cat_pg_{page+1}"))
         if nav: kb.append(nav)
-        kb.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        kb.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
         await safe_edit(msg,f"🏷️ التصنيفات ({page+1}/{tp})",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_g_"):
@@ -3090,7 +3195,7 @@ async def unified_callback(client,callback):
             increment_download_count(uid)
             upload_started = time.perf_counter()
             await lm.edit_text(
-                translate_ui_text(uid, "📤 يتم إرسال الملف إلى تيليجرام...\n\n⚡ نسبة الإنجاز: 0%\n") + f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB",
+                translate_ui_text(uid, "📤 يتم إرسال الملف إلى تيليجرام...\n\n⚡ نسبة الإنجاز: 0%\n") + translate_ui_text(uid,f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB"),
                 parse_mode=None,
             )
             try:
@@ -3815,8 +3920,8 @@ async def handle_all_text(client,message):
                 await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
                 return
             await lm.edit_text(
-                "📤 يتم إرسال الملف إلى تيليجرام...\n\n"
-                "⚡ نسبة الإنجاز: 0%\n"
+                translate_ui_text(uid,"📤 يتم إرسال الملف إلى تيليجرام...\n\n")
+                translate_ui_text(uid,"⚡ نسبة الإنجاز: 0%\n")
                 f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB"
             )
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
