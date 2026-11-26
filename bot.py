@@ -845,6 +845,26 @@ def translate_ui_text(uid, value):
     if get_user_language(uid) != "en" or not isinstance(value, str):
         return value
     translations = {
+        "⚠️ البوت في وضع الصيانة": "⚠️ The bot is under maintenance.",
+        "يرجى المحاولة لاحقاً": "Please try again later.",
+        "🚫 أنت محظور": "🚫 You are banned from using this bot.",
+        "🎁 تم تجديد رصيدك!": "🎁 Your balance has been renewed!",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "📢 اشترك في": "📢 Join",
+        "📞 تواصل": "📞 Contact",
+        "📩 تقديم شكوى": "📩 Submit a complaint",
+        "🔘": "🔘",
+        "📖 رصيد الفصول": "📖 Chapter balance",
+        "💰": "💰",
+        "⏰": "⏰",
+        "❌ لا رصيد": "❌ No credits",
+        "❌ لا توجد نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "⚠️": "⚠️",
+        "تم التحقق!": "Verified!",
+        "❌ لا فصول": "❌ No chapters are available.",
+
         "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
         "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
         "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
@@ -1914,7 +1934,7 @@ async def check_subscription_and_continue(client,cb,pending=None):
     uid=cb.from_user.id; cid=cb.message.chat.id; msg=cb.message
     is_sub,_=await is_user_subscribed(client,uid)
     if is_sub:
-        await cb.answer("✅ تم التحقق!")
+        await cb.answer(translate_ui_text(uid,"تم التحقق!"))
         try: await msg.delete()
         except: pass
         await _try_reward_referral(client,uid)
@@ -1944,7 +1964,7 @@ async def check_subscription_and_continue(client,cb,pending=None):
                     await _show_manga_by_deeplink(client, cid, uid, sd['src'], sd['ident'])
                 fm.text=""; await start_cmd(client,fm)
     else:
-        await cb.answer("⚠️ اشترك في جميع القنوات أولاً",show_alert=True)
+        await cb.answer(translate_ui_text(uid,"⚠️ اشترك في جميع القنوات أولاً"),show_alert=True)
         await send_subscription_prompt(client,uid,cid,pending)
 
 app=make_legacy_app(BOT_TOKEN)
@@ -2318,9 +2338,9 @@ def get_admin_panel_kb():
 async def _start_cmd_impl(client,message):
     uid=message.from_user.id
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
-        await message.reply_text("⚠️ البوت في وضع الصيانة\n\nيرجى المحاولة لاحقاً"); return
+        await message.reply_text(translate_ui_text(uid,"⚠️ البوت في وضع الصيانة\n\nيرجى المحاولة لاحقاً")); return
     if is_banned(uid) and uid not in OWNER_IDS:
-        await message.reply_text("🚫 أنت محظور"); return
+        await message.reply_text(translate_ui_text(uid,"🚫 أنت محظور")); return
     is_new=add_user(uid); ref_owner=None; gift_code=None; show_data=None
     if len(message.text.split())>1:
         pl=message.text.split()[1]
@@ -2549,7 +2569,7 @@ async def unified_callback(client,callback):
 
     if data=="fav_list":
         if not is_vip(uid):
-            await callback.answer("VIP فقط 👑", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"VIP فقط 👑"), show_alert=True)
             try: await msg.delete()
             except: pass
             try:
@@ -2564,7 +2584,7 @@ async def unified_callback(client,callback):
         await callback.answer("⭐"); return
 
     if data=="toggle_notifications":
-        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        if not is_vip(uid): await callback.answer(translate_ui_text(uid,"VIP فقط 👑"),show_alert=True); return
         cur=is_notifications_enabled(uid); set_notifications_enabled(uid,not cur)
         m,s,c=create_fav_list_markup(uid)
         try: await msg.edit_text(f"⭐ ({c})\n⚙️ {s}\n\nاختر:",reply_markup=m)
