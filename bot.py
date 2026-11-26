@@ -7,9 +7,10 @@ import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
-from pyrogram import Client, filters
+from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard
 import signal
-from pyrogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
+InlineKeyboardMarkup = make_inline_keyboard
 
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
@@ -43,8 +44,8 @@ def InlineKeyboardButton(text, *args, **kwargs):
         label = f"{icon} {label}"
     return _TelegramInlineKeyboardButton(label, *args, **kwargs)
 
-from pyrogram.enums import ParseMode, ChatMemberStatus
-from pyrogram.errors import MessageNotModified
+from aiogram.enums import ParseMode, ChatMemberStatus
+
 import gc
 
 # ===== BEGIN MERGED MANGA API MODULE =====
@@ -1598,7 +1599,7 @@ async def check_subscription_and_continue(client,cb,pending=None):
         await cb.answer("⚠️ اشترك في جميع القنوات أولاً",show_alert=True)
         await send_subscription_prompt(client,uid,cid,pending)
 
-app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
+app=make_legacy_app(BOT_TOKEN)
 
 async def _send_shared_manga_card(client, cid, info, caption, markup):
     """Send the shared manga cover when available, with URL and downloaded-file fallbacks."""
