@@ -60,8 +60,19 @@ def InlineKeyboardButton(text, *args, **kwargs):
             kwargs.setdefault("callback_data", args[0])
         if len(args) == 2:
             kwargs.setdefault("url", args[1])
-    # Keep every inline button on one consistent color.
-    kwargs.setdefault("style", "primary")
+    if "style" not in kwargs and callback:
+        action = callback.casefold()
+        colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
+        # All manga search-result buttons use the same color.
+        if action.startswith("sel_"):
+            group = "success"
+        elif any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
+            group = "danger"
+        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
+            group = "success"
+        else:
+            group = "primary"
+        kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
     return _TelegramInlineKeyboardButton(text=label, **kwargs)
 
 from aiogram.enums import ParseMode, ChatMemberStatus
