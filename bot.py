@@ -3920,9 +3920,9 @@ async def handle_all_text(client,message):
                 await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
                 return
             await lm.edit_text(
-                translate_ui_text(uid,"📤 يتم إرسال الملف إلى تيليجرام...\n\n")
-                translate_ui_text(uid,"⚡ نسبة الإنجاز: 0%\n")
-                f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB"
+                translate_ui_text(uid,"📤 يتم إرسال الملف إلى تيليجرام...\n\n") +
+                translate_ui_text(uid,"⚡ نسبة الإنجاز: 0%\n") +
+                translate_ui_text(uid,f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB")
             )
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
