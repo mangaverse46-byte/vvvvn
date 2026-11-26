@@ -104,11 +104,9 @@ class MessageCompat:
         return attribute
 
     async def reply_text(self, text: str, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop("parse_mode", None)
         return await _call_with_plain_text_fallback(self._message.answer, text, *args, **kwargs)
 
     async def reply_photo(self, photo: Any, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop("parse_mode", None)
         return await _call_with_plain_text_fallback(
             self._message.answer_photo, as_input_file(photo), *args, **kwargs
         )
@@ -149,7 +147,6 @@ class BotClientCompat:
         self.bot = bot
 
     async def send_message(self, chat_id: Any, text: str, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop("parse_mode", None)
         if kwargs.pop("disable_web_page_preview", False):
             kwargs.setdefault("link_preview_options", LinkPreviewOptions(is_disabled=True))
         return await _call_with_plain_text_fallback(
@@ -157,7 +154,6 @@ class BotClientCompat:
         )
 
     async def send_photo(self, chat_id: Any, photo: Any, *args: Any, **kwargs: Any) -> Any:
-        kwargs.pop("parse_mode", None)
         return await _call_with_plain_text_fallback(
             self.bot.send_photo, chat_id=chat_id, photo=as_input_file(photo), *args, **kwargs
         )
