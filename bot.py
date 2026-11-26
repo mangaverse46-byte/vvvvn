@@ -481,12 +481,17 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
     # Keep original image bytes and order. Only discard failed/non-image responses.
     def is_supported_image(blob):
-        return bool(blob) and (
-            blob.startswith(b"\\xff\\xd8\\xff")
-            or blob.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
-            or blob.startswith((b"\\x00\\x00\\x00\\x0cjP  ", b"\\xffO\\xffQ"))
-            or blob.startswith((b"II*\\x00", b"MM\\x00*"))
+        if not blob:
+            return False
+        return (
+            blob.startswith(bytes.fromhex("FFD8FF"))  # JPEG
+            or blob.startswith(bytes.fromhex("89504E470D0A1A0A"))  # PNG
+            or blob.startswith(bytes.fromhex("0000000C6A502020"))  # JPEG2000
+            or blob.startswith(bytes.fromhex("FF4FFF51"))  # JPEG2000 codestream
+            or blob.startswith(bytes.fromhex("49492A00"))  # TIFF little-endian
+            or blob.startswith(bytes.fromhex("4D4D002A"))  # TIFF big-endian
         )
+
 
     pages = [blob for blob in downloaded if is_supported_image(blob)]
 
