@@ -845,6 +845,64 @@ def translate_ui_text(uid, value):
     if get_user_language(uid) != "en" or not isinstance(value, str):
         return value
     translations = {
+        "❌ إغلاق": "❌ Close",
+        "❌ إغلاق القائمة": "❌ Close menu",
+        "❌ إغلاق اللوحة": "❌ Close panel",
+        "🔙 رجوع": "🔙 Back",
+        "⬅️ المصادر": "⬅️ Sources",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "📞 تواصل": "📞 Contact",
+        "🔗 مشاركة": "🔗 Share",
+        "🔍 بحث جديد": "🔍 New search",
+        "❌ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.": "❌ An error occurred while starting the bot. The error was logged. Please try again shortly.",
+        "🔄 جاري فحص الفصول الجديدة...": "🔄 Checking for new chapters...",
+        "✅ انتهى فحص المفضلات.": "✅ Favorites check completed.",
+        "⛔ هذا الأمر للأدمن فقط.": "⛔ This command is for admins only.",
+        "⛔ غير مصرح": "⛔ Unauthorized.",
+        "⚠️ صيانة": "⚠️ Maintenance",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Please type:",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️": "⚙️ Settings",
+        "VIP فقط 👑": "VIP only 👑",
+        "⭐ المفضلات لمشتركي VIP فقط": "⭐ Favorites are available to VIP members only.",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled in the engine.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "🔍 اكتب اسم المانجا بعد الأمر، مثال:": "🔍 Enter a manga title after the command. Example:",
+        "❌ ملغى": "❌ Cancelled.",
+        "ℹ️ لا شيء قيد التنفيذ": "ℹ️ Nothing is currently in progress.",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "🔗 الرابط جاهز — انسخه": "🔗 Link is ready — copy it.",
+        "⚠️ لا توجد بيانات، افتح المانجا أولاً": "⚠️ No data found. Open a manga first.",
+        "⚠️ مصدر المانجا غير متاح": "⚠️ Manga source is unavailable.",
+        "❌ لا رصيد": "❌ Insufficient balance.",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "❌ فشل التحميل": "❌ Download failed.",
+        "⚠️ موجود": "⚠️ Already exists.",
+        "لا فصول": "No chapters available.",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "نتيجة": "results",
+        "فصل": "chapter",
+        "حد أقصى": "maximum",
+        "💳 رصيد:": "💳 Balance:",
+        "📝 أرسل: البداية-النهاية": "📝 Send: start-end",
+        "مثال:": "Example:",
+        "📚": "📚",
+        "🎉 مبروك!": "🎉 Congratulations!",
+        "حصلت على:": "You received:",
+        "👤 عضو جديد": "👤 New member",
+        "⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.": "⚠️ An error occurred while starting the bot. The error was logged. Please try again shortly.",
+        "⚠️ رابط تطبيق البوت غير مضبوط حالياً.": "⚠️ The bot app link is not configured yet.",
+        "❌ لا توجد فصول": "❌ No chapters available.",
+        "❌ لا توجد نتائج": "❌ No results found.",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search for:",
+        "🔍 اكتب اسم المانجا": "🔍 Enter a manga title",
+        "⭐": "⭐",
+        "🔔": "🔔",
+        "🔕": "🔕",
+
         "⚠️ رابط تطبيق البوت غير مضبوط حالياً.": "⚠️ The bot app link is not configured yet.",
         "⚠️ اشترك أولاً": "⚠️ Please subscribe first.",
         "❌ إغلاق": "❌ Close",
@@ -2485,7 +2543,7 @@ async def start_cmd(client, message):
         details = traceback.format_exc()
         pass
         try:
-            await message.reply_text("⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.")
+            await message.reply_text(translate_ui_text(uid,"⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل."))
         except Exception as send_exc:
             pass
         try:
@@ -2535,10 +2593,10 @@ async def search_cmd(client,message,query_override=None):
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
     if not is_admin_any(message.from_user.id):
-        await message.reply_text("⛔ هذا الأمر للأدمن فقط."); return
-    await message.reply_text("🔄 جاري فحص الفصول الجديدة...")
+        await message.reply_text(translate_ui_text(uid,"⛔ هذا الأمر للأدمن فقط.")); return
+    await message.reply_text(translate_ui_text(uid,"🔄 جاري فحص الفصول الجديدة..."))
     await check_new_chapters()
-    await message.reply_text("✅ انتهى فحص المفضلات.")
+    await message.reply_text(translate_ui_text(uid,"✅ انتهى فحص المفضلات."))
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client,message):
@@ -2566,7 +2624,7 @@ async def unified_callback(client,callback):
     cid=callback.message.chat.id; msg=callback.message
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
-        await callback.answer("⚠️ صيانة", show_alert=True); return
+        await callback.answer(translate_ui_text(uid,"⚠️ صيانة"), show_alert=True); return
     if data=="check_sub":
         await check_subscription_and_continue(client,callback,user_data.get(uid,{}).get('pending_action')); return
     if data=="change_language":
@@ -2634,7 +2692,7 @@ async def unified_callback(client,callback):
         await callback.answer("❓")
         await msg.reply_text(
             translate_ui_text(uid, f"❓ مساعدة\n\n🔍 /search الاسم\n📚 4 مصادر\n\n📖 فردي: {settings.get('daily_reward_amount',100)}\n🧩 دمج: {settings.get('merge_daily_limit',50)}\n📎 حد الملف: {PDF_MAX_CHAPTERS}\n🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n👑 VIP: بلا حدود"),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])); return
     if data=="main_search":
         await callback.answer("🔍")
         user_data.setdefault(uid, {})["awaiting_search_query"] = True
@@ -2662,7 +2720,7 @@ async def unified_callback(client,callback):
             try:
                 o=await client.get_chat(OWNER_ID); au=o.username
             except: au=None
-            rows=[[InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
+            rows=[[InlineKeyboardButton("📞 Contact" if get_user_language(uid)=="en" else "📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")]]
             await msg.reply_text(translate_ui_text(uid, "🔒 ميزة VIP\n\n⭐ المفضلات لمشتركي VIP فقط"), reply_markup=InlineKeyboardMarkup(rows)); return
         m,s,c=create_fav_list_markup(uid)
         try: await msg.delete()
@@ -2982,7 +3040,7 @@ async def unified_callback(client,callback):
             success,rem=try_deduct_chapter(uid,1)
             if not success:
                 await callback.answer(translate_ui_text(uid,"❌ لا رصيد"),show_alert=True)
-                kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+                kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Share" if get_user_language(uid)=="en" else "🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
                 await msg.reply_text(translate_ui_text(uid, "❌ لا يوجد رصيد\n\nادعُ صديقاً 🔗"),reply_markup=kb); return
             await callback.answer("⏳")
             lt = f"⏳ جاري تحميل الفصل {disp}..."
@@ -3114,7 +3172,7 @@ async def unified_callback(client,callback):
         for i,item in enumerate(res):
             title=str(item.get("title") or "Manga")
             kb.append([InlineKeyboardButton(f"📖 {title[:45]}",callback_data=f"sel_{src}_{i}")])
-        kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        kb.append([InlineKeyboardButton("🔍 New search" if get_user_language(uid)=="en" else "🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
         try: await msg.delete()
         except: pass
         await send_message_with_image(client,cid,translate_ui_text(uid,f"✅ {len(res)} نتيجة\n{q}"),"results_image",InlineKeyboardMarkup(kb)); return
