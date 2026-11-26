@@ -2277,7 +2277,7 @@ async def unified_callback(client,callback):
             chapter=item[3] if len(item)>3 else ""
             label=f"📖 {str(title)[:32]}" + (f" — {str(chapter)[:12]}" if chapter else "")
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
-        kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")])
+        kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list",style="danger")])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
