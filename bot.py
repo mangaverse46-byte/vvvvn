@@ -63,14 +63,25 @@ def InlineKeyboardButton(text, *args, **kwargs):
     if "style" not in kwargs and callback:
         action = callback.casefold()
         colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
-        # Consistent visual rules: search results and merge are green,
-        # source choices are blue, navigation is red, and cancel/close is red.
+        # Source colors are selected by the visible source name.
+        # Navigation colors are selected by the visible button label.
+        lower_label = label.casefold()
         if action.startswith("sel_") or action.startswith("mrg_") or "merge" in action:
             group = "success"
-        elif action.startswith("src_") or action.startswith("latest_src_"):
-            group = "primary"
-        elif action.startswith(("pg_", "cat_pg_")) or any(x in action for x in ("previous", "prev", "next", "page_")):
-            group = "danger"
+        elif action.startswith(("src_", "latest_src_")):
+            if "mangalik" in lower_label or "مانجا ليك" in lower_label:
+                group = "danger"
+            elif "azora" in lower_label or "ازورا" in lower_label:
+                group = "primary"
+            else:
+                group = "success"
+        elif action.startswith(("pg_", "cat_pg_")) or action.startswith(("f_", "l_")):
+            if "السابق" in lower_label or "أول فصل" in lower_label:
+                group = "primary"
+            elif "التالي" in lower_label or "آخر فصل" in lower_label:
+                group = "danger"
+            else:
+                group = "primary"
         elif any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
             group = "danger"
         elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
