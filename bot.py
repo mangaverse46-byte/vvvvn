@@ -1813,18 +1813,32 @@ def _parse_telegram_post_link(value):
 
 async def build_main_keyboard(uid):
     lang=get_user_language(uid) or "ar"
-    rows = [
-        [InlineKeyboardButton("🔎 اكتب اسم المانجا", callback_data="main_search")],
-        [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
-        [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
-        [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
-        [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
-        [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
-    ]
-    if settings.get("app_message_link"):
-        rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
-    if settings.get("tutorial_video_url"):
-        rows.append([InlineKeyboardButton("🎬 آخر فيديو تعليمي", url=settings["tutorial_video_url"])])
+    if lang == "en":
+        rows = [
+            [InlineKeyboardButton("🔎 Search Manga", callback_data="main_search")],
+            [InlineKeyboardButton("👤 My Account", callback_data="my_account"), InlineKeyboardButton("🔥 Latest Manga", callback_data="latest_manga_list")],
+            [InlineKeyboardButton("🏷️ Categories", callback_data="main_categories"), InlineKeyboardButton("❓ Help", callback_data="help_full")],
+            [InlineKeyboardButton("⭐ My Favorites", callback_data="fav_list")],
+            [InlineKeyboardButton("📩 Submit a Complaint", callback_data="complaint_start")],
+            [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
+        ]
+        if settings.get("app_message_link"):
+            rows.append([InlineKeyboardButton("📲 Bot App", callback_data="send_app_message")])
+        if settings.get("tutorial_video_url"):
+            rows.append([InlineKeyboardButton("🎬 Tutorial Video", url=settings["tutorial_video_url"])])
+    else:
+        rows = [
+            [InlineKeyboardButton("🔎 اكتب اسم المانجا", callback_data="main_search")],
+            [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
+            [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
+            [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
+            [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
+            [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
+        ]
+        if settings.get("app_message_link"):
+            rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
+        if settings.get("tutorial_video_url"):
+            rows.append([InlineKeyboardButton("🎬 آخر فيديو تعليمي", url=settings["tutorial_video_url"])])
     return InlineKeyboardMarkup(rows)
 
 def _account_keyboard():
@@ -2227,7 +2241,10 @@ async def unified_callback(client,callback):
                     return await client.send_message(self.chat.id, text, *args, **kwargs)
             await _start_cmd_impl(client, LanguageStartMessage())
         else:
-            welcome = settings.get("welcome_message", "🌟 مرحباً!")
+            if selected == "en":
+                welcome = "🖤 Welcome to Manga Virus 🦠\\nYour gateway to the world of manga and manhwa!"
+            else:
+                welcome = settings.get("welcome_message", "🌟 مرحباً!")
             await client.send_message(cid, welcome, reply_markup=await build_main_keyboard(uid))
         return
     if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
