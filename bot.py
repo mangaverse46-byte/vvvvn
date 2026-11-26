@@ -2022,17 +2022,17 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
     src = source_from_code(src_short)
     if not src:
-        await client.send_message(cid, "⚠️ هذا المصدر لم يعد متاحاً.")
+        await client.send_message(cid, translate_ui_text(uid, "⚠️ هذا المصدر لم يعد متاحاً."))
         return
     try:
         api = await asyncio.to_thread(get_source, src)
         manga_url = str(ident)
         info = await asyncio.to_thread(api.get_details, manga_url)
         if not info:
-            await client.send_message(cid, "❌ تعذر جلب معلومات المانجا."); return
+            await client.send_message(cid, translate_ui_text(uid, "❌ تعذر جلب معلومات المانجا.")); return
         chapters = list(reversed(info.get("chapters", [])))
         if not chapters:
-            await client.send_message(cid, "❌ لا توجد فصول."); return
+            await client.send_message(cid, translate_ui_text(uid, "❌ لا توجد فصول.")); return
         title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
         async def pdf(ch, progress=None):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
@@ -2053,7 +2053,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         markup,_,_ = create_chapters_markup(chapters, 0, user_data[uid]["identifier"], src, uid)
         await _send_shared_manga_card(client, cid, info, cap, markup)
     except Exception as e:
-        await client.send_message(cid, f"❌ تعذر فتح المانجا: {str(e)[:180]}")
+        await client.send_message(cid, translate_ui_text(uid, f"❌ تعذر فتح المانجا: {str(e)[:180]}"))
 
 async def send_message_with_image(client,cid,text,key,markup=None):
     text = translate_ui_text(cid, text)
@@ -2201,8 +2201,9 @@ async def _show_daily_timer(client,msg,uid):
     else: single_timer="✅ جاهز"
     if rec.get("merge_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"merge"); merge_timer=f"⏳ {h:02d}:{m:02d}:{s:02d}"
     else: merge_timer="✅ جاهز"
+    unit = "hours" if get_user_language(uid) == "en" else "ساعة"
     await msg.reply_text(
-        translate_ui_text(uid, f"⏰ الوقت\n\n📖 فردي\n├ 🔋 {rem}\n└ {single_timer}\n\n🧩 دمج\n├ 🔋 {mrem}\n└ {merge_timer}\n\n⏱️ مدة التجديد: {settings.get('daily_reward_interval',86400)//3600} ساعة"),
+        translate_ui_text(uid, f"⏰ الوقت\n\n📖 فردي\n├ 🔋 {rem}\n└ {single_timer}\n\n🧩 دمج\n├ 🔋 {mrem}\n└ {merge_timer}\n\n⏱️ مدة التجديد: {settings.get('daily_reward_interval',86400)//3600}") + f" {unit}",
         reply_markup=kb)
 
 def create_backup_with_custom_token(tk,bn):
@@ -2794,11 +2795,11 @@ async def unified_callback(client,callback):
         ident = info.get("manga_url") or info.get("identifier")
         title = info.get('title', 'مانجا')
         if not ident:
-            await callback.answer("⚠️ لا توجد بيانات، افتح المانجا أولاً", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"⚠️ لا توجد بيانات، افتح المانجا أولاً"), show_alert=True)
             return
         source_id = source_from_code(src_short)
         if not source_id:
-            await callback.answer("⚠️ مصدر المانجا غير متاح", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"⚠️ مصدر المانجا غير متاح"), show_alert=True)
             return
         share_code = create_manga_share_code(source_id, ident)
         share_url = f"https://t.me/{BOT_USERNAME}?start=m_{share_code}"
@@ -2894,7 +2895,7 @@ async def unified_callback(client,callback):
             disp=re.sub(r"_+", " ", disp).strip() or "?"
             success,rem=try_deduct_chapter(uid,1)
             if not success:
-                await callback.answer("❌ لا رصيد",show_alert=True)
+                await callback.answer(translate_ui_text(uid,"❌ لا رصيد"),show_alert=True)
                 kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
                 await msg.reply_text(translate_ui_text(uid, "❌ لا يوجد رصيد\n\nادعُ صديقاً 🔗"),reply_markup=kb); return
             await callback.answer("⏳")
