@@ -2541,22 +2541,33 @@ async def unified_callback(client,callback):
             lt = f"⏳ **جاري تحميل الفصل {disp}...**"
             if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
             lm=await msg.reply_text(lt)
-            timer_started = time.perf_counter()
             timer_stop = asyncio.Event()
+            bar_frames = [
+                "▰▱▱▱▱▱▱▱▱▱",
+                "▰▰▱▱▱▱▱▱▱▱",
+                "▰▰▰▱▱▱▱▱▱▱",
+                "▰▰▰▰▱▱▱▱▱▱",
+                "▰▰▰▰▰▱▱▱▱▱",
+                "▰▰▰▰▰▰▱▱▱▱",
+                "▰▰▰▰▰▰▰▱▱▱",
+                "▰▰▰▰▰▰▰▰▱▱",
+                "▰▰▰▰▰▰▰▰▰▱",
+                "▰▰▰▰▰▰▰▰▰▰",
+            ]
 
             async def loading_timer():
+                frame = 0
                 while not timer_stop.is_set():
-                    elapsed = int(time.perf_counter() - timer_started)
-                    minutes, seconds = divmod(elapsed, 60)
                     try:
                         await lm.edit_text(
-                            f"⏳ **جاري تحميل الفصل {disp}...**\n"
-                            f"⌛ الوقت المنقضي: `{minutes:02d}:{seconds:02d}`"
+                            f"📥 **جاري تحميل الفصل {disp} وتجهيز PDF...**\n\n"
+                            f"`{bar_frames[frame % len(bar_frames)]}`"
                         )
                     except Exception:
                         pass
+                    frame += 1
                     try:
-                        await asyncio.wait_for(timer_stop.wait(), timeout=1)
+                        await asyncio.wait_for(timer_stop.wait(), timeout=0.8)
                     except asyncio.TimeoutError:
                         pass
 
