@@ -2901,7 +2901,7 @@ async def unified_callback(client,callback):
             await callback.answer("⏳")
             lt = f"⏳ جاري تحميل الفصل {disp}..."
             if rem>=0: lt += f"\n📊 المتبقي: {rem}"
-            lm=await msg.reply_text(lt)
+            lm=await msg.reply_text(translate_ui_text(uid,lt))
             timer_stop = asyncio.Event()
             bar_frames = [
                 "▰▱▱▱▱▱▱▱▱▱",
@@ -2921,8 +2921,7 @@ async def unified_callback(client,callback):
                 while not timer_stop.is_set():
                     try:
                         await lm.edit_text(
-                            f"📥 جاري تحميل الفصل {disp} وتجهيز PDF...\n\n"
-                            f"{bar_frames[frame % len(bar_frames)]}"
+                            translate_ui_text(uid, f"📥 جاري تحميل الفصل {disp} وتجهيز PDF...\n\n{bar_frames[frame % len(bar_frames)]}")
                         )
                     except Exception:
                         pass
