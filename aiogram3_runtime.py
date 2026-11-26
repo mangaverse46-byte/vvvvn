@@ -173,6 +173,17 @@ class BotClientCompat:
             **kwargs,
         )
 
+    async def copy_message(
+        self, chat_id: Any, from_chat_id: Any, message_id: int, **kwargs: Any
+    ) -> Any:
+        """Copy a post from an accessible Telegram chat to another chat."""
+        return await self.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            **kwargs,
+        )
+
     async def get_chat_member(self, chat_id: Any, user_id: int) -> Any:
         return await self.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
 
