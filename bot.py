@@ -606,7 +606,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
+for pkg in ["aiogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
     ensure_installed(pkg)
 
 from dotenv import load_dotenv
@@ -617,8 +617,8 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-if not API_ID or not API_HASH or not BOT_TOKEN or not OWNER_ID:
-    raise RuntimeError("Missing API_ID, API_HASH, BOT_TOKEN or OWNER_ID in .env")
+if not BOT_TOKEN or not OWNER_ID:
+    raise RuntimeError("Missing BOT_TOKEN or OWNER_ID in .env")
 
 ADMINS = [OWNER_ID]; OWNER_IDS = [OWNER_ID]
 MAX_WORKERS = 15
@@ -3508,8 +3508,13 @@ if __name__ == "__main__":
                 asyncio.create_task(latest_manga_refresh_task(), name="latest_manga_refresh_task"),
             ]
 
-            print("✅ البوت يعمل. لإيقافه اضغط Ctrl+C", flush=True)
-            await stop_event.wait()
+            print("✅ البوت يعمل عبر aiogram 3. لإيقافه اضغط Ctrl+C", flush=True)
+            polling_task = asyncio.create_task(app.dispatcher.start_polling(app.bot), name="telegram_polling")
+            try:
+                await stop_event.wait()
+            finally:
+                polling_task.cancel()
+                await asyncio.gather(polling_task, return_exceptions=True)
 
         finally:
             # Remove custom signal handlers before closing the event loop.
