@@ -676,13 +676,12 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
             lambda: asyncio.create_task(update_progress(current, total))
         )
 
-    # Upload chunks concurrently, then send the already-uploaded file.
-    # Four workers balance throughput without overwhelming a small VPS.
+    # Telethon's installed version does not support a workers argument.
+    # Use its native upload implementation and then send the uploaded handle.
     uploaded_file = await _mtproto_client.upload_file(
         document,
         file_name=file_name,
         progress_callback=progress_callback,
-        workers=4,
     )
     return await _mtproto_client.send_file(
         entity=int(chat_id),
