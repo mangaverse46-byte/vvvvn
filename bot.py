@@ -2178,8 +2178,18 @@ async def unified_callback(client,callback):
                 await callback.answer("حدد الزر الأصلي أولاً", show_alert=True)
                 return
             data = original_callback
-            msg = original_context.get("message")
             cid = original_context.get("chat_id", cid)
+            msg = None
+            original_message_id = original_context.get("message_id")
+            # Fetch a fresh copy of the original Telegram message. Reusing the
+            # old callback message (the color menu) breaks pagination callbacks.
+            if original_message_id:
+                try:
+                    msg = await client.get_messages(cid, original_message_id)
+                except Exception:
+                    msg = None
+            if msg is None:
+                msg = original_context.get("message")
             if msg is None:
                 await callback.answer("تعذر استعادة الرسالة الأصلية، اضغط الزر من جديد", show_alert=True)
                 BUTTON_COLOR_MODE[uid] = "__waiting__"
@@ -2242,7 +2252,11 @@ async def unified_callback(client,callback):
             target_key = f"{data}::{label}"
             BUTTON_COLOR_MODE[uid] = target_key
             BUTTON_COLOR_PENDING[uid] = data
-            BUTTON_COLOR_CONTEXT[uid] = {"message": msg, "chat_id": cid}
+            BUTTON_COLOR_CONTEXT[uid] = {
+                "message": msg,
+                "chat_id": cid,
+                "message_id": getattr(msg, "id", None),
+            }
             await callback.answer("اختر لون الزر أو نفّذ الأمر الأصلي")
             try:
                 await msg.answer(
