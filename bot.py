@@ -3204,7 +3204,7 @@ async def handle_all_text(client,message):
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
                 await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                    caption=f"🧩 ملف مدمج\n\n📚 {title}\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}")
+                    caption=f"🧩 ملف مدمج\n\n📚 {title}\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}", progress_message=lm)
                 increment_download_count(uid)
             except Exception as upload_error:
                 refund_merge(uid, count)
