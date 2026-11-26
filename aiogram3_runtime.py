@@ -1,17 +1,18 @@
-"""Aiogram 3 migration foundation for Manga Virus.
+"""Aiogram 3 migration foundation and compatibility layer for Manga Virus.
 
-This module is deliberately isolated from bot.py until handler registration and
-all legacy call sites have been migrated. It is not a drop-in Pyrogram runtime.
+The legacy handler body is being migrated in stages. This module adapts the
+old decorator/signature conventions to aiogram 3; it does not emulate MTProto.
 """
 from __future__ import annotations
 
 import io
 import os
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.filters import BaseFilter
 from aiogram.types import (
     InlineKeyboardButton as AioInlineKeyboardButton,
     InlineKeyboardMarkup as AioInlineKeyboardMarkup,
@@ -56,7 +57,6 @@ def make_inline_keyboard(rows: Iterable[Iterable[Any]]) -> AioInlineKeyboardMark
 
 
 def as_input_file(value: Any, filename: str | None = None) -> Any:
-    """Convert URLs, existing paths and byte streams; preserve Telegram file IDs."""
     if isinstance(value, (URLInputFile, FSInputFile, BufferedInputFile)):
         return value
     if isinstance(value, str):
@@ -74,7 +74,6 @@ def as_input_file(value: Any, filename: str | None = None) -> Any:
 
 
 class MessageCompat:
-    """Bridge common Pyrogram Message methods to aiogram Message methods."""
     def __init__(self, bot: Bot, message: Any):
         self._bot, self._message = bot, message
 
@@ -107,8 +106,20 @@ class MessageCompat:
         return destination
 
 
+class CallbackCompat:
+    def __init__(self, bot: Bot, callback: Any):
+        self._callback = callback
+        self.message = MessageCompat(bot, callback.message) if callback.message else None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._callback, name)
+
+    async def answer(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._callback.answer(*args, **kwargs)
+
+
 class BotClientCompat:
-    """Bridge common Pyrogram client calls. Arbitrary @username lookup is unsupported."""
+    """Common Pyrogram client method names backed by Telegram Bot API."""
     def __init__(self, bot: Bot):
         self.bot = bot
 
@@ -135,9 +146,7 @@ class BotClientCompat:
 
     async def get_users(self, user_id: Any) -> Any:
         if isinstance(user_id, str) and user_id.startswith("@"):
-            raise NotImplementedError(
-                "Telegram Bot API cannot resolve arbitrary @usernames; use a numeric ID."
-            )
+            raise NotImplementedError("Bot API cannot resolve arbitrary @usernames; use a stored numeric ID.")
         return await self.bot.get_chat(int(user_id))
 
     async def delete_messages(self, chat_id: Any, message_ids: Any) -> None:
@@ -151,3 +160,95 @@ class BotClientCompat:
             raise RuntimeError("Telegram did not return a file path")
         target = io.BytesIO() if in_memory else None
         return await self.bot.download_file(info.file_path, destination=target)
+
+
+class LegacyPredicateFilter(BaseFilter):
+    def __init__(self, predicate: Callable[[Any], bool]):
+        self.predicate = predicate
+
+    async def __call__(self, event: Any) -> bool:
+        try:
+            return bool(self.predicate(event))
+        except Exception:
+            return False
+
+
+class LegacyFilter:
+    def __init__(self, predicate: Callable[[Any], bool]):
+        self.predicate = predicate
+
+    def __and__(self, other: "LegacyFilter") -> "LegacyFilter":
+        return LegacyFilter(lambda event: self.predicate(event) and other.predicate(event))
+
+    def __invert__(self) -> "LegacyFilter":
+        return LegacyFilter(lambda event: not self.predicate(event))
+
+
+class LegacyFilters:
+    private = LegacyFilter(lambda m: bool(getattr(getattr(m, "chat", None), "type", None) == "private"))
+    text = LegacyFilter(lambda m: getattr(m, "text", None) is not None)
+    photo = LegacyFilter(lambda m: bool(getattr(m, "photo", None)))
+    document = LegacyFilter(lambda m: getattr(m, "document", None) is not None)
+
+    @staticmethod
+    def command(commands: Any) -> LegacyFilter:
+        allowed = {commands} if isinstance(commands, str) else set(commands)
+        def match(message: Any) -> bool:
+            value = getattr(message, "text", None) or ""
+            if not value.startswith("/"):
+                return False
+            first = value.split(maxsplit=1)[0][1:].split("@", 1)[0]
+            return first in allowed
+        return LegacyFilter(match)
+
+
+class LegacyApp:
+    """Supports the old @app.on_message/@app.on_callback_query registration style."""
+    def __init__(self, bot: Bot):
+        self.bot = bot
+        self.client = BotClientCompat(bot)
+        self.router = Router()
+        self.dispatcher = Dispatcher()
+        self.dispatcher.include_router(self.router)
+        self.is_connected = False
+
+    def on_message(self, legacy_filter: LegacyFilter | None = None):
+        async def decorator(handler: Callable[..., Any]):
+            async def wrapped(message: Any):
+                return await handler(self.client, MessageCompat(self.bot, message))
+            self.router.message(LegacyPredicateFilter((legacy_filter or LegacyFilter(lambda _: True)).predicate))(wrapped)
+            return handler
+        return decorator
+
+    def on_callback_query(self):
+        async def decorator(handler: Callable[..., Any]):
+            async def wrapped(callback: Any):
+                return await handler(self.client, CallbackCompat(self.bot, callback))
+            self.router.callback_query()(wrapped)
+            return handler
+        return decorator
+
+    async def start(self) -> None:
+        # Retained only for staged migration of the old startup sequence.
+        await self.bot.get_me()
+        self.is_connected = True
+
+    async def stop(self) -> None:
+        await self.bot.session.close()
+        self.is_connected = False
+
+    async def get_me(self) -> Any:
+        return await self.bot.get_me()
+
+    def run(self, coroutine: Any = None) -> None:
+        import asyncio
+        async def runner() -> None:
+            if coroutine is not None:
+                await coroutine
+            else:
+                await self.dispatcher.start_polling(self.bot)
+        asyncio.run(runner())
+
+
+def make_legacy_app(token: str) -> LegacyApp:
+    return LegacyApp(create_bot(token))
