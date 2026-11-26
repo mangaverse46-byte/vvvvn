@@ -1797,7 +1797,7 @@ def _parse_telegram_post_link(value):
 
 async def build_main_keyboard(uid):
     rows = [
-        [InlineKeyboardButton("🔍 بحث عن مانجا", callback_data="main_search")],
+        [InlineKeyboardButton("🔎 اكتب اسم المانجا", callback_data="main_search")],
         [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
         [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
         [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
