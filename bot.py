@@ -1882,6 +1882,7 @@ app=make_legacy_app(BOT_TOKEN)
 
 async def _send_shared_manga_card(client, cid, info, caption, markup):
     """Send the shared manga cover when available, with URL and downloaded-file fallbacks."""
+    caption = translate_ui_text(cid, caption)
     cover = _extract_cover_url(info)
     if not cover:
         return await client.send_message(
@@ -2032,6 +2033,7 @@ def _account_keyboard(uid=None):
 async def _show_my_account(client,msg,uid,edit=False):
     if is_vip(uid): type_line="👑 عضو VIP — تحميل غير محدود"
     else: type_line=f"👤 عضو عادي\n📖 فردي: {int(get_daily_remaining(uid))}\n🧩 دمج: {int(get_merge_remaining(uid))}"
+    type_line = translate_ui_text(uid, type_line)
     joined=time.strftime("%Y-%m-%d",time.localtime(get_user_joined(uid)))
     try:
         u=await client.get_chat(uid); un=f"@{u.username}" if u.username else "—"
@@ -2087,14 +2089,7 @@ async def _show_vip_upgrade(client,msg):
     if cu2: rows.append([InlineKeyboardButton("👥 تواصل بديل",url=cu2)])
     rows.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
     await msg.reply_text(
-        f"👑 ترقية VIP\n\n"
-        f"✨ المميزات:\n"
-        f"├ ♾️ تحميل غير محدود\n"
-        f"├ ⭐ المفضلة\n"
-        f"├ 🧩 دمج غير محدود\n"
-        f"└ ⚡ أولوية في الدعم\n\n"
-        f"💰 أسبوعي / شهري / سنوي\n\n"
-        f"💬 تواصل:",
+        translate_ui_text(uid, f"👑 ترقية VIP\n\n✨ المميزات:\n├ ♾️ تحميل غير محدود\n├ ⭐ المفضلة\n├ 🧩 دمج غير محدود\n└ ⚡ أولوية في الدعم\n\n💰 أسبوعي / شهري / سنوي\n\n💬 تواصل:"),
         reply_markup=InlineKeyboardMarkup(rows))
 
 async def _show_vip_details(client,msg,uid):
@@ -2729,8 +2724,8 @@ async def unified_callback(client,callback):
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]
         ])
-        await msg.reply_text(txt, reply_markup=kb)
-        await callback.answer("🔗 الرابط جاهز — انسخه")
+        await msg.reply_text(translate_ui_text(uid, txt), reply_markup=kb)
+        await callback.answer(translate_ui_text(uid, "🔗 الرابط جاهز — انسخه"))
         return
 
     if data.startswith(("pg_","f_","l_")):
@@ -2858,7 +2853,7 @@ async def unified_callback(client,callback):
                 await timer_task
             if not buf:
                 refund_chapter(uid)
-                await lm.edit_text("❌ فشل التحميل")
+                await lm.edit_text(translate_ui_text(uid, "❌ فشل التحميل"))
                 return
             increment_download_count(uid)
             upload_started = time.perf_counter()
@@ -2877,7 +2872,7 @@ async def unified_callback(client,callback):
 
                 await lm.delete()
             except Exception as e:
-                await lm.edit_text(f"❌ {e}", parse_mode=None)
+                await lm.edit_text(translate_ui_text(uid, f"❌ {e}"), parse_mode=None)
             try:
                 buf.close()
             except Exception:
