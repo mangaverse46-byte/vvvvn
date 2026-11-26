@@ -635,8 +635,8 @@ _mtproto_client = None
 _mtproto_lock = asyncio.Lock()
 
 
-async def send_pdf_direct(chat_id, document, file_name, caption=""):
-    """Upload a PDF directly over MTProto using this bot's token (not Bot API)."""
+async def send_pdf_direct(chat_id, document, file_name, caption="", progress_message=None):
+    """Upload a PDF directly through MTProto and show throttled upload progress."""
     global _mtproto_client
     if not API_ID or not API_HASH:
         raise RuntimeError(
@@ -647,14 +647,48 @@ async def send_pdf_direct(chat_id, document, file_name, caption=""):
             _mtproto_client = TelegramClient(
                 "manga_virus_mtproto", API_ID, API_HASH,
                 connection_retries=5, retry_delay=2,
-                auto_reconnect=True,
+                auto_reconnect=True, receive_updates=False,
             )
         if not _mtproto_client.is_connected():
             await _mtproto_client.connect()
         if not await _mtproto_client.is_user_authorized():
             await _mtproto_client.start(bot_token=BOT_TOKEN)
+
     if hasattr(document, "seek"):
         document.seek(0)
+    try:
+        document.name = file_name
+    except Exception:
+        pass
+
+    loop = asyncio.get_running_loop()
+    last_update = [0.0]
+
+    async def update_progress(current, total):
+        if not progress_message or not total:
+            return
+        percent = min(100, int(current * 100 / total))
+        try:
+            await progress_message.edit_text(
+                f"📤 **جاري رفع PDF مباشرة عبر MTProto...**\\n"
+                f"📊 التقدم: `{percent}%`\\n"
+                f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
+            )
+        except Exception:
+            pass
+
+    def progress_callback(current, total):
+        if not progress_message or not total:
+            return
+        now = time.monotonic()
+        percent = min(100, int(current * 100 / total))
+        if percent < 5 or (percent < 100 and now - last_update[0] < 3):
+            return
+        last_update[0] = now
+        loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(update_progress(current, total))
+        )
+
     return await _mtproto_client.send_file(
         entity=int(chat_id),
         file=document,
@@ -662,6 +696,7 @@ async def send_pdf_direct(chat_id, document, file_name, caption=""):
         force_document=True,
         file_name=file_name,
         parse_mode=None,
+        progress_callback=progress_callback,
     )
 
 
@@ -2535,7 +2570,7 @@ async def unified_callback(client,callback):
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
-                await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text)
+                await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text, progress_message=lm)
                 upload_elapsed = time.perf_counter() - upload_started
 
                 await lm.delete()
@@ -3171,20 +3206,14 @@ async def handle_all_text(client,message):
                 await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
                     caption=f"🧩 ملف مدمج\n\n📚 {title}\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}")
                 increment_download_count(uid)
-            except TelegramEntityTooLarge:
+            except Exception as upload_error:
                 refund_merge(uid, count)
+                print(f"[MTProto upload] {type(upload_error).__name__}: {upload_error}", flush=True)
                 await lm.edit_text(
-                    "⚠️ **حجم ملف PDF أكبر من الحد الذي يسمح تيليجرام للبوت برفعه.**\n"
-                    "تم إرجاع رصيد الدمج إلى حسابك. أرسل نطاقاً أصغر من الفصول وحاول مرة أخرى."
-                )
-                return
-            except Exception:
-                refund_merge(uid, count)
-                await lm.edit_text(
-                    "❌ **تعذّر رفع ملف PDF إلى تيليجرام.**\n"
+                    "❌ **تعذّر رفع ملف PDF إلى تيليجرام.**\\n"
                     "تم إرجاع رصيد الدمج إلى حسابك؛ حاول مرة أخرى لاحقاً."
                 )
-                raise
+                return
             finally:
                 try: buf.close()
                 except Exception: pass
