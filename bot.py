@@ -437,7 +437,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
     connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
-    semaphore = asyncio.Semaphore(48)
+    semaphore = asyncio.Semaphore(8)
     downloaded = [None] * len(image_urls)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
