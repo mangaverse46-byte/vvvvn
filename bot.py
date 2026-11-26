@@ -806,6 +806,7 @@ DEFAULTS = {
     "vip_contact_second":None,"allow_parallel_downloads":False,
     "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
     "button_colors":{"success":"success","danger":"danger","primary":"primary"},
+    "app_message_link":None,"tutorial_video_url":None,
 }
 def load_settings():
     s = dict(DEFAULTS)
@@ -1777,15 +1778,36 @@ async def send_message_with_image(client,cid,text,key,markup=None):
         except: pass
     return await client.send_message(chat_id=cid,text=text,reply_markup=markup)
 
+def _parse_telegram_post_link(value):
+    """Return (chat_id, message_id) for a public or private Telegram post URL."""
+    value = str(value or "").strip()
+    match = re.fullmatch(
+        r"https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/(?:s/)?([A-Za-z0-9_]{5,})/(\\d+)/?",
+        value, re.IGNORECASE
+    )
+    if match:
+        return "@" + match.group(1), int(match.group(2))
+    match = re.fullmatch(
+        r"https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/c/(\\d+)/(\\d+)/?",
+        value, re.IGNORECASE
+    )
+    if match:
+        return int("-100" + match.group(1)), int(match.group(2))
+    return None
+
 async def build_main_keyboard(uid):
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("🔍 بحث عن مانجا", callback_data="main_search")],
         [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
         [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
         [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
         [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
-        [InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")],
-    ])
+    ]
+    if settings.get("app_message_link"):
+        rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
+    if settings.get("tutorial_video_url"):
+        rows.append([InlineKeyboardButton("🎬 آخر فيديو تعليمي", url=settings["tutorial_video_url"])])
+    return InlineKeyboardMarkup(rows)
 
 def _account_keyboard():
     return InlineKeyboardMarkup([
@@ -2009,6 +2031,7 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
         [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
+        [InlineKeyboardButton("🔗 روابط أزرار المستخدمين",callback_data="admin_links_section")],
         [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
         [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
         [InlineKeyboardButton("♻️ تصفير الفصول",callback_data="admin_reset_section")],
@@ -2162,16 +2185,19 @@ async def unified_callback(client,callback):
     if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
     if data == "send_app_message":
         await callback.answer()
+        post = _parse_telegram_post_link(settings.get("app_message_link"))
+        if not post:
+            await msg.reply_text("⚠️ رابط تطبيق البوت غير مضبوط حالياً.")
+            return
         try:
             await client.copy_message(
                 chat_id=cid,
-                from_chat_id="@MangaVirus2",
-                message_id=159,
+                from_chat_id=post[0],
+                message_id=post[1],
             )
         except Exception:
             await msg.reply_text(
-                "⚠️ تعذر إرسال التطبيق حالياً. تأكد أن البوت عضو في قناة @MangaVirus2 "
-                "وأن الرسالة رقم 159 متاحة."
+                "⚠️ تعذر إرسال منشور التطبيق. تأكد أن البوت يستطيع الوصول إلى القناة أو المجموعة التي تحتوي الرابط."
             )
         return
     if data!="check_sub":
@@ -2689,6 +2715,54 @@ async def unified_callback(client,callback):
             await callback.answer("🔒" if not current else "🔓", show_alert=True)
             try: await msg.edit_text("🛠️ لوحة التحكم الرئيسية", reply_markup=get_admin_panel_kb())
             except: pass
+            return
+        if data=="admin_links_section":
+            app_link = settings.get("app_message_link") or "غير مضاف"
+            video_link = settings.get("tutorial_video_url") or "غير مضاف"
+            await msg.edit_text(
+                f"🔗 إدارة روابط أزرار المستخدمين\\n\\n📲 رابط تطبيق البوت: {app_link}\\n\\n🎬 رابط آخر فيديو تعليمي: {video_link}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ إضافة/تعديل رابط التطبيق",callback_data="admin_set_app_link")],
+                    [InlineKeyboardButton("🗑️ حذف رابط التطبيق",callback_data="admin_del_app_link")],
+                    [InlineKeyboardButton("➕ إضافة/تعديل الفيديو التعليمي",callback_data="admin_set_tutorial_link")],
+                    [InlineKeyboardButton("🗑️ حذف رابط الفيديو",callback_data="admin_del_tutorial_link")],
+                    [InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")],
+                ])
+            )
+            await callback.answer("🔗")
+            return
+        if data=="admin_set_app_link":
+            user_data[uid]={"awaiting_app_message_link":True}
+            await msg.delete()
+            await client.send_message(cid,
+                "📲 أرسل رابط منشور تطبيق البوت من تيليجرام\\n"
+                "مثال: https://t.me/MangaVirus2/159\\n"
+                "سيتم نسخ محتوى المنشور للمستخدم عند ضغط الزر.\\n\\nللإلغاء أرسل /cancel"
+            )
+            await callback.answer("📲")
+            return
+        if data=="admin_set_tutorial_link":
+            user_data[uid]={"awaiting_tutorial_video_url":True}
+            await msg.delete()
+            await client.send_message(cid,
+                "🎬 أرسل رابط الفيديو التعليمي (YouTube أو Telegram أو أي رابط يبدأ بـ https://).\\n"
+                "سيظهر زر «آخر فيديو تعليمي» للمستخدمين بعد حفظ الرابط.\\n\\nللإلغاء أرسل /cancel"
+            )
+            await callback.answer("🎬")
+            return
+        if data=="admin_del_app_link":
+            settings["app_message_link"]=None
+            save_settings()
+            await msg.edit_text("🗑️ تم حذف رابط تطبيق البوت، واختفى الزر من القائمة الرئيسية.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع",callback_data="admin_links_section")]]))
+            await callback.answer("✅")
+            return
+        if data=="admin_del_tutorial_link":
+            settings["tutorial_video_url"]=None
+            save_settings()
+            await msg.edit_text("🗑️ تم حذف رابط الفيديو التعليمي، واختفى الزر من القائمة الرئيسية.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع",callback_data="admin_links_section")]]))
+            await callback.answer("✅")
             return
         if data=="admin_gift_links":
             links=get_all_gift_links()
@@ -3355,6 +3429,34 @@ async def handle_all_text(client,message):
         await message.reply_text(f"✅ كل {h} ساعة", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
 
     if not is_admin_any(uid): return
+
+    if user_data.get(uid,{}).get("awaiting_app_message_link"):
+        link = message.text.strip()
+        if not _parse_telegram_post_link(link):
+            await message.reply_text(
+                "⚠️ الرابط غير صحيح. أرسل رابط منشور تيليجرام مثل:\\n"
+                "https://t.me/MangaVirus2/159 أو https://t.me/c/123456789/159"
+            )
+            return
+        settings["app_message_link"] = link
+        save_settings()
+        user_data.pop(uid, None)
+        await message.reply_text(
+            "✅ تم حفظ رابط تطبيق البوت. سيظهر زر «📲 تطبيق بوت» في القائمة الرئيسية."
+        )
+        return
+    if user_data.get(uid,{}).get("awaiting_tutorial_video_url"):
+        link = message.text.strip()
+        if not re.match(r"^https?://\\S+$", link, re.IGNORECASE):
+            await message.reply_text("⚠️ أرسل رابطاً صحيحاً يبدأ بـ https:// أو http://.")
+            return
+        settings["tutorial_video_url"] = link
+        save_settings()
+        user_data.pop(uid, None)
+        await message.reply_text(
+            "✅ تم حفظ رابط الفيديو التعليمي. سيظهر زر «🎬 آخر فيديو تعليمي» في القائمة الرئيسية."
+        )
+        return
 
     if user_data.get(uid,{}).get("awaiting_merge_limit"):
         try:
