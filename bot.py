@@ -656,9 +656,10 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
         percent = min(100, int(current * 100 / total))
         try:
             await progress_message.edit_text(
-                f"📤 **يتم رفع PDF إلى تيليجرام...**\n\n"
-                f"⚡ نسبة الإنجاز: `{percent}%`\n"
-                f"📦 المرفوع: `{current / (1024 * 1024):.1f} MB` من `{total / (1024 * 1024):.1f} MB`"
+                f"📤 يتم رفع PDF إلى تيليجرام...\n\n"
+                f"⚡ نسبة الإنجاز: {percent}%\n"
+                f"📦 المرفوع: {current / (1024 * 1024):.1f} MB من {total / (1024 * 1024):.1f} MB",
+                parse_mode=None,
             )
         except Exception:
             pass
@@ -2588,9 +2589,10 @@ async def unified_callback(client,callback):
             increment_download_count(uid)
             upload_started = time.perf_counter()
             await lm.edit_text(
-                "📤 **يتم إرسال الملف إلى تيليجرام...**\n\n"
-                "⚡ نسبة الإنجاز: `0%`\n"
-                f"📦 الحجم المرسل: `0.0 MB` من `{buf.getbuffer().nbytes / (1024 * 1024):.1f} MB`"
+                "📤 يتم إرسال الملف إلى تيليجرام...\n\n"
+                "⚡ نسبة الإنجاز: 0%\n"
+                f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB",
+                parse_mode=None,
             )
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
@@ -2601,7 +2603,7 @@ async def unified_callback(client,callback):
 
                 await lm.delete()
             except Exception as e:
-                await lm.edit_text(f"❌ {e}")
+                await lm.edit_text(f"❌ {e}", parse_mode=None)
             try:
                 buf.close()
             except Exception:
