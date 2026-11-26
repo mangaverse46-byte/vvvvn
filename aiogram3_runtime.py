@@ -63,7 +63,7 @@ def make_inline_keyboard(rows: Iterable[Iterable[Any]]) -> AioInlineKeyboardMark
             if not label:
                 raise TypeError("Keyboard button must have a non-empty text")
             kwargs: dict[str, Any] = {"text": str(label)}
-            for field in ("url", "callback_data", "web_app", "login_url",
+            for field in ("style", "url", "callback_data", "web_app", "login_url",
                           "switch_inline_query", "switch_inline_query_current_chat",
                           "callback_game", "pay"):
                 value = getattr(button, field, None)
