@@ -16,6 +16,7 @@ InlineKeyboardMarkup = make_inline_keyboard
 BUTTON_CATALOG = {}
 BUTTON_COLOR_MODE = {}
 BUTTON_COLOR_PENDING = {}
+BUTTON_COLOR_CONTEXT = {}
 
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
@@ -2162,6 +2163,7 @@ async def unified_callback(client,callback):
         if data == "admin_color_mode_exit":
             BUTTON_COLOR_MODE.pop(uid, None)
             BUTTON_COLOR_PENDING.pop(uid, None)
+            BUTTON_COLOR_CONTEXT.pop(uid, None)
             await callback.answer("تم إيقاف وضع تغيير الألوان", show_alert=True)
             try:
                 await msg.answer("🎨 تم إيقاف وضع تغيير الألوان.")
@@ -2171,10 +2173,17 @@ async def unified_callback(client,callback):
 
         if data == "admin_live_color_execute":
             original_callback = BUTTON_COLOR_PENDING.pop(uid, None)
-            if not original_callback:
+            original_context = BUTTON_COLOR_CONTEXT.pop(uid, None)
+            if not original_callback or not original_context:
                 await callback.answer("حدد الزر الأصلي أولاً", show_alert=True)
                 return
             data = original_callback
+            msg = original_context.get("message")
+            cid = original_context.get("chat_id", cid)
+            if msg is None:
+                await callback.answer("تعذر استعادة الرسالة الأصلية، اضغط الزر من جديد", show_alert=True)
+                BUTTON_COLOR_MODE[uid] = "__waiting__"
+                return
             BUTTON_COLOR_MODE[uid] = "__waiting__"
             execute_original = True
 
@@ -2231,6 +2240,7 @@ async def unified_callback(client,callback):
             target_key = f"{data}::{label}"
             BUTTON_COLOR_MODE[uid] = target_key
             BUTTON_COLOR_PENDING[uid] = data
+            BUTTON_COLOR_CONTEXT[uid] = {"message": msg, "chat_id": cid}
             await callback.answer("اختر لون الزر أو نفّذ الأمر الأصلي")
             try:
                 await msg.answer(
@@ -2245,6 +2255,7 @@ async def unified_callback(client,callback):
             except Exception:
                 BUTTON_COLOR_MODE[uid] = "__waiting__"
                 BUTTON_COLOR_PENDING.pop(uid, None)
+                BUTTON_COLOR_CONTEXT.pop(uid, None)
             return
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
