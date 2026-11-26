@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
+"""🤖 بوت مانجا — SQLite + Ovid PDF + روابط هدايا + مشاركة (نهائي)"""
 
 import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib
 import asyncio, aiohttp
@@ -420,9 +420,8 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download image URLs as-is and put the original bytes into one PDF."""
+    """Download original image bytes and assemble the PDF with Ovid only."""
     import aiohttp
-    import img2pdf
 
     if urls and isinstance(urls[0], (list, tuple)):
         image_urls = [url for group in urls for url in group if url]
@@ -430,6 +429,10 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         image_urls = [url for url in (urls or []) if url]
     if not image_urls:
         return None
+
+    ovid = shutil.which("ovid")
+    if not ovid:
+        raise RuntimeError("محرك Ovid غير مثبت أو غير موجود في PATH")
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
@@ -467,53 +470,35 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
-    # No image validation, resizing, recompression or cover insertion.
-    pages = [blob for blob in downloaded if blob]
-    if not pages:
+    # Keep original image bytes and their original order; no conversion or compression.
+    if not any(downloaded):
         return None
 
-    result = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="mangavirus_pdf_") as temp_dir:
+            image_paths = []
+            for index, (url, blob) in enumerate(zip(image_urls, downloaded)):
+                if not blob:
+                    continue
+                suffix = os.path.splitext(urllib.parse.urlsplit(url).path)[1].lower()
+                if suffix not in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif"):
+                    suffix = ".img"
+                image_path = os.path.join(temp_dir, f"{index:06d}{suffix}")
+                with open(image_path, "wb") as image_file:
+                    image_file.write(blob)
+                image_paths.append(image_path)
 
-    # Try the native Rust Ovid engine first. It works on temporary files only;
-    # original downloaded bytes are written unchanged and the temp folder is removed.
-    ovid = shutil.which("ovid")
-    if ovid:
-        try:
-            with tempfile.TemporaryDirectory(prefix="mangavirus_pdf_") as temp_dir:
-                image_paths = []
-                for index, (url, blob) in enumerate(zip(image_urls, downloaded)):
-                    if not blob:
-                        continue
-                    suffix = os.path.splitext(urllib.parse.urlsplit(url).path)[1].lower()
-                    if suffix not in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif"):
-                        suffix = ".img"
-                    image_path = os.path.join(temp_dir, f"{index:06d}{suffix}")
-                    with open(image_path, "wb") as image_file:
-                        image_file.write(blob)
-                    image_paths.append(image_path)
+            output_path = os.path.join(temp_dir, "manga.pdf")
+            subprocess.run(
+                [ovid, "merge", *image_paths, "-o", output_path, "-q"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            with open(output_path, "rb") as pdf_file:
+                result = pdf_file.read()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"فشل إنشاء PDF بواسطة Ovid: {exc}") from exc
 
-                output_path = os.path.join(temp_dir, "manga.pdf")
-                subprocess.run(
-                    [ovid, "merge", *image_paths, "-o", output_path, "-q"],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                    timeout=120,
-                )
-                with open(output_path, "rb") as pdf_file:
-                    result = pdf_file.read()
-        except (OSError, subprocess.SubprocessError):
-            result = None
-
-    # Keep img2pdf as a compatibility fallback for formats Ovid cannot merge.
-    if not result:
-        result = img2pdf.convert(
-            *(BytesIO(blob) for blob in pages),
-            title="Manga Virus", author="Manga Virus Bot",
-            creator="Manga Virus", producer="Manga Virus PDF Engine",
-            subject="MANGA_VIRUS_ORIGINAL_V1",
-            keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
-        )
-
-    pages.clear()
     downloaded.clear()
     buf = BytesIO(result)
     result = None
@@ -582,7 +567,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["aiogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
+for pkg in ["aiogram","aiohttp","cloudscraper","python-dotenv"]:
     ensure_installed(pkg)
 
 from dotenv import load_dotenv
