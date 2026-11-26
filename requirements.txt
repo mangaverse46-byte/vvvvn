@@ -5,3 +5,4 @@ aiohttp>=3.9,<4
 cloudscraper>=1.2,<2
 python-dotenv>=1,<2
 telethon>=1.42,<2
+img2pdf>=0.5,<1
