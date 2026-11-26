@@ -3220,11 +3220,52 @@ async def handle_all_text(client,message):
                 refund_merge(uid,count)
                 await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
                 return
-            await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n📥 جارٍ تنزيل `{total_images}` صورة بالتوازي وتجهيز ملف PDF...")
-            # One shared HTTP session; all chapter image requests run concurrently.
-            buf = await download_images_parallel(chapter_groups,client=client)
-            if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
-            await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
+            merge_timer_stop = asyncio.Event()
+            merge_bar_frames = [
+                "▰▱▱▱▱▱▱▱▱▱",
+                "▰▰▱▱▱▱▱▱▱▱",
+                "▰▰▰▱▱▱▱▱▱",
+                "▰▰▰▰▱▱▱▱▱▱",
+                "▰▰▰▰▰▱▱▱▱▱",
+                "▰▰▰▰▰▰▱▱▱▱",
+                "▰▰▰▰▰▰▰▱▱▱",
+                "▰▰▰▰▰▰▰▰▱▱",
+                "▰▰▰▰▰▰▰▰▰▱",
+                "▰▰▰▰▰▰▰▰▰▰",
+            ]
+
+            async def merge_loading_bar():
+                frame = 0
+                while not merge_timer_stop.is_set():
+                    try:
+                        await lm.edit_text(
+                            f"🧩 **جاري تجهيز ملف الفصول المدمجة...**\n\n"
+                            f"`{merge_bar_frames[frame % len(merge_bar_frames)]}`"
+                        )
+                    except Exception:
+                        pass
+                    frame += 1
+                    try:
+                        await asyncio.wait_for(merge_timer_stop.wait(), timeout=0.8)
+                    except asyncio.TimeoutError:
+                        pass
+
+            merge_bar_task = asyncio.create_task(merge_loading_bar())
+            try:
+                # One shared HTTP session; all chapter image requests run concurrently.
+                buf = await download_images_parallel(chapter_groups,client=client)
+            finally:
+                merge_timer_stop.set()
+                await merge_bar_task
+            if not buf:
+                refund_merge(uid, count)
+                await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك.")
+                return
+            await lm.edit_text(
+                "📤 **يتم إرسال الملف إلى تيليجرام...**\n\n"
+                "⚡ نسبة الإنجاز: `0%`\n"
+                f"📦 الحجم المرسل: `0.0 MB` من `{buf.getbuffer().nbytes / (1024 * 1024):.1f} MB`"
+            )
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
                 await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
