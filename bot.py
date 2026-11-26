@@ -1820,7 +1820,7 @@ async def build_main_keyboard(uid):
             [InlineKeyboardButton("🏷️ Categories", callback_data="main_categories"), InlineKeyboardButton("❓ Help", callback_data="help_full")],
             [InlineKeyboardButton("⭐ My Favorites", callback_data="fav_list")],
             [InlineKeyboardButton("📩 Submit a Complaint", callback_data="complaint_start")],
-            [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
+            [InlineKeyboardButton("🌐", callback_data="change_language")],
         ]
         if settings.get("app_message_link"):
             rows.append([InlineKeyboardButton("📲 Bot App", callback_data="send_app_message")])
@@ -1833,7 +1833,7 @@ async def build_main_keyboard(uid):
             [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
             [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
             [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
-            [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
+            [InlineKeyboardButton("🌐", callback_data="change_language")],
         ]
         if settings.get("app_message_link"):
             rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
