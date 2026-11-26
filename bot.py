@@ -525,7 +525,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             result = img2pdf.convert(image_paths)
 
         # MangaBDF reader marker: harmless PDF comment for app recognition.
-        marker = b"\n%MANGA_VIRUS_ORIGINAL_V1\n"
+        marker = b"\\n%MANGA_VIRUS_ORIGINAL_V1\\n"
         eof = result.rfind(b"%%EOF")
         if eof >= 0:
             result = result[:eof] + marker + result[eof:]
@@ -669,7 +669,7 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
             return
         now = time.monotonic()
         percent = min(100, int(current * 100 / total))
-        if percent < 3 or (percent < 100 and now - last_update[0] < 2):
+        if percent < 5 or (percent < 100 and now - last_update[0] < 3):
             return
         last_update[0] = now
         loop.call_soon_threadsafe(
