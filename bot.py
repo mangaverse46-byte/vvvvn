@@ -3381,7 +3381,7 @@ async def handle_images(client,message):
              'awaiting_sources_image':('sources_image','مصادر'),'awaiting_sub_image':('force_sub_image','اشتراك')}
     for key,(field,label) in mapping.items():
         if user_data.get(uid,{}).get(key):
-            settings[field]=message.photo.file_id; save_settings(); user_data.pop(uid,None)
+            settings[field]=message.photo[-1].file_id; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ {label}"); return
 
 @app.on_message(filters.document & filters.private)
