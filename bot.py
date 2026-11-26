@@ -2104,9 +2104,12 @@ async def search_cmd(client,message):
     except Exception as e:
         await message.reply_text(f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}"); return
     rows = []
-    for source in sources:
+    source_styles = ("primary", "success", "danger")
+    for index, source in enumerate(sources):
         sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
-        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}")])
+        # Cycle through Telegram's three supported button colors so adjacent sources differ.
+        style = source_styles[index % len(source_styles)]
+        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}", style=style)])
     rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text("❌ لا توجد مصادر مفعلة داخل المحرك."); return
@@ -2224,11 +2227,14 @@ async def unified_callback(client,callback):
             await safe_edit(msg,"❌ تعذر تحميل قائمة المصادر")
             return
         kb=[]
-        for source in sources:
+        source_styles = ("primary", "success", "danger")
+        for index, source in enumerate(sources):
             sid=str(source.get("id") or "")
             if not sid: continue
             name=str(source.get("name") or sid)
-            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}")])
+            # Give each source its own position-based color; colors repeat after three.
+            style = source_styles[index % len(source_styles)]
+            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}",style=style)])
         kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
