@@ -523,6 +523,14 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
             import img2pdf
             result = img2pdf.convert(image_paths)
+
+        # MangaBDF reader marker: harmless PDF comment for app recognition.
+        marker = b"\\n%MANGA_VIRUS_ORIGINAL_V1\\n"
+        eof = result.rfind(b"%%EOF")
+        if eof >= 0:
+            result = result[:eof] + marker + result[eof:]
+        else:
+            result += marker
     except Exception as exc:
         raise RuntimeError(f"فشل إنشاء PDF بواسطة img2pdf: {exc}") from exc
 
