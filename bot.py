@@ -873,7 +873,6 @@ def translate_ui_text(uid, value):
         "📤 يتم إرسال الملف إلى تيليجرام...": "📤 Sending the file to Telegram...",
         "⚡ نسبة الإنجاز:": "⚡ Progress:",
         "📦 الحجم المرسل:": "📦 Uploaded size:",
-        "من": "of",
         "💎 VIP": "💎 VIP",
         "أسبوعي / شهري / سنوي": "Weekly / Monthly / Yearly",
         "✨ المميزات:": "✨ Benefits:",
