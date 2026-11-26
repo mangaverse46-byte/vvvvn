@@ -65,14 +65,9 @@ def InlineKeyboardButton(text, *args, **kwargs):
             kwargs.setdefault("url", args[1])
     if "style" not in kwargs and callback:
         custom = settings.get("button_styles", {}) if isinstance(globals().get("settings"), dict) else {}
-        # Buttons with the same visible label share one global color.
-        label_group = re.sub(r"[^\\w\\s]", " ", label, flags=re.UNICODE)
-        label_group = " ".join(label_group.split()).casefold()
-        group_key = f"__label__::{label_group}"
+        # Store the color for this exact callback + visible label only.
         style_key = f"{callback}::{label}"
-        if group_key in custom:
-            kwargs["style"] = custom[group_key]
-        elif style_key in custom:
+        if style_key in custom:
             kwargs["style"] = custom[style_key]
         elif callback in custom:
             # Backward compatibility with colors saved by older versions.
@@ -2224,6 +2219,8 @@ async def unified_callback(client,callback):
                 styles.pop(legacy_callback, None)
             else:
                 styles[target] = color
+            # Remove obsolete label-wide styles from the previous version.
+            styles = {k: v for k, v in styles.items() if not str(k).startswith("__label__::")}
             settings["button_styles"] = styles
             save_settings()
             BUTTON_COLOR_MODE[uid] = "__waiting__"
@@ -2255,9 +2252,8 @@ async def unified_callback(client,callback):
                             break
             except Exception:
                 pass
-            label_group = re.sub(r"[^\\w\\s]", " ", label, flags=re.UNICODE)
-            label_group = " ".join(label_group.split()).casefold()
-            target_key = f"__label__::{label_group}"
+            # The selected button is identified by its callback and exact visible text.
+            target_key = f"{data}::{label}"
             BUTTON_COLOR_MODE[uid] = target_key
             BUTTON_COLOR_PENDING[uid] = data
             BUTTON_COLOR_CONTEXT[uid] = {
