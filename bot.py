@@ -1784,6 +1784,7 @@ async def build_main_keyboard(uid):
         [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
         [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
         [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
+        [InlineKeyboardButton("📲 تطبيق بوت", url="https://t.me/MangaVirus2/159")],
     ])
 
 def _account_keyboard():
