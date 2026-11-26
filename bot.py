@@ -676,20 +676,14 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
             lambda: asyncio.create_task(update_progress(current, total))
         )
 
-    # Telethon's installed version does not support a workers argument.
-    # Use its native upload implementation and then send the uploaded handle.
-    uploaded_file = await _mtproto_client.upload_file(
-        document,
-        file_name=file_name,
-        progress_callback=progress_callback,
-    )
     return await _mtproto_client.send_file(
         entity=int(chat_id),
-        file=uploaded_file,
+        file=document,
         caption=caption,
         force_document=True,
         file_name=file_name,
         parse_mode=None,
+        progress_callback=progress_callback,
     )
 
 
