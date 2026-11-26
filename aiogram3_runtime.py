@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     InlineKeyboardButton as AioInlineKeyboardButton,
     InlineKeyboardMarkup as AioInlineKeyboardMarkup,
@@ -21,6 +22,23 @@ from aiogram.types import (
     URLInputFile,
     LinkPreviewOptions,
 )
+
+
+def _is_entity_parse_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "can't parse entities" in message or "cannot parse entities" in message
+
+
+async def _call_with_plain_text_fallback(method: Any, *args: Any, **kwargs: Any) -> Any:
+    """Retry only Telegram entity-formatting failures without parse mode."""
+    try:
+        return await method(*args, **kwargs)
+    except TelegramBadRequest as error:
+        if not _is_entity_parse_error(error):
+            raise
+        plain_kwargs = dict(kwargs)
+        plain_kwargs["parse_mode"] = None
+        return await method(*args, **plain_kwargs)
 
 
 def create_bot(token: str) -> Bot:
@@ -79,15 +97,22 @@ class MessageCompat:
         self._bot, self._message = bot, message
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._message, name)
+        attribute = getattr(self._message, name)
+        if name == "edit_text" and callable(attribute):
+            async def safe_edit_text(*args: Any, **kwargs: Any) -> Any:
+                return await _call_with_plain_text_fallback(attribute, *args, **kwargs)
+            return safe_edit_text
+        return attribute
 
     async def reply_text(self, text: str, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
-        return await self._message.answer(text, *args, **kwargs)
+        return await _call_with_plain_text_fallback(self._message.answer, text, *args, **kwargs)
 
     async def reply_photo(self, photo: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
-        return await self._message.answer_photo(as_input_file(photo), *args, **kwargs)
+        return await _call_with_plain_text_fallback(
+            self._message.answer_photo, as_input_file(photo), *args, **kwargs
+        )
 
     async def download(self, destination: str | None = None) -> str:
         media = self._message.document
@@ -128,17 +153,25 @@ class BotClientCompat:
         kwargs.pop("parse_mode", None)
         if kwargs.pop("disable_web_page_preview", False):
             kwargs.setdefault("link_preview_options", LinkPreviewOptions(is_disabled=True))
-        return await self.bot.send_message(chat_id=chat_id, text=text, *args, **kwargs)
+        return await _call_with_plain_text_fallback(
+            self.bot.send_message, chat_id=chat_id, text=text, *args, **kwargs
+        )
 
     async def send_photo(self, chat_id: Any, photo: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
-        return await self.bot.send_photo(chat_id=chat_id, photo=as_input_file(photo), *args, **kwargs)
+        return await _call_with_plain_text_fallback(
+            self.bot.send_photo, chat_id=chat_id, photo=as_input_file(photo), *args, **kwargs
+        )
 
     async def send_document(self, chat_id: Any, document: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
         filename = kwargs.pop("file_name", None)
-        return await self.bot.send_document(
-            chat_id=chat_id, document=as_input_file(document, filename=filename), *args, **kwargs
+        return await _call_with_plain_text_fallback(
+            self.bot.send_document,
+            chat_id=chat_id,
+            document=as_input_file(document, filename=filename),
+            *args,
+            **kwargs,
         )
 
     async def get_chat_member(self, chat_id: Any, user_id: int) -> Any:
