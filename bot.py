@@ -2268,7 +2268,7 @@ async def unified_callback(client,callback):
             return
         if not selected:
             await safe_edit_fresh_text(client,msg,cid,"❌ لا توجد مانجا حديثة في هذا المصدر",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")],
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list",style="danger")],
                                       [InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")]]))
             return
         kb=[]
