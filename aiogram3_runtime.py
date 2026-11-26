@@ -213,7 +213,7 @@ class LegacyApp:
         self.is_connected = False
 
     def on_message(self, legacy_filter: LegacyFilter | None = None):
-        async def decorator(handler: Callable[..., Any]):
+        def decorator(handler: Callable[..., Any]):
             async def wrapped(message: Any):
                 return await handler(self.client, MessageCompat(self.bot, message))
             self.router.message(LegacyPredicateFilter((legacy_filter or LegacyFilter(lambda _: True)).predicate))(wrapped)
@@ -221,7 +221,7 @@ class LegacyApp:
         return decorator
 
     def on_callback_query(self):
-        async def decorator(handler: Callable[..., Any]):
+        def decorator(handler: Callable[..., Any]):
             async def wrapped(callback: Any):
                 return await handler(self.client, CallbackCompat(self.bot, callback))
             self.router.callback_query()(wrapped)
