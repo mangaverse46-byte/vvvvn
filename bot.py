@@ -2211,6 +2211,8 @@ async def unified_callback(client,callback):
             settings["button_styles"] = styles
             save_settings()
             BUTTON_COLOR_MODE[uid] = "__waiting__"
+            BUTTON_COLOR_PENDING.pop(uid, None)
+            BUTTON_COLOR_CONTEXT.pop(uid, None)
             await callback.answer("✅ تم حفظ لون الزر", show_alert=True)
             try:
                 await msg.edit_text(
