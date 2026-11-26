@@ -161,11 +161,34 @@ class BotClientCompat:
             await self.bot.delete_message(chat_id=chat_id, message_id=int(message_id))
 
     async def download_media(self, file_id: str, in_memory: bool = False) -> Any:
+        """Download a Telegram file, returning BytesIO in memory or a local path."""
         info = await self.bot.get_file(file_id)
         if not info.file_path:
             raise RuntimeError("Telegram did not return a file path")
-        target = io.BytesIO() if in_memory else None
-        return await self.bot.download_file(info.file_path, destination=target)
+
+        if in_memory:
+            target = io.BytesIO()
+            downloaded = await self.bot.download_file(info.file_path, destination=target)
+            result = downloaded if downloaded is not None else target
+            if hasattr(result, "seek"):
+                result.seek(0)
+            return result
+
+        import tempfile
+        fd, destination = tempfile.mkstemp(
+            prefix="manga_telegram_",
+            suffix=os.path.splitext(info.file_path)[1] or ".bin",
+        )
+        os.close(fd)
+        try:
+            await self.bot.download_file(info.file_path, destination=destination)
+            return destination
+        except Exception:
+            try:
+                os.remove(destination)
+            except OSError:
+                pass
+            raise
 
 
 class LegacyPredicateFilter(BaseFilter):
