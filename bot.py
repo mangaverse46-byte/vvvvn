@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
-import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib
+import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib, html
 import asyncio, aiohttp
 import zipfile, threading, tempfile, shutil
 from datetime import datetime
@@ -2114,15 +2114,21 @@ async def download_image_bytesio(url,referer=None):
     except: pass
     return None
 
+def format_manga_bio(description):
+    """Render the source-provided manga bio as a Telegram blockquote."""
+    description = str(description or "").strip()
+    return f"<blockquote>{html.escape(description)}</blockquote>" if description else ""
+
+
 async def send_cover_message(msg,cover,text,markup,referer=None):
     text = translate_ui_text(msg.chat.id, text)
     if cover:
         for rf in [referer,None]:
             try:
                 cb=await download_image_bytesio(cover,referer=rf)
-                if cb: return await msg.reply_photo(photo=cb,caption=text,reply_markup=markup)
+                if cb: return await msg.reply_photo(photo=cb,caption=text,reply_markup=markup,parse_mode="HTML")
             except: pass
-    return await msg.reply_text(text,reply_markup=markup)
+    return await msg.reply_text(text,reply_markup=markup,parse_mode="HTML")
 
 async def safe_edit_fresh_text(client, msg, chat_id, text, markup=None):
     """Show a text-only screen; never leave an old manga cover behind a list."""
@@ -2224,14 +2230,14 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
     cover = _extract_cover_url(info)
     if not cover:
         return await client.send_message(
-            cid, caption, reply_markup=markup
+            cid, caption, reply_markup=markup, parse_mode="HTML"
         )
     cover = urljoin(str(info.get("url") or ""), cover)
     # First let Telegram fetch the image directly; this is fastest for public image URLs.
     try:
         return await client.send_photo(
             chat_id=cid, photo=cover, caption=caption,
-            reply_markup=markup
+            reply_markup=markup, parse_mode="HTML"
         )
     except Exception as direct_error:
         pass
@@ -2257,7 +2263,7 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
                         photo.seek(0)
                         return await client.send_photo(
                             chat_id=cid, photo=photo, caption=caption,
-                            reply_markup=markup
+                            reply_markup=markup, parse_mode="HTML"
                         )
                 else:
                     pass
@@ -2265,7 +2271,7 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
         pass
     # Keep the manga usable even if its source has no accessible cover.
     return await client.send_message(
-        cid, caption, reply_markup=markup
+        cid, caption, reply_markup=markup, parse_mode="HTML"
     )
 
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
@@ -2297,7 +2303,8 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         user_data[uid] = {"chapters": chapters, "title": title, "identifier": info.get("id") or manga_url,
             "page": 0, "source": src, "create_pdf_func": pdf, "manga_url": manga_url,
             "cover_url": cover_url, "genres": info.get("genres", []), "kind": info.get("kind", "")}
-        cap = f"{title}\n\n{(info.get('description') or '')[:300]}\n\n📖 {len(chapters)} فصل"
+        bio = format_manga_bio((info.get("description") or "")[:300])
+        cap = f"{title}\n\n{bio}\n\n📖 {len(chapters)} فصل"
         user_data[uid]["base_caption"] = cap
         markup,_,_ = create_chapters_markup(chapters, 0, user_data[uid]["identifier"], src, uid)
         await _send_shared_manga_card(client, cid, info, cap, markup)
@@ -3011,7 +3018,7 @@ async def unified_callback(client,callback):
             parts=[f"{title}"]
             if kind: parts.append(f"📚 {kind}")
             if genres: parts.append("🏷️ " + " | ".join(map(str,genres[:8])))
-            if description: parts.extend(["",description])
+            if description: parts.extend(["",format_manga_bio(description)])
             parts.extend(["",f"📖 {len(chs)} فصل"])
             if chs:
                 latest=chs[-1]
