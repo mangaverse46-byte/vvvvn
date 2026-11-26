@@ -17,15 +17,17 @@ InlineKeyboardMarkup = make_inline_keyboard
 def InlineKeyboardButton(text, *args, **kwargs):
     label = str(text).strip()
     callback = str(kwargs.get("callback_data") or "")
-    # Telegram's native inline-button colors: green, red, and blue.
+    # Color is configurable from the admin panel and persisted in SQLite.
     if "style" not in kwargs:
         action = callback.casefold()
+        colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
         if any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
-            kwargs["style"] = "danger"
+            group = "danger"
         elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
-            kwargs["style"] = "success"
+            group = "success"
         else:
-            kwargs["style"] = "primary"
+            group = "primary"
+        kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
     # Give icon-only controls an action word so buttons are never emoji-only.
     if label in ("🔙", "⬅️", "➡️", "❌", "✅", "📋", "🔄", "⚙️", "🖼️", "📭"):
         label = {"🔙":"⬅️ رجوع", "⬅️":"⬅️ السابق", "➡️":"➡️ التالي", "❌":"❌ إغلاق",
@@ -768,6 +770,7 @@ DEFAULTS = {
     "single_caption":"**[ Ch {chapter} ] {title}**\n@T7T0K_bot",
     "vip_contact_second":None,"allow_parallel_downloads":False,
     "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
+    "button_colors":{"success":"success","danger":"danger","primary":"primary"},
 }
 def load_settings():
     s = dict(DEFAULTS)
@@ -1970,6 +1973,7 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("🖼️ الصور",callback_data="admin_images_section"), InlineKeyboardButton("📝 الرسائل",callback_data="admin_messages_section")],
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
+        [InlineKeyboardButton("🎨 ألوان الأزرار",callback_data="admin_button_colors")],
         [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
         [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
         [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
@@ -2627,6 +2631,55 @@ async def unified_callback(client,callback):
 
     # ============ ADMIN ============
     if is_admin_any(uid):
+        if data == "admin_button_colors":
+            colors = settings.get("button_colors", {})
+            def color_name(value):
+                return {"success":"🟢 أخضر","danger":"🔴 أحمر","primary":"🔵 أزرق"}.get(value, "🔵 أزرق")
+            text = (
+                "🎨 **التحكم بألوان الأزرار**\\n\\n"
+                f"🟢 أزرار الإجراءات: {color_name(colors.get('success','success'))}\\n"
+                f"🔴 أزرار الحذف والإغلاق: {color_name(colors.get('danger','danger'))}\\n"
+                f"🔵 الأزرار العامة: {color_name(colors.get('primary','primary'))}\\n\\n"
+                "اختر اللون الذي تريد تطبيقه لكل مجموعة:"
+            )
+            rows = []
+            for group, title in (("success","🟢 الإجراءات"),("danger","🔴 الحذف والإغلاق"),("primary","🔵 العامة")):
+                rows.append([
+                    InlineKeyboardButton(f"{title} — أخضر", callback_data=f"admin_color_{group}_success"),
+                    InlineKeyboardButton("أحمر", callback_data=f"admin_color_{group}_danger"),
+                    InlineKeyboardButton("أزرق", callback_data=f"admin_color_{group}_primary"),
+                ])
+            rows.append([InlineKeyboardButton("♻️ استعادة الافتراضي",callback_data="admin_color_reset")])
+            rows.append([InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"),InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+            await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN)
+            await callback.answer("🎨")
+            return
+        if data.startswith("admin_color_") and data != "admin_color_reset":
+            parts = data.split("_")
+            if len(parts) == 4 and parts[2] in ("success","danger","primary") and parts[3] in ("success","danger","primary"):
+                colors = dict(settings.get("button_colors", {}))
+                colors[parts[2]] = parts[3]
+                settings["button_colors"] = colors
+                save_settings()
+                await callback.answer("✅ تم حفظ اللون", show_alert=True)
+                await unified_callback(client, callback) if False else None
+                colors = settings.get("button_colors", {})
+                names = {"success":"🟢 أخضر","danger":"🔴 أحمر","primary":"🔵 أزرق"}
+                txt = ("🎨 **التحكم بألوان الأزرار**\\n\\n"
+                       f"🟢 أزرار الإجراءات: {names.get(colors.get('success','success'))}\\n"
+                       f"🔴 أزرار الحذف والإغلاق: {names.get(colors.get('danger','danger'))}\\n"
+                       f"🔵 الأزرار العامة: {names.get(colors.get('primary','primary'))}\\n\\nاختر اللون الذي تريد تطبيقه لكل مجموعة:")
+                rows = []
+                for group, title in (("success","🟢 الإجراءات"),("danger","🔴 الحذف والإغلاق"),("primary","🔵 العامة")):
+                    rows.append([InlineKeyboardButton(f"{title} — أخضر",callback_data=f"admin_color_{group}_success"),InlineKeyboardButton("أحمر",callback_data=f"admin_color_{group}_danger"),InlineKeyboardButton("أزرق",callback_data=f"admin_color_{group}_primary")])
+                rows += [[InlineKeyboardButton("♻️ استعادة الافتراضي",callback_data="admin_color_reset")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"),InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]
+                await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.MARKDOWN)
+                return
+        if data == "admin_color_reset":
+            settings["button_colors"] = dict(DEFAULTS["button_colors"])
+            save_settings()
+            await callback.answer("♻️ تمت استعادة الألوان", show_alert=True)
+            return
         if data == "admin_toggle_maintenance":
             current = settings.get("maintenance_mode", False); settings["maintenance_mode"] = not current; save_settings()
             await callback.answer("🔒" if not current else "🔓", show_alert=True)
