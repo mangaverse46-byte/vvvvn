@@ -1812,14 +1812,15 @@ def get_manga_share(code):
 
 def create_fav_list_markup(uid):
     favs=get_favorites(uid); n=is_notifications_enabled(uid)
-    tt="🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة"
+    en = get_user_language(uid) == "en"
+    tt=("🔔 Notifications enabled" if n else "🔕 Notifications disabled") if en else ("🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة")
     if not favs:
-        return InlineKeyboardMarkup([[InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),"مفعلة" if n else "معطلة",0
+        return InlineKeyboardMarkup([[InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")]]),("Enabled" if n else "Disabled") if en else ("مفعلة" if n else "معطلة"),0
     kb=[]
     for i, f in enumerate(favs):
         kb.append([InlineKeyboardButton(f"📖 {clean_manga_title(f.get('title',''),f.get('identifier',''))[:35]}",callback_data=f"fav_open_{i}")])
-    kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-    return InlineKeyboardMarkup(kb),"مفعلة" if n else "معطلة",len(favs)
+    kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")])
+    return InlineKeyboardMarkup(kb),("Enabled" if n else "Disabled") if en else ("مفعلة" if n else "معطلة"),len(favs)
 
 async def download_image_bytesio(url,referer=None):
     if not url: return None
@@ -2179,10 +2180,7 @@ async def _show_daily_timer(client,msg,uid):
     if rec.get("merge_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"merge"); merge_timer=f"⏳ {h:02d}:{m:02d}:{s:02d}"
     else: merge_timer="✅ جاهز"
     await msg.reply_text(
-        f"⏰ الوقت\n\n"
-        f"📖 فردي\n├ 🔋 {rem}\n└ {single_timer}\n\n"
-        f"🧩 دمج\n├ 🔋 {mrem}\n└ {merge_timer}\n\n"
-        f"⏱️ مدة التجديد: {settings.get('daily_reward_interval',86400)//3600} ساعة",
+        translate_ui_text(uid, f"⏰ الوقت\n\n📖 فردي\n├ 🔋 {rem}\n└ {single_timer}\n\n🧩 دمج\n├ 🔋 {mrem}\n└ {merge_timer}\n\n⏱️ مدة التجديد: {settings.get('daily_reward_interval',86400)//3600} ساعة"),
         reply_markup=kb)
 
 def create_backup_with_custom_token(tk,bn):
@@ -2926,9 +2924,7 @@ async def unified_callback(client,callback):
             increment_download_count(uid)
             upload_started = time.perf_counter()
             await lm.edit_text(
-                "📤 يتم إرسال الملف إلى تيليجرام...\n\n"
-                "⚡ نسبة الإنجاز: 0%\n"
-                f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB",
+                translate_ui_text(uid, "📤 يتم إرسال الملف إلى تيليجرام...\n\n⚡ نسبة الإنجاز: 0%\n") + f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB",
                 parse_mode=None,
             )
             try:
@@ -3592,16 +3588,12 @@ async def handle_all_text(client,message):
                         progress["ok"] += 1
                         progress["images"] += len(urls)
                     await lm.edit_text(
-                        f"🧩 استخراج الفصول\n"
-                        f"📚 المكتمل: {progress['done']}/{count}\n"
-                        f"✅ الناجح: {progress['ok']}\n"
-                        f"🖼️ الصور المستخرجة: {progress['images']}"
+                        translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: {progress['done']}/{count}\n✅ الناجح: {progress['ok']}\n🖼️ الصور المستخرجة: {progress['images']}")
                     )
                 return index, urls or None
 
             await lm.edit_text(
-                f"🧩 استخراج الفصول\n📚 المكتمل: 0/{count}\n"
-                f"✅ الناجح: 0\n🖼️ الصور المستخرجة: 0"
+                translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: 0/{count}\n✅ الناجح: 0\n🖼️ الصور المستخرجة: 0")
             )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
@@ -3635,8 +3627,7 @@ async def handle_all_text(client,message):
                 while not merge_timer_stop.is_set():
                     try:
                         await lm.edit_text(
-                            f"🧩 جاري تجهيز ملف الفصول المدمجة...\n\n"
-                            f"{merge_bar_frames[frame % len(merge_bar_frames)]}"
+                            translate_ui_text(uid, f"🧩 جاري تجهيز ملف الفصول المدمجة...\n\n{merge_bar_frames[frame % len(merge_bar_frames)]}")
                         )
                     except Exception:
                         pass
