@@ -1582,8 +1582,19 @@ async def check_subscription_and_continue(client,cb,pending=None):
         if pending:
             at=pending.get('type')
             class FM:
-                def __init__(s,c,ci,ui,t=""): s.chat=type('C',(),{'id':ci})(); s.from_user=type('U',(),{'id':ui}); s.text=t
-                async def reply_text(s,t,*a,**k): return await client.send_message(s.chat.id,t,*a,**k)
+                """Small Bot-API message facade for replaying a pending command."""
+                def __init__(s, c, ci, ui, t=""):
+                    s.chat = type("C", (), {"id": ci, "type": "private"})()
+                    s.from_user = type(
+                        "U", (),
+                        {"id": ui, "username": None, "first_name": "", "last_name": ""},
+                    )()
+                    s.text = t
+                    s.message_id = 0
+                    s.reply_to_message = None
+
+                async def reply_text(s, t, *a, **k):
+                    return await client.send_message(s.chat.id, t, *a, **k)
             fm=FM(client,cid,uid,"")
             if at=='search': fm.text=f"/search {pending.get('query','')}"; await search_cmd(client,fm)
             elif at=='check': await check_cmd(client,fm)
