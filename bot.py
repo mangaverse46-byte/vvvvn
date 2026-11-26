@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""🤖 بوت مانجا — SQLite + Ovid PDF + روابط هدايا + مشاركة (نهائي)"""
+"""🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
 import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib
 import asyncio, aiohttp
@@ -420,7 +420,7 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download original image bytes and assemble the PDF with Ovid only."""
+    """Download original image bytes and assemble the PDF with img2pdf."""
     import aiohttp
 
     if urls and isinstance(urls[0], (list, tuple)):
@@ -429,10 +429,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         image_urls = [url for url in (urls or []) if url]
     if not image_urls:
         return None
-
-    ovid = shutil.which("ovid")
-    if not ovid:
-        raise RuntimeError("محرك Ovid غير مثبت أو غير موجود في PATH")
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
@@ -488,16 +484,10 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                     image_file.write(blob)
                 image_paths.append(image_path)
 
-            output_path = os.path.join(temp_dir, "manga.pdf")
-            subprocess.run(
-                [ovid, "merge", *image_paths, "-o", output_path, "-q"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                timeout=120,
-            )
-            with open(output_path, "rb") as pdf_file:
-                result = pdf_file.read()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"فشل إنشاء PDF بواسطة Ovid: {exc}") from exc
+            import img2pdf
+            result = img2pdf.convert(image_paths)
+    except Exception as exc:
+        raise RuntimeError(f"فشل إنشاء PDF بواسطة img2pdf: {exc}") from exc
 
     downloaded.clear()
     buf = BytesIO(result)
@@ -567,7 +557,7 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["aiogram","aiohttp","cloudscraper","python-dotenv"]:
+for pkg in ["aiogram","aiohttp","cloudscraper","python-dotenv","img2pdf"]:
     ensure_installed(pkg)
 
 from dotenv import load_dotenv
