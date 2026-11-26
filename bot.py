@@ -2720,7 +2720,7 @@ async def unified_callback(client,callback):
             app_link = settings.get("app_message_link") or "غير مضاف"
             video_link = settings.get("tutorial_video_url") or "غير مضاف"
             await msg.edit_text(
-                f"🔗 إدارة روابط أزرار المستخدمين\\n\\n📲 رابط تطبيق البوت: {app_link}\\n\\n🎬 رابط آخر فيديو تعليمي: {video_link}",
+                f"🔗 إدارة روابط أزرار المستخدمين\n\n📲 رابط تطبيق البوت: {app_link}\n\n🎬 رابط آخر فيديو تعليمي: {video_link}",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("➕ إضافة/تعديل رابط التطبيق",callback_data="admin_set_app_link")],
                     [InlineKeyboardButton("🗑️ حذف رابط التطبيق",callback_data="admin_del_app_link")],
