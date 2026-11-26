@@ -7,7 +7,7 @@ import asyncio, aiohttp
 import zipfile, threading, tempfile
 from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
-from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard
+from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard, create_bot, as_input_file
 import signal
 from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
 InlineKeyboardMarkup = make_inline_keyboard
@@ -1853,15 +1853,15 @@ async def send_zip_via_added_bots(manual=False):
             if not token or not target_id: failed+=1; continue
             zp,zn=create_backup_with_custom_token(token,name); sz=os.path.getsize(zp)/1024
             cap=(f"💾 **{title} - {name}**\n\n📅 `{time.strftime('%Y-%m-%d %H:%M')}`\n👥 `{get_users_count()}`\n👑 VIP: `{len(get_all_vips())}`\n📥 `{get_download_count()}`\n📦 `{sz:.1f} KB`")
-            temp_bot=Client(name=f"send_{bid}_{int(time.time())}",api_id=API_ID, api_hash=API_HASH,bot_token=token,in_memory=True)
+            temp_bot=create_bot(token)
             try:
-                await temp_bot.start()
-                with open(zp,'rb') as f: await temp_bot.send_document(chat_id=target_id,document=f,file_name=zn, caption=cap,parse_mode=ParseMode.MARKDOWN)
-                await temp_bot.stop(); success+=1
+                await temp_bot.send_document(chat_id=target_id,document=as_input_file(zp, filename=zn),caption=cap)
+                success+=1
                 if not manual: update_bot_last_sent(bid, time.time())
-            except Exception as e:
+            except Exception:
                 failed+=1
-                try: await temp_bot.stop()
+            finally:
+                try: await temp_bot.session.close()
                 except: pass
             try: os.remove(zp)
             except: pass
