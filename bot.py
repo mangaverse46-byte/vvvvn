@@ -17,6 +17,15 @@ InlineKeyboardMarkup = make_inline_keyboard
 def InlineKeyboardButton(text, *args, **kwargs):
     label = str(text).strip()
     callback = str(kwargs.get("callback_data") or "")
+    # Telegram's native inline-button colors: green, red, and blue.
+    if "style" not in kwargs:
+        action = callback.casefold()
+        if any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
+            kwargs["style"] = "danger"
+        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
+            kwargs["style"] = "success"
+        else:
+            kwargs["style"] = "primary"
     # Give icon-only controls an action word so buttons are never emoji-only.
     if label in ("🔙", "⬅️", "➡️", "❌", "✅", "📋", "🔄", "⚙️", "🖼️", "📭"):
         label = {"🔙":"⬅️ رجوع", "⬅️":"⬅️ السابق", "➡️":"➡️ التالي", "❌":"❌ إغلاق",
