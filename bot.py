@@ -2662,7 +2662,6 @@ async def unified_callback(client,callback):
                 settings["button_colors"] = colors
                 save_settings()
                 await callback.answer("✅ تم حفظ اللون", show_alert=True)
-                await unified_callback(client, callback) if False else None
                 colors = settings.get("button_colors", {})
                 names = {"success":"🟢 أخضر","danger":"🔴 أحمر","primary":"🔵 أزرق"}
                 txt = ("🎨 **التحكم بألوان الأزرار**\\n\\n"
@@ -2679,6 +2678,12 @@ async def unified_callback(client,callback):
             settings["button_colors"] = dict(DEFAULTS["button_colors"])
             save_settings()
             await callback.answer("♻️ تمت استعادة الألوان", show_alert=True)
+            try:
+                await msg.edit_text("🎨 **تمت استعادة ألوان الأزرار الافتراضية**\\n\\n🟢 الإجراءات: أخضر\\n🔴 الحذف والإغلاق: أحمر\\n🔵 العامة: أزرق",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎨 إعداد الألوان",callback_data="admin_button_colors")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back")]]),
+                    parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
             return
         if data == "admin_toggle_maintenance":
             current = settings.get("maintenance_mode", False); settings["maintenance_mode"] = not current; save_settings()
