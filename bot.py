@@ -670,9 +670,9 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
         percent = min(100, int(current * 100 / total))
         try:
             await progress_message.edit_text(
-                f"📤 **جاري رفع PDF مباشرة عبر MTProto...**\\n"
-                f"📊 التقدم: `{percent}%`\\n"
-                f"📦 `{current / (1024 * 1024):.1f}` / `{total / (1024 * 1024):.1f}` MB"
+                f"📤 **يتم إرسال الملف إلى تيليجرام...**\n\n"
+                f"⚡ نسبة الإنجاز: `{percent}%`\n"
+                f"📦 الحجم المرسل: `{current / (1024 * 1024):.1f} MB` من `{total / (1024 * 1024):.1f} MB`"
             )
         except Exception:
             pass
@@ -2541,31 +2541,44 @@ async def unified_callback(client,callback):
             lt = f"⏳ **جاري تحميل الفصل {disp}...**"
             if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
             lm=await msg.reply_text(lt)
-            stage_clock = {"started": time.perf_counter()}
-            async def single_progress(stage, image_count):
-                now = time.perf_counter()
-                elapsed = now - stage_clock["started"]
-                if stage == "extract":
-                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
-                              f"🔗 تم استخراج `{image_count}` صورة "
-                              f"خلال `{elapsed:.1f}` ثانية")
-                else:
-                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
-                              f"📦 تم تجهيز PDF من `{image_count}` صورة "
-                              f"خلال `{elapsed:.1f}` ثانية")
-                stage_clock["started"] = now
-                await lm.edit_text(status)
+            timer_started = time.perf_counter()
+            timer_stop = asyncio.Event()
+
+            async def loading_timer():
+                while not timer_stop.is_set():
+                    elapsed = int(time.perf_counter() - timer_started)
+                    minutes, seconds = divmod(elapsed, 60)
+                    try:
+                        await lm.edit_text(
+                            f"⏳ **جاري تحميل الفصل {disp}...**\n"
+                            f"⌛ الوقت المنقضي: `{minutes:02d}:{seconds:02d}`"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(timer_stop.wait(), timeout=1)
+                    except asyncio.TimeoutError:
+                        pass
+
+            timer_task = asyncio.create_task(loading_timer())
             try:
-                buf = await pdf_func(target, progress=single_progress)
+                buf = await pdf_func(target)
             except Exception:
                 buf = None
+            finally:
+                timer_stop.set()
+                await timer_task
             if not buf:
                 refund_chapter(uid)
                 await lm.edit_text("❌ **فشل التحميل**")
                 return
             increment_download_count(uid)
             upload_started = time.perf_counter()
-            await lm.edit_text("📤 **جاري الرفع...**")
+            await lm.edit_text(
+                "📤 **يتم إرسال الملف إلى تيليجرام...**\n\n"
+                "⚡ نسبة الإنجاز: `0%`\n"
+                f"📦 الحجم المرسل: `0.0 MB` من `{buf.getbuffer().nbytes / (1024 * 1024):.1f} MB`"
+            )
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
