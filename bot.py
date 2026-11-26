@@ -42,7 +42,16 @@ def InlineKeyboardButton(text, *args, **kwargs):
         lower = label.casefold()
         icon = "🔙" if any(x in lower for x in ("رجوع", "السابق", "عودة")) else "🏠" if any(x in lower for x in ("الرئيسية", "الرئيس", "home")) else "🔍" if any(x in lower for x in ("بحث", "search")) else "📚" if any(x in lower for x in ("مانجا", "فصول", "مصادر", "manga", "chapter")) else "⚙️" if any(x in lower for x in ("إعداد", "ادمن", "إدارة", "admin")) else "📌"
         label = f"{icon} {label}"
-    return _TelegramInlineKeyboardButton(label, *args, **kwargs)
+    # aiogram 3 uses keyword-only Pydantic model fields; the legacy
+    # wrapper accepts Pyrogram-style positional callback_data/url arguments.
+    if args:
+        if len(args) > 2:
+            raise TypeError("InlineKeyboardButton accepts at most text, callback_data, url")
+        if len(args) >= 1:
+            kwargs.setdefault("callback_data", args[0])
+        if len(args) == 2:
+            kwargs.setdefault("url", args[1])
+    return _TelegramInlineKeyboardButton(text=label, **kwargs)
 
 from aiogram.enums import ParseMode, ChatMemberStatus
 
