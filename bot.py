@@ -525,7 +525,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             result = img2pdf.convert(image_paths)
 
         # MangaBDF reader marker: harmless PDF comment for app recognition.
-        marker = b"\\n%MANGA_VIRUS_ORIGINAL_V1\\n"
+        marker = b"\n%MANGA_VIRUS_ORIGINAL_V1\n"
         eof = result.rfind(b"%%EOF")
         if eof >= 0:
             result = result[:eof] + marker + result[eof:]
@@ -656,9 +656,9 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
         percent = min(100, int(current * 100 / total))
         try:
             await progress_message.edit_text(
-                f"📤 **يتم إرسال الملف إلى تيليجرام...**\n\n"
+                f"📤 **يتم رفع PDF إلى تيليجرام...**\n\n"
                 f"⚡ نسبة الإنجاز: `{percent}%`\n"
-                f"📦 الحجم المرسل: `{current / (1024 * 1024):.1f} MB` من `{total / (1024 * 1024):.1f} MB`"
+                f"📦 المرفوع: `{current / (1024 * 1024):.1f} MB` من `{total / (1024 * 1024):.1f} MB`"
             )
         except Exception:
             pass
@@ -668,21 +668,28 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
             return
         now = time.monotonic()
         percent = min(100, int(current * 100 / total))
-        if percent < 5 or (percent < 100 and now - last_update[0] < 3):
+        if percent < 3 or (percent < 100 and now - last_update[0] < 2):
             return
         last_update[0] = now
         loop.call_soon_threadsafe(
             lambda: asyncio.create_task(update_progress(current, total))
         )
 
+    # Upload chunks concurrently, then send the already-uploaded file.
+    # Four workers balance throughput without overwhelming a small VPS.
+    uploaded_file = await _mtproto_client.upload_file(
+        document,
+        file_name=file_name,
+        progress_callback=progress_callback,
+        workers=4,
+    )
     return await _mtproto_client.send_file(
         entity=int(chat_id),
-        file=document,
+        file=uploaded_file,
         caption=caption,
         force_document=True,
         file_name=file_name,
         parse_mode=None,
-        progress_callback=progress_callback,
     )
 
 
