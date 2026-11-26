@@ -797,6 +797,8 @@ settings = load_settings()
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
 save_settings()
+# Restore the previously discovered button catalog after a bot restart.
+BUTTON_CATALOG.update(settings.get("button_catalog", {}))
 NEW_SINGLE_CAPTION = DEFAULTS["single_caption"]
 
 # ============ Users ============
