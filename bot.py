@@ -3510,12 +3510,24 @@ if __name__ == "__main__":
             ]
 
             print("✅ البوت يعمل عبر aiogram 3. لإيقافه اضغط Ctrl+C", flush=True)
-            polling_task = asyncio.create_task(app.dispatcher.start_polling(app.bot), name="telegram_polling")
+            polling_task = asyncio.create_task(
+                app.dispatcher.start_polling(app.bot, handle_signals=False),
+                name="telegram_polling",
+            )
+            stop_task = asyncio.create_task(stop_event.wait(), name="shutdown_signal")
             try:
-                await stop_event.wait()
+                done, _ = await asyncio.wait(
+                    (polling_task, stop_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Surface polling failures instead of leaving the process hanging.
+                if polling_task in done:
+                    await polling_task
             finally:
-                polling_task.cancel()
-                await asyncio.gather(polling_task, return_exceptions=True)
+                for task in (polling_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(polling_task, stop_task, return_exceptions=True)
 
         finally:
             # Remove custom signal handlers before closing the event loop.
