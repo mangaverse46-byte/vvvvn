@@ -613,8 +613,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Credentials are read from the local .env file; never commit real secrets.
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not OWNER_ID:
@@ -1809,7 +1807,7 @@ def create_backup_with_custom_token(tk,bn):
     ts=datetime.now().strftime("%Y%m%d_%H%M%S"); safe=re.sub(r'[^A-Za-z0-9_-]','_',bn)[:30]
     zn=f"bot_{safe}_{ts}.zip"; zp=os.path.join(BACKUP_DIR,zn); tmp_db=zp+".db"
     backup_to(tmp_db)
-    cfg={"api_id":API_ID,"api_hash":API_HASH,"bot_token":tk,"bot_name":bn,"admins":ADMINS,"owner_ids":OWNER_IDS,"backup_date":ts}
+    cfg={"bot_token":tk,"bot_name":bn,"admins":ADMINS,"owner_ids":OWNER_IDS,"backup_date":ts}
     install='#!/usr/bin/env python3\nimport os, shutil\nBASE=os.path.dirname(os.path.abspath(__file__))\nd=os.path.join(BASE,"data")\nif os.path.isdir(d):\n    for f in os.listdir(d): shutil.copy2(os.path.join(d,f),os.path.join(os.getcwd(),f))\n'
     with zipfile.ZipFile(zp,'w',zipfile.ZIP_DEFLATED) as z:
         z.write(tmp_db, "data/bot.db")
