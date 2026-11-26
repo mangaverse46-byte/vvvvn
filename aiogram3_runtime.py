@@ -240,6 +240,9 @@ class LegacyApp:
     async def get_me(self) -> Any:
         return await self.bot.get_me()
 
+    async def send_message(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.client.send_message(*args, **kwargs)
+
     def run(self, coroutine: Any = None) -> None:
         import asyncio
         async def runner() -> None:
