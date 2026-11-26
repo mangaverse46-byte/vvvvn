@@ -1782,13 +1782,13 @@ def _parse_telegram_post_link(value):
     """Return (chat_id, message_id) for a public or private Telegram post URL."""
     value = str(value or "").strip()
     match = re.fullmatch(
-        r"https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/(?:s/)?([A-Za-z0-9_]{5,})/(\\d+)/?",
+        r"https?://(?:www\.)?(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]{5,})/(\d+)/?",
         value, re.IGNORECASE
     )
     if match:
         return "@" + match.group(1), int(match.group(2))
     match = re.fullmatch(
-        r"https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/c/(\\d+)/(\\d+)/?",
+        r"https?://(?:www\.)?(?:t\.me|telegram\.me)/c/(\d+)/(\d+)/?",
         value, re.IGNORECASE
     )
     if match:
@@ -2735,9 +2735,9 @@ async def unified_callback(client,callback):
             user_data[uid]={"awaiting_app_message_link":True}
             await msg.delete()
             await client.send_message(cid,
-                "📲 أرسل رابط منشور تطبيق البوت من تيليجرام\\n"
-                "مثال: https://t.me/MangaVirus2/159\\n"
-                "سيتم نسخ محتوى المنشور للمستخدم عند ضغط الزر.\\n\\nللإلغاء أرسل /cancel"
+                "📲 أرسل رابط منشور تطبيق البوت من تيليجرام\n"
+                "مثال: https://t.me/MangaVirus2/159\n"
+                "سيتم نسخ محتوى المنشور للمستخدم عند ضغط الزر.\n\nللإلغاء أرسل /cancel"
             )
             await callback.answer("📲")
             return
@@ -2745,8 +2745,8 @@ async def unified_callback(client,callback):
             user_data[uid]={"awaiting_tutorial_video_url":True}
             await msg.delete()
             await client.send_message(cid,
-                "🎬 أرسل رابط الفيديو التعليمي (YouTube أو Telegram أو أي رابط يبدأ بـ https://).\\n"
-                "سيظهر زر «آخر فيديو تعليمي» للمستخدمين بعد حفظ الرابط.\\n\\nللإلغاء أرسل /cancel"
+                "🎬 أرسل رابط الفيديو التعليمي (YouTube أو Telegram أو أي رابط يبدأ بـ https://).\n"
+                "سيظهر زر «آخر فيديو تعليمي» للمستخدمين بعد حفظ الرابط.\n\nللإلغاء أرسل /cancel"
             )
             await callback.answer("🎬")
             return
@@ -3434,7 +3434,7 @@ async def handle_all_text(client,message):
         link = message.text.strip()
         if not _parse_telegram_post_link(link):
             await message.reply_text(
-                "⚠️ الرابط غير صحيح. أرسل رابط منشور تيليجرام مثل:\\n"
+                "⚠️ الرابط غير صحيح. أرسل رابط منشور تيليجرام مثل:\n"
                 "https://t.me/MangaVirus2/159 أو https://t.me/c/123456789/159"
             )
             return
@@ -3447,7 +3447,7 @@ async def handle_all_text(client,message):
         return
     if user_data.get(uid,{}).get("awaiting_tutorial_video_url"):
         link = message.text.strip()
-        if not re.match(r"^https?://\\S+$", link, re.IGNORECASE):
+        if not re.match(r"^https?://\S+$", link, re.IGNORECASE):
             await message.reply_text("⚠️ أرسل رابطاً صحيحاً يبدأ بـ https:// أو http://.")
             return
         settings["tutorial_video_url"] = link
