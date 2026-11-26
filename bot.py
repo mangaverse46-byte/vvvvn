@@ -13,21 +13,30 @@ from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
 from telethon import TelegramClient
 InlineKeyboardMarkup = make_inline_keyboard
 
+BUTTON_CATALOG = {}
+
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
     label = str(text).strip()
+    if args and "callback_data" not in kwargs:
+        kwargs["callback_data"] = args[0]
     callback = str(kwargs.get("callback_data") or "")
-    # Color is configurable from the admin panel and persisted in SQLite.
+    if callback:
+        BUTTON_CATALOG[callback] = label
     if "style" not in kwargs:
-        action = callback.casefold()
-        colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
-        if any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
-            group = "danger"
-        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
-            group = "success"
+        custom = settings.get("button_styles", {}) if isinstance(globals().get("settings"), dict) else {}
+        if callback and callback in custom:
+            kwargs["style"] = custom[callback]
         else:
-            group = "primary"
-        kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
+            action = callback.casefold()
+            colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
+            if any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
+                group = "danger"
+            elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
+                group = "success"
+            else:
+                group = "primary"
+            kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
     # Give icon-only controls an action word so buttons are never emoji-only.
     if label in ("🔙", "⬅️", "➡️", "❌", "✅", "📋", "🔄", "⚙️", "🖼️", "📭"):
         label = {"🔙":"⬅️ رجوع", "⬅️":"⬅️ السابق", "➡️":"➡️ التالي", "❌":"❌ إغلاق",
@@ -1965,6 +1974,24 @@ async def gift_channel_publisher_task():
         except Exception as e:  pass
         await asyncio.sleep(60)
 
+def show_admin_buttons_page(msg, page=0):
+    items = sorted(BUTTON_CATALOG.items(), key=lambda x: x[1].casefold())
+    total = len(items)
+    pages = max(1, (total + 7) // 8)
+    page = min(max(0, page), pages - 1)
+    rows = []
+    for idx in range(page * 8, min(total, (page + 1) * 8)):
+        cb, label = items[idx]
+        color = settings.get("button_styles", {}).get(cb, "تلقائي")
+        rows.append([InlineKeyboardButton(f"{idx+1}. {label[:34]} · {color}",callback_data=f"admin_btnpick_{idx}")])
+    nav=[]
+    if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"admin_btnpage_{page-1}"))
+    nav.append(InlineKeyboardButton(f"📄 {page+1}/{pages}",callback_data="admin_buttons_catalog"))
+    if page+1<pages: nav.append(InlineKeyboardButton("➡️ التالي",callback_data=f"admin_btnpage_{page+1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("🔄 تحديث المكتشف",callback_data="admin_buttons_catalog"),InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back")])
+    return msg.edit_text(f"📋 كل أزرار البوت المكتشفة\nعدد الأزرار: {total}\nاختر زرّاً لتغيير لونه:",reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.MARKDOWN)
+
 def get_admin_panel_kb():
     status = "🔓 إيقاف الصيانة" if settings.get("maintenance_mode") else "🔒 وضع الصيانة"
     return InlineKeyboardMarkup([
@@ -1973,7 +2000,7 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("🖼️ الصور",callback_data="admin_images_section"), InlineKeyboardButton("📝 الرسائل",callback_data="admin_messages_section")],
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
-        [InlineKeyboardButton("🎨 ألوان الأزرار",callback_data="admin_button_colors")],
+        [InlineKeyboardButton("🎨 ألوان الأزرار",callback_data="admin_button_colors"),InlineKeyboardButton("📋 كل الأزرار",callback_data="admin_buttons_catalog")],
         [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
         [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
         [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
@@ -2631,6 +2658,58 @@ async def unified_callback(client,callback):
 
     # ============ ADMIN ============
     if is_admin_any(uid):
+        if data == "admin_buttons_catalog":
+            settings["button_catalog"] = dict(BUTTON_CATALOG)
+            save_settings()
+            if not BUTTON_CATALOG:
+                await msg.edit_text("📭 لم تُكتشف أزرار بعد. افتح أقسام البوت أولاً ثم ارجع هنا.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث القائمة",callback_data="admin_buttons_catalog")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back")]]))
+            else:
+                await show_admin_buttons_page(msg, 0)
+            await callback.answer("📋 قائمة الأزرار")
+            return
+        if data.startswith("admin_btnpage_"):
+            try: page = max(0, int(data.rsplit("_",1)[1]))
+            except: page = 0
+            await show_admin_buttons_page(msg, page)
+            await callback.answer()
+            return
+        if data.startswith("admin_btnpick_"):
+            try: idx = int(data.rsplit("_",1)[1])
+            except: idx = -1
+            items = sorted(BUTTON_CATALOG.items(), key=lambda x: x[1].casefold())
+            if 0 <= idx < len(items):
+                cb, label = items[idx]
+                settings["button_catalog"] = dict(BUTTON_CATALOG); save_settings()
+                current = settings.get("button_styles", {}).get(cb, "تلقائي")
+                await msg.edit_text(f"لون الزر\n{label}\nاللون الحالي: {current}\nاختر اللون:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 أخضر",callback_data=f"admin_btnset_{idx}_success"),InlineKeyboardButton("🔴 أحمر",callback_data=f"admin_btnset_{idx}_danger")],
+                        [InlineKeyboardButton("🔵 أزرق",callback_data=f"admin_btnset_{idx}_primary")],
+                        [InlineKeyboardButton("♻️ تلقائي",callback_data=f"admin_btnset_{idx}_auto")],
+                        [InlineKeyboardButton("⬅️ رجوع",callback_data=f"admin_btnpage_{idx//8}")]
+                    ]),parse_mode=ParseMode.MARKDOWN)
+            await callback.answer()
+            return
+        if data.startswith("admin_btnset_"):
+            parts=data.split("_")
+            if len(parts)==4:
+                try: idx=int(parts[2])
+                except: idx=-1
+                color=parts[3]
+                items=sorted(BUTTON_CATALOG.items(), key=lambda x: x[1].casefold())
+                if 0<=idx<len(items) and color in ("success","danger","primary","auto"):
+                    cb,label=items[idx]
+                    styles=dict(settings.get("button_styles",{}))
+                    if color=="auto": styles.pop(cb,None)
+                    else: styles[cb]=color
+                    settings["button_styles"]=styles
+                    settings["button_catalog"]=dict(BUTTON_CATALOG)
+                    save_settings()
+                    await callback.answer("تم حفظ لون هذا الزر",show_alert=True)
+                    await msg.edit_text(f"{label}\nتم حفظ اللون: {color}",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ رجوع للقائمة",callback_data=f"admin_btnpage_{idx//8}")],[InlineKeyboardButton("📋 كل الأزرار",callback_data="admin_buttons_catalog")]]))
+            return
         if data == "admin_button_colors":
             colors = settings.get("button_colors", {})
             def color_name(value):
