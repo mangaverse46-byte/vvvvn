@@ -19,6 +19,7 @@ from aiogram.types import (
     BufferedInputFile,
     FSInputFile,
     URLInputFile,
+    LinkPreviewOptions,
 )
 
 
@@ -125,6 +126,8 @@ class BotClientCompat:
 
     async def send_message(self, chat_id: Any, text: str, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
+        if kwargs.pop("disable_web_page_preview", False):
+            kwargs.setdefault("link_preview_options", LinkPreviewOptions(is_disabled=True))
         return await self.bot.send_message(chat_id=chat_id, text=text, *args, **kwargs)
 
     async def send_photo(self, chat_id: Any, photo: Any, *args: Any, **kwargs: Any) -> Any:
@@ -133,7 +136,10 @@ class BotClientCompat:
 
     async def send_document(self, chat_id: Any, document: Any, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop("parse_mode", None)
-        return await self.bot.send_document(chat_id=chat_id, document=as_input_file(document), *args, **kwargs)
+        filename = kwargs.pop("file_name", None)
+        return await self.bot.send_document(
+            chat_id=chat_id, document=as_input_file(document, filename=filename), *args, **kwargs
+        )
 
     async def get_chat_member(self, chat_id: Any, user_id: int) -> Any:
         return await self.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
