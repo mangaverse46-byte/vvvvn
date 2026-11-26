@@ -1784,7 +1784,7 @@ async def build_main_keyboard(uid):
         [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
         [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
         [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
-        [InlineKeyboardButton("📲 تطبيق بوت", url="https://t.me/MangaVirus2/159")],
+        [InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")],
     ])
 
 def _account_keyboard():
@@ -2160,6 +2160,20 @@ async def unified_callback(client,callback):
     if data=="check_sub":
         await check_subscription_and_continue(client,callback,user_data.get(uid,{}).get('pending_action')); return
     if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
+    if data == "send_app_message":
+        await callback.answer()
+        try:
+            await client.copy_message(
+                chat_id=cid,
+                from_chat_id="@MangaVirus2",
+                message_id=159,
+            )
+        except Exception:
+            await msg.reply_text(
+                "⚠️ تعذر إرسال التطبيق حالياً. تأكد أن البوت عضو في قناة @MangaVirus2 "
+                "وأن الرسالة رقم 159 متاحة."
+            )
+        return
     if data!="check_sub":
         is_sub,_=await is_user_subscribed(client,uid)
         if not is_sub:
