@@ -420,34 +420,24 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download original images concurrently and assemble them into a PDF."""
+    """Download image URLs as-is and put the original bytes into one PDF."""
     import aiohttp
     import img2pdf
 
-    # Accept either one chapter's URLs or a list of chapter URL groups.
     if urls and isinstance(urls[0], (list, tuple)):
         image_urls = [url for group in urls for url in group if url]
     else:
         image_urls = [url for url in (urls or []) if url]
-
     if not image_urls:
         return None
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
-    connector = aiohttp.TCPConnector(
-        limit=64,
-        limit_per_host=48,
-        ttl_dns_cache=600,
-        keepalive_timeout=60,
-        enable_cleanup_closed=True,
-    )
+    connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
     semaphore = asyncio.Semaphore(48)
     downloaded = [None] * len(image_urls)
 
-    async with aiohttp.ClientSession(
-        timeout=timeout, connector=connector, headers=request_headers
-    ) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
         async def fetch(position, url):
             async with semaphore:
                 for attempt in range(4):
@@ -455,7 +445,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                         async with session.get(url, allow_redirects=True) as response:
                             if response.status == 200:
                                 data = await response.read()
-                                if data and len(data) > 100:
+                                if data:
                                     downloaded[position] = data
                                     return
                             elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
@@ -475,66 +465,22 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                     if attempt < 3:
                         await asyncio.sleep(0.25 * (attempt + 1))
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, url in enumerate(image_urls))
-        )
+        await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
-    # Keep original image bytes and order. Only discard failed/non-image responses.
-    def is_supported_image(blob):
-        if not blob:
-            return False
-        return (
-            blob.startswith(bytes.fromhex("FFD8FF"))  # JPEG
-            or blob.startswith(bytes.fromhex("89504E470D0A1A0A"))  # PNG
-            or blob.startswith(bytes.fromhex("0000000C6A502020"))  # JPEG2000
-            or blob.startswith(bytes.fromhex("FF4FFF51"))  # JPEG2000 codestream
-            or blob.startswith(bytes.fromhex("49492A00"))  # TIFF little-endian
-            or blob.startswith(bytes.fromhex("4D4D002A"))  # TIFF big-endian
-        )
-
-
-    pages = [blob for blob in downloaded if is_supported_image(blob)]
-
-    # Preserve the optional cached cover as the first page.
-    cover_blob = await _get_cached_bdf_cover(client)
-    if is_supported_image(cover_blob):
-        pages.insert(0, cover_blob)
-
+    # No image validation, resizing, recompression or cover insertion.
+    pages = [blob for blob in downloaded if blob]
     if not pages:
         return None
 
-    pdf_options = {
-        "title": "Manga Virus",
-        "author": "Manga Virus Bot",
-        "creator": "Manga Virus",
-        "producer": "Manga Virus PDF Engine",
-        "subject": "MANGA_VIRUS_ORIGINAL_V1",
-        "keywords": ["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
-    }
-
-    # Fast path: build the PDF once. If a downloaded image is corrupt,
-    # validate pages individually only as a fallback.
-    try:
-        result = img2pdf.convert(*(BytesIO(blob) for blob in pages), **pdf_options)
-    except Exception:
-        valid_pages = []
-        for blob in pages:
-            try:
-                img2pdf.convert(BytesIO(blob))
-                valid_pages.append(blob)
-            except Exception:
-                continue
-        if not valid_pages:
-            return None
-        result = img2pdf.convert(
-            *(BytesIO(blob) for blob in valid_pages), **pdf_options
-        )
-        valid_pages.clear()
-
+    result = img2pdf.convert(
+        *(BytesIO(blob) for blob in pages),
+        title="Manga Virus", author="Manga Virus Bot",
+        creator="Manga Virus", producer="Manga Virus PDF Engine",
+        subject="MANGA_VIRUS_ORIGINAL_V1",
+        keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
+    )
     pages.clear()
     downloaded.clear()
-    cover_blob = None
-
     buf = BytesIO(result)
     result = None
     buf.name = "manga.pdf"
