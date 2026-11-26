@@ -2121,10 +2121,13 @@ async def _try_reward_referral(client,new_uid):
     user_data.get(new_uid,{}).pop("pending_referral_owner",None)
 
 @app.on_message(filters.command("search"))
-async def search_cmd(client,message):
+async def search_cmd(client,message,query_override=None):
     uid = message.from_user.id
-    parts = message.text.split(maxsplit=1)
-    query = parts[1].strip() if len(parts) > 1 else ""
+    if query_override is None:
+        parts = message.text.split(maxsplit=1)
+        query = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        query = str(query_override).strip()
     if not query:
         await message.reply_text("🔍 اكتب اسم المانجا بعد الأمر، مثال:\n/search Solo Leveling")
         return
@@ -2228,7 +2231,13 @@ async def unified_callback(client,callback):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
     if data=="main_search":
         await callback.answer("🔍")
-        await msg.reply_text("🔍 للبحث:\n/search اسم المانجا",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
+        user_data.setdefault(uid, {})["awaiting_search_query"] = True
+        await msg.reply_text(
+            "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.\n\n"
+            "مثال: Solo Leveling\n\nللإلغاء أرسل /cancel",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+        )
+        return
     if data=="my_account": await callback.answer("👤"); await _show_my_account(client,msg,uid,edit=False); return
     if data=="my_account_refresh": await callback.answer("🔄"); await _show_my_account(client,msg,uid,edit=True); return
     if data=="acc_chapters": await callback.answer("📊"); await _show_chapters_balance(client,msg,uid); return
@@ -3214,6 +3223,15 @@ async def unified_callback(client,callback):
 async def handle_all_text(client,message):
     uid=message.from_user.id
     if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
+
+    if user_data.get(uid, {}).pop("awaiting_search_query", False):
+        query = (message.text or "").strip()
+        if not query:
+            user_data.setdefault(uid, {})["awaiting_search_query"] = True
+            await message.reply_text("⚠️ أرسل اسم مانجا صحيحاً للبحث.")
+            return
+        await search_cmd(client, message, query_override=query)
+        return
 
     if user_data.get(uid,{}).get("awaiting_complaint"):
         text=message.text.strip()
