@@ -845,6 +845,75 @@ def translate_ui_text(uid, value):
     if get_user_language(uid) != "en" or not isinstance(value, str):
         return value
     translations = {
+        "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
+        "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
+        "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
+        "أرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.": "Send the starting chapter, a hyphen, then the ending chapter. Example: 1-10.",
+        "📚 لم يتم العثور على فصول ضمن هذا النطاق.": "📚 No chapters were found in this range.",
+        "تحقق من أرقام الفصول وأرسل نطاقاً آخر.": "Check the chapter numbers and send another range.",
+        "📄 عدد الفصول يتجاوز الحد المسموح.": "📄 The chapter count exceeds the allowed limit.",
+        "طلبت": "Requested",
+        "فصلاً، والحد الأقصى لهذا الملف": "chapters; the maximum allowed in this file is",
+        "💳 رصيد الدمج غير كافٍ.": "💳 Not enough merge credits.",
+        "❌ تعذّر بدء تحميل الفصل.": "❌ Could not start the chapter download.",
+        "لم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.": "No credits were deducted. Please try again shortly.",
+        "🧩 استخراج الفصول": "🧩 Extracting chapters",
+        "📚 المكتمل:": "📚 Completed:",
+        "✅ الناجح:": "✅ Successful:",
+        "🖼️ الصور المستخرجة:": "🖼️ Images extracted:",
+        "❌ لم يستخرج المحرك صور الفصول": "❌ The engine could not extract chapter images.",
+        "🧩 جاري تجهيز ملف الفصول المدمجة...": "🧩 Preparing the merged chapter file...",
+        "🧩 ملف مدمج": "🧩 Merged file",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "📖 فصل": "📖 chapters",
+        "🔄 تحديث": "🔄 Refresh",
+        "📤 يتم إرسال الملف إلى تيليجرام...": "📤 Sending the file to Telegram...",
+        "⚡ نسبة الإنجاز:": "⚡ Progress:",
+        "📦 الحجم المرسل:": "📦 Uploaded size:",
+        "من": "of",
+        "💎 VIP": "💎 VIP",
+        "أسبوعي / شهري / سنوي": "Weekly / Monthly / Yearly",
+        "✨ المميزات:": "✨ Benefits:",
+        "├ ♾️ تحميل غير محدود": "├ ♾️ Unlimited downloads",
+        "├ ⭐ المفضلة": "├ ⭐ Favorites",
+        "├ 🧩 دمج غير محدود": "├ 🧩 Unlimited merges",
+        "└ ⚡ أولوية في الدعم": "└ ⚡ Priority support",
+        "💬 تواصل:": "💬 Contact:",
+        "📅 الخطة:": "📅 Plan:",
+        "⏳ يوم": "⏳ days",
+        "📆": "📆",
+        "📚": "📚",
+        "🔎 اختر المصدر": "🔎 Choose a source",
+        "❌ لا توجد نتائج": "❌ No results found",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🔙 رجوع": "🔙 Back",
+        "⬅️ المصادر": "⬅️ Sources",
+        "التالي ➡️": "Next ➡️",
+        "⬅️ السابق": "⬅️ Previous",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "🧩 دمج الفصول": "🧩 Merge chapters",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "⬅️ مصادر أحدث الفصول": "⬅️ Latest chapter sources",
+        "❌ إغلاق": "❌ Close",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Type your message:",
+        "تم الإرسال": "Sent successfully",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "ادعُ صديقاً": "Invite a friend",
+        "⏳ جاري تحميل الفصل": "⏳ Downloading chapter",
+        "📥 جاري تحميل الفصل": "📥 Downloading chapter",
+        "وتجهيز PDF...": "and preparing the PDF...",
+        "📊 المتبقي:": "📊 Remaining:",
+        "❌ فشل التحميل": "❌ Download failed.",
+
         "⚠️ أرسل اسم مانجا صحيحاً للبحث.": "⚠️ Please send a valid manga title to search.",
         "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
         "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
@@ -3465,16 +3534,16 @@ async def handle_all_text(client,message):
 
     if user_data.get(uid,{}).get("awaiting_complaint"):
         text=message.text.strip()
-        if not text or len(text)<3: await message.reply_text("⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة."); return
+        if not text or len(text)<3: await message.reply_text(translate_ui_text(uid,"⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.")); return
         add_complaint(uid,message.from_user.username or "",message.from_user.first_name or "",text)
-        user_data.pop(uid,None); await message.reply_text("✅ تم الإرسال")
+        user_data.pop(uid,None); await message.reply_text(translate_ui_text(uid,"✅ تم الإرسال"))
         try: await client.send_message(OWNER_ID,f"📬 {uid}\n💬 {text}")
         except: pass
         return
 
     if user_data.get(uid, {}).get('awaiting_merge_range'):
         m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$', message.text.strip())
-        if not m: await message.reply_text("🔢 صيغة نطاق الفصول غير صحيحة.\nأرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10."); return
+        if not m: await message.reply_text(translate_ui_text(uid,"🔢 صيغة نطاق الفصول غير صحيحة.\nأرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.")); return
         start_num, end_num = float(m.group(1)), float(m.group(2))
         if start_num > end_num: start_num, end_num = end_num, start_num
         info = user_data[uid]['awaiting_merge_range']; src, ident, chs = info['src'], info['ident'], info['chapters']
@@ -3487,21 +3556,21 @@ async def handle_all_text(client,message):
                 if m2: num = float(m2.group(1))
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
-        if not selected: await message.reply_text("📚 لم يتم العثور على فصول ضمن هذا النطاق.\nتحقق من أرقام الفصول وأرسل نطاقاً آخر."); return
+        if not selected: await message.reply_text(translate_ui_text(uid,"📚 لم يتم العثور على فصول ضمن هذا النطاق.\nتحقق من أرقام الفصول وأرسل نطاقاً آخر.")); return
         count = len(selected); mmax = PDF_MAX_CHAPTERS
-        if count > mmax: await message.reply_text(f"📄 عدد الفصول يتجاوز الحد المسموح.\nطلبت {count} فصلاً، والحد الأقصى لهذا الملف {mmax} فصول."); return
+        if count > mmax: await message.reply_text(translate_ui_text(uid,f"📄 عدد الفصول يتجاوز الحد المسموح.\nطلبت {count} فصلاً، والحد الأقصى لهذا الملف {mmax} فصول.")); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
-            if remaining < count: await message.reply_text(f"💳 رصيد الدمج غير كافٍ.\nالمطلوب: {count} فصل.\nالمتاح: {int(remaining)} فصل.\nيمكنك تجديد الرصيد أو ترقية حسابك إلى VIP."); return
+            if remaining < count: await message.reply_text(translate_ui_text(uid,f"💳 رصيد الدمج غير كافٍ.\nالمطلوب: {count} فصل.\nالمتاح: {int(remaining)} فصل.\nيمكنك تجديد الرصيد أو ترقية حسابك إلى VIP.")); return
         if not settings.get("allow_parallel_downloads", False):
-            if is_downloading(uid) or not try_lock_download(uid): await message.reply_text("⏳ يوجد تحميل آخر قيد التنفيذ.\nانتظر حتى يكتمل ثم حاول مجدداً."); return
+            if is_downloading(uid) or not try_lock_download(uid): await message.reply_text(translate_ui_text(uid,"⏳ يوجد تحميل آخر قيد التنفيذ.\nانتظر حتى يكتمل ثم حاول مجدداً.")); return
         locked = not settings.get("allow_parallel_downloads", False)
         try:
             success, rem = try_deduct_merge(uid, count)
-            if not success: await message.reply_text("❌ تعذّر بدء تحميل الفصل.\nلم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل."); return
+            if not success: await message.reply_text(translate_ui_text(uid,"❌ تعذّر بدء تحميل الفصل.\nلم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.")); return
             user_data[uid].pop('awaiting_merge_range', None)
             title = user_data[uid].get('title', 'مانجا')
-            lm = await message.reply_text(f"🧩 بدأ تجهيز ملف دمج الفصول\n📚 النطاق: {start_num:g} → {end_num:g}\n🔢 عدد الفصول: {count}\n⏳ يرجى الانتظار...")
+            lm = await message.reply_text(translate_ui_text(uid,f"🧩 بدأ تجهيز ملف دمج الفصول\n📚 النطاق: {start_num:g} → {end_num:g}\n🔢 عدد الفصول: {count}\n⏳ يرجى الانتظار..."))
             chapter_groups = []
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
@@ -3546,7 +3615,7 @@ async def handle_all_text(client,message):
 
             if not chapter_groups:
                 refund_merge(uid,count)
-                await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
+                await lm.edit_text(translate_ui_text(uid,"❌ لم يستخرج المحرك صور الفصول"))
                 return
             merge_timer_stop = asyncio.Event()
             merge_bar_frames = [
@@ -3587,7 +3656,7 @@ async def handle_all_text(client,message):
                 await merge_bar_task
             if not buf:
                 refund_merge(uid, count)
-                await lm.edit_text("❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك.")
+                await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
                 return
             await lm.edit_text(
                 "📤 يتم إرسال الملف إلى تيليجرام...\n\n"
