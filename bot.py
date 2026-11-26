@@ -1709,9 +1709,9 @@ def _trigger_notify(uid, kind="both"):
     except RuntimeError: pass
 async def _send_renewal_notify(uid, kind="both"):
     try:
-        parts = ["🎁 تم تجديد رصيدك!\n\n"]
-        if kind in ("single", "both"): parts.append(f"📖 فصول مفردة: {settings.get('daily_reward_amount',100)}\n")
-        if kind in ("merge", "both"): parts.append(f"🧩 فصول مدمجة: {settings.get('merge_daily_limit',50)}\n")
+        parts = [translate_ui_text(uid, "🎁 تم تجديد رصيدك!\n\n")]
+        if kind in ("single", "both"): parts.append(translate_ui_text(uid, f"📖 فصول مفردة: {settings.get('daily_reward_amount',100)}\n"))
+        if kind in ("merge", "both"): parts.append(translate_ui_text(uid, f"🧩 فصول مدمجة: {settings.get('merge_daily_limit',50)}\n"))
         if len(parts) > 1: await app.send_message(uid, "".join(parts))
     except: pass
 set_notify_callback(_send_renewal_notify)
@@ -2144,8 +2144,8 @@ async def _show_share_link(client,msg,uid):
           f"🧩 دمج: +{settings.get('referral_bonus_merge',20)}\n\n"
           f"رابطك:\n{link}"))
     kb=InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 جرب هذا البوت!')}")],
-        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+        [InlineKeyboardButton("📤 Share" if get_user_language(uid)=="en" else "📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 Try this bot!' if get_user_language(uid)=='en' else '🎁 جرب هذا البوت!')}")],
+        [InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
     await msg.reply_text(text,reply_markup=kb)
 
 async def _show_vip_upgrade(client,msg,uid):
@@ -2154,15 +2154,17 @@ async def _show_vip_upgrade(client,msg,uid):
     except: pass
     cu=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}"
     second=settings.get("vip_contact_second"); cu2=f"https://t.me/{str(second)[1:]}" if second and str(second).startswith("@") else None
-    rows=[[InlineKeyboardButton("👤 تواصل مع الأدمن",url=cu)]]
-    if cu2: rows.append([InlineKeyboardButton("👥 تواصل بديل",url=cu2)])
-    rows.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+    en = get_user_language(uid) == "en"
+    rows=[[InlineKeyboardButton("👤 Contact admin" if en else "👤 تواصل مع الأدمن",url=cu)]]
+    if cu2: rows.append([InlineKeyboardButton("👥 Alternative contact" if en else "👥 تواصل بديل",url=cu2)])
+    rows.append([InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")])
     await msg.reply_text(
         translate_ui_text(uid, f"👑 ترقية VIP\n\n✨ المميزات:\n├ ♾️ تحميل غير محدود\n├ ⭐ المفضلة\n├ 🧩 دمج غير محدود\n└ ⚡ أولوية في الدعم\n\n💰 أسبوعي / شهري / سنوي\n\n💬 تواصل:"),
         reply_markup=InlineKeyboardMarkup(rows))
 
 async def _show_vip_details(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    en = get_user_language(uid) == "en"
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid):
         info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
         exp=time.strftime("%Y-%m-%d %H:%M",time.localtime(info["expires"]))
