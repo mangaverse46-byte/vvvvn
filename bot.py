@@ -840,6 +840,97 @@ def add_user(uid):
 def get_user_language(uid):
     row = _conn().execute("SELECT language FROM user_languages WHERE uid=?", (int(uid),)).fetchone()
     return str(row["language"]) if row and row["language"] in ("ar", "en") else None
+def translate_ui_text(uid, value):
+    """Translate common user-facing bot text for users who selected English."""
+    if get_user_language(uid) != "en" or not isinstance(value, str):
+        return value
+    translations = {
+        "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.": "🔎 Send the name of the manga or manhwa you want to search for.",
+        "مثال: Solo Leveling": "Example: Solo Leveling",
+        "للإلغاء أرسل /cancel": "To cancel, send /cancel",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search:",
+        "🔍 اكتب اسم المانجا بعد الأمر، مثال:": "🔍 Enter the manga name after the command. Example:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "❌ إغلاق": "❌ Close",
+        "❌ إلغاء": "❌ Cancel",
+        "❌ ملغى": "❌ Cancelled",
+        "ℹ️ لا شيء قيد التنفيذ": "ℹ️ Nothing is currently in progress.",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Please type your message:",
+        "❓ مساعدة": "❓ Help",
+        "🔍 /search الاسم": "🔍 /search name",
+        "📚 4 مصادر": "📚 4 sources",
+        "📖 فردي:": "📖 Single downloads:",
+        "🧩 دمج:": "🧩 Chapter merges:",
+        "📎 حد الملف:": "📎 File limit:",
+        "🔗 إحالة: فردي": "🔗 Referral: single",
+        " / دمج": " / merge",
+        "👑 VIP: بلا حدود": "👑 VIP: Unlimited",
+        "⚠️ هذا المصدر لم يعد متاحاً.": "⚠️ This source is no longer available.",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "📖 فصل": "📖 chapters",
+        "📌 آخر فصل:": "📌 Latest chapter:",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "❌ تعذر تحميل قائمة المصادر": "❌ Could not load the source list.",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "⬅️ المصادر": "⬅️ Sources",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "⏳ جاري تحميل معلومات المانجا...": "⏳ Loading manga details...",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "❌ تعذر جلب المعلومات": "❌ Could not retrieve the information.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "⚠️ رابط المانجا غير موجود": "⚠️ Manga link not found.",
+        "🔄": "🔄",
+        "VIP فقط 👑": "VIP only 👑",
+        "🔒 ميزة VIP": "🔒 VIP feature",
+        "⭐ المفضلات لمشتركي VIP فقط": "⭐ Favorites are available to VIP members only.",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️": "⚙️",
+        "اختر:": "Choose:",
+        "مفعلة": "Enabled",
+        "معطلة": "Disabled",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "👤 حسابي": "👤 My Account",
+        "👤 عضو عادي": "👤 Standard member",
+        "👑 عضو VIP — تحميل غير محدود": "👑 VIP member — Unlimited downloads",
+        "📊 رصيدي": "📊 My balance",
+        "📊 رصيد الفصول": "📊 Chapter balance",
+        "🔗 مشاركة البوت": "🔗 Share the bot",
+        "احصل على مكافآت لكل صديق:": "Earn rewards for every friend:",
+        "رابطك:": "Your link:",
+        "📤 مشاركة": "📤 Share",
+        "👑 ترقية VIP": "👑 Upgrade to VIP",
+        "✨ المميزات:": "✨ Benefits:",
+        "├ ♾️ تحميل غير محدود": "├ ♾️ Unlimited downloads",
+        "├ ⭐ المفضلة": "├ ⭐ Favorites",
+        "├ 🧩 دمج غير محدود": "├ 🧩 Unlimited merges",
+        "└ ⚡ أولوية في الدعم": "└ ⚡ Priority support",
+        "💬 تواصل:": "💬 Contact:",
+        "💎 تفاصيل VIP": "💎 VIP details",
+        "❌ لست VIP": "❌ You are not a VIP member.",
+        "💡 يمكنك الترقية": "💡 You can upgrade.",
+        "⏰ الوقت": "⏰ Timers",
+        "⏳ VIP — بلا انتظار": "⏳ VIP — No waiting",
+        "✅ جاهز": "✅ Ready",
+        "📅 مسجل:": "📅 Joined:",
+        "⬇️ التحميلات:": "⬇️ Downloads:",
+        "🆔 المعرّف:": "🆔 ID:",
+        "📝 اليوزر:": "📝 Username:",
+        "📖 فردي": "📖 Single downloads",
+        "🧩 دمج": "🧩 Merges",
+        "📚": "📚",
+    }
+    result = value
+    for ar, en in sorted(translations.items(), key=lambda item: len(item[0]), reverse=True):
+        result = result.replace(ar, en)
+    return result
+
 def set_user_language(uid, language):
     language = "en" if str(language).lower() == "en" else "ar"
     _execute("INSERT OR REPLACE INTO user_languages (uid, language) VALUES (?,?)", (int(uid), language))
@@ -2195,8 +2286,8 @@ async def check_cmd(client,message):
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client,message):
     uid=message.from_user.id
-    if user_data.get(uid): user_data.pop(uid,None); await message.reply_text("❌ ملغى")
-    else: await message.reply_text("ℹ️ لا شيء قيد التنفيذ")
+    if user_data.get(uid): user_data.pop(uid,None); await message.reply_text(translate_ui_text(uid, "❌ ملغى"))
+    else: await message.reply_text(translate_ui_text(uid, "ℹ️ لا شيء قيد التنفيذ"))
 
 @app.on_message(filters.command("admin") & filters.private)
 async def admin_panel(client,message):
