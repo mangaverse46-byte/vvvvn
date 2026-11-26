@@ -2148,7 +2148,7 @@ async def _show_share_link(client,msg,uid):
         [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
     await msg.reply_text(text,reply_markup=kb)
 
-async def _show_vip_upgrade(client,msg):
+async def _show_vip_upgrade(client,msg,uid):
     au=None
     try: o=await client.get_chat(OWNER_ID); au=o.username
     except: pass
@@ -2538,11 +2538,11 @@ async def unified_callback(client,callback):
     if data=="my_account_refresh": await callback.answer("🔄"); await _show_my_account(client,msg,uid,edit=True); return
     if data=="acc_chapters": await callback.answer("📊"); await _show_chapters_balance(client,msg,uid); return
     if data=="acc_share": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
-    if data=="acc_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="acc_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg,uid); return
     if data=="acc_vip_details": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
     if data=="acc_daily_timer": await callback.answer("⏰"); await _show_daily_timer(client,msg,uid); return
     if data=="share_referral": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
-    if data=="vip_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="vip_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg,uid); return
     if data=="vip_info": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
 
     if data=="fav_list":
