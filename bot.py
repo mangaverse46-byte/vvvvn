@@ -2041,7 +2041,7 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
         latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
         kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
         kb.append([InlineKeyboardButton("🏠 Main menu" if en else "🏠 القائمة الرئيسية", callback_data="latest_home")])
-    kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+    kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     return InlineKeyboardMarkup(kb), page, total
 
 def pack_share_url(url):
@@ -2441,7 +2441,7 @@ async def _show_vip_details(client,msg,uid):
     else: await msg.reply_text(translate_ui_text(uid,"💎 VIP\n\n❌ لست VIP\n\n💡 يمكنك الترقية"), reply_markup=kb)
 
 async def _show_daily_timer(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid): await msg.reply_text(translate_ui_text(uid, "⏰ VIP — بلا انتظار"),reply_markup=kb); return
     rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
     rem=max(0,(base+bonus)-int(rec.get("used",0)))
@@ -2803,7 +2803,7 @@ async def unified_callback(client,callback):
         user_data.setdefault(uid, {})["awaiting_search_query"] = True
         await msg.reply_text(
             translate_ui_text(uid, "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.\n\nمثال: Solo Leveling\n\nللإلغاء أرسل /cancel"),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
         )
         return
     if data=="my_account": await callback.answer("👤"); await _show_my_account(client,msg,uid,edit=False); return
@@ -2948,7 +2948,7 @@ async def unified_callback(client,callback):
         mangas=await asyncio.to_thread(get_source("mangalik").get_manga_by_genre, slug, 1)
         if not mangas: await safe_edit(msg,"❌",InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌",callback_data="close_list")]])); return
         kb=[[InlineKeyboardButton(f"📖 {item.get('title','Manga')[:40]}",callback_data=f"cat_sel_{idx}_{i}")] for i,item in enumerate(mangas)]
-        kb.append([InlineKeyboardButton("🔙 Back" if get_user_language(uid)=="en" else "🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        kb.append([InlineKeyboardButton("🔙 Back" if get_user_language(uid)=="en" else "🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
         await safe_edit(msg,f"🏷️ {name} ({len(mangas)})",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_sel_"):
@@ -3060,7 +3060,7 @@ async def unified_callback(client,callback):
             f"✨ عند فتحه يفتح البوت ويعرض المانجا تلقائياً"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]
+            [InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")]
         ])
         await msg.reply_text(translate_ui_text(uid, txt), reply_markup=kb)
         await callback.answer(translate_ui_text(uid, "🔗 الرابط جاهز — انسخه"))
