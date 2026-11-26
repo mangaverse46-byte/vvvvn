@@ -1275,7 +1275,7 @@ async def _process_gift_claim(client, cid, uid, code):
         admin_id = link.get('created_by')
         if admin_id:
             try:
-                u = await client.get_users(uid); uname = f"@{u.username}" if u.username else (u.first_name or str(uid))
+                u = await client.get_chat(uid); uname = f"@{u.username}" if u.username else (u.first_name or str(uid))
                 await client.send_message(admin_id,
                     f"🔔 **دخل شخص عبر رابط الهدية**\n\n🔗 `{link['code']}`\n👤 {uname} (`{uid}`)\n"
                     f"📊 `{link['used_count']}/{link['max_users']}`",
@@ -1762,7 +1762,7 @@ async def _show_share_link(client,msg,uid):
 
 async def _show_vip_upgrade(client,msg):
     au=None
-    try: o=await client.get_users(OWNER_ID); au=o.username
+    try: o=await client.get_chat(OWNER_ID); au=o.username
     except: pass
     cu=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}"
     second=settings.get("vip_contact_second"); cu2=f"https://t.me/{str(second)[1:]}" if second and str(second).startswith("@") else None
@@ -3153,10 +3153,11 @@ async def handle_all_text(client,message):
         for tok in re.split(r'[\s,]+', message.text.strip()):
             if not tok: continue
             try:
-                if tok.startswith("@"): u = await client.get_users(tok); ids.append(u.id)
-                else: ids.append(int(tok))
+                if tok.startswith("@"): continue
+                user_id = int(tok)
+                if user_id > 0: ids.append(user_id)
             except: pass
-        if not ids: await message.reply_text("⚠️ **لم أتعرف على أي مستخدم.**\nأرسل آيديات رقمية أو أسماء مستخدمين صحيحة مثل @username."); return
+        if not ids: await message.reply_text("⚠️ **لم أتعرف على أي مستخدم.**\nأرسل آيديات تيليجرام الرقمية فقط، مفصولة بمسافة أو فاصلة."); return
         set_gift_allowed_users(code, ids); user_data.pop(uid, None)
         await message.reply_text(f"✅ `{len(ids)}` مستخدم", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
     if user_data.get(uid, {}).get("awaiting_gift_channel"):
@@ -3213,8 +3214,8 @@ async def handle_all_text(client,message):
         return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_id"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد فصول الدمج التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_amount"):
         try: a=int(message.text.strip())
@@ -3292,7 +3293,7 @@ async def handle_all_text(client,message):
     if user_data.get(uid,{}).get("awaiting_gift_one_id"):
         t=message.text.strip(); tid=None
         try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد الفصول المجانية التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_amount"):
         try: a=int(message.text.strip())
