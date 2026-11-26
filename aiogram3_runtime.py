@@ -11,7 +11,6 @@ from typing import Any, Callable, Iterable
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
@@ -44,7 +43,7 @@ async def _call_with_plain_text_fallback(method: Any, *args: Any, **kwargs: Any)
 def create_bot(token: str) -> Bot:
     if not token or not token.strip():
         raise ValueError("BOT_TOKEN is required")
-    return Bot(token=token.strip(), default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+    return Bot(token=token.strip(), default=DefaultBotProperties(parse_mode=None))
 
 
 def create_dispatcher() -> Dispatcher:
