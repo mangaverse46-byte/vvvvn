@@ -2091,7 +2091,7 @@ async def _start_cmd_impl(client,message):
             await client.send_message(OWNER_ID,f"👤 عضو جديد\n\n👤 {message.from_user.first_name or ''}\n🆔 {uid}\n📝 @{un}")
         except: pass
     if not get_user_language(uid):
-        user_data[uid] = {"pending_language_start": message.text or "/start"}
+        user_data.setdefault(uid, {})["pending_language_start"] = message.text or "/start"
         await client.send_message(message.chat.id, language_prompt_text(), reply_markup=language_keyboard())
         return
     is_sub,_=await is_user_subscribed(client,uid)
