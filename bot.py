@@ -2181,6 +2181,10 @@ async def unified_callback(client,callback):
             color = color_actions[data]
             if color == "auto":
                 styles.pop(target, None)
+                # Also clear the legacy callback-wide override so "automatic"
+                # really restores the category color for this button.
+                legacy_callback = target.split("::", 1)[0]
+                styles.pop(legacy_callback, None)
             else:
                 styles[target] = color
             settings["button_styles"] = styles
@@ -2225,7 +2229,6 @@ async def unified_callback(client,callback):
             )
         except Exception:
             BUTTON_COLOR_MODE[uid] = "__waiting__"
-            await callback.answer("تعذر فتح خيارات اللون، حاول مرة أخرى", show_alert=True)
         return
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
