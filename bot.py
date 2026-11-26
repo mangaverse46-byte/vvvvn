@@ -1715,7 +1715,7 @@ async def _show_my_account(client,msg,uid,edit=False):
     else: type_line=f"👤 **عضو عادي**\n📖 فردي: `{int(get_daily_remaining(uid))}`\n🧩 دمج: `{int(get_merge_remaining(uid))}`"
     joined=time.strftime("%Y-%m-%d",time.localtime(get_user_joined(uid)))
     try:
-        u=await client.get_users(uid); un=f"@{u.username}" if u.username else "—"
+        u=await client.get_chat(uid); un=f"@{u.username}" if u.username else "—"
     except: un="—"
     text=(f"👤 **حسابي**\n\n{type_line}\n\n🆔 **المعرّف:** `{uid}`\n📝 **اليوزر:** {un}\n"
           f"📅 **مسجل:** `{joined}`\n⬇️ **التحميلات:** `{get_user_downloads(uid)}`")
@@ -2118,7 +2118,7 @@ async def unified_callback(client,callback):
             try: await msg.delete()
             except: pass
             try:
-                o=await client.get_users(OWNER_ID); au=o.username
+                o=await client.get_chat(OWNER_ID); au=o.username
             except: au=None
             rows=[[InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
             await msg.reply_text("🔒 **ميزة VIP**\n\n⭐ المفضلات لمشتركي VIP فقط", reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN); return
@@ -3292,7 +3292,7 @@ async def handle_all_text(client,message):
         user_data.pop(uid,None); await message.reply_text(f"🎁 **اكتمل توزيع الفصول المجانية**\n✅ وصل إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_id"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
+        try: tid=int(t)
         except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد الفصول المجانية التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_amount"):
@@ -3305,28 +3305,28 @@ async def handle_all_text(client,message):
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_reset_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         reset_user_balance(tid); await message.reply_text(f"♻️ **تم تصفير رصيد المستخدم** `{tid}` بنجاح."); user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_ban_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("🛡️ **لا يمكن حظر أدمن أو مالك البوت.**"); user_data.pop(uid,None); return
         if ban_user(tid): await message.reply_text(f"🚫 **تم حظر المستخدم** `{tid}` بنجاح.")
         else: await message.reply_text("⚠️ **لم يتم حظر المستخدم.** ربما هو محظور مسبقاً أو آيديه غير صحيح.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_unban_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         if unban_user(tid): await message.reply_text(f"🔓 **تم رفع الحظر عن المستخدم** `{tid}` بنجاح.")
         else: await message.reply_text("⚠️ **لم يتم رفع الحظر.** تأكد من أن المستخدم موجود في قائمة المحظورين.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_add_admin"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         ok,m=add_added_admin(tid)
         if ok:
             await message.reply_text(f"👮 **تمت إضافة المستخدم** `{tid}` **كمشرف بنجاح.**")
@@ -3337,8 +3337,8 @@ async def handle_all_text(client,message):
     plan=user_data.get(uid,{}).get("awaiting_vip_user")
     if plan:
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         if add_vip(tid,plan):
             info=get_vip_info(tid); dy=max(0,int((info["expires"]-time.time())//86400))
             await message.reply_text(f"👑 **تم تفعيل VIP للمستخدم** `{tid}`\n📅 الخطة: {VIP_PLAN_NAMES[plan]}\n⏳ المدة المتبقية: `{dy}` يوم")
@@ -3348,8 +3348,8 @@ async def handle_all_text(client,message):
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_vip_remove"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدي تيليجرام الرقمي فقط."); return
         if remove_vip(tid): await message.reply_text(f"👑 **تم إلغاء اشتراك VIP للمستخدم** `{tid}`.")
         else: await message.reply_text("⚠️ **لم يتم إلغاء VIP.** قد لا يكون المستخدم مشتركاً حالياً.")
         user_data.pop(uid,None); return
