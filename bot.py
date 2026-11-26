@@ -1693,6 +1693,7 @@ async def download_image_bytesio(url,referer=None):
     return None
 
 async def send_cover_message(msg,cover,text,markup,referer=None):
+    text = translate_ui_text(msg.chat.id, text)
     if cover:
         for rf in [referer,None]:
             try:
@@ -1703,6 +1704,7 @@ async def send_cover_message(msg,cover,text,markup,referer=None):
 
 async def safe_edit_fresh_text(client, msg, chat_id, text, markup=None):
     """Show a text-only screen; never leave an old manga cover behind a list."""
+    text = translate_ui_text(chat_id, text)
     if msg.photo or msg.video or msg.document or msg.animation:
         try:
             await msg.delete()
@@ -1713,6 +1715,7 @@ async def safe_edit_fresh_text(client, msg, chat_id, text, markup=None):
 
 
 async def safe_edit(msg,text,markup=None):
+    text = translate_ui_text(msg.chat.id, text)
     if msg.photo or msg.video or msg.document or msg.animation:
         try: return await msg.edit_caption(caption=text,reply_markup=markup)
         except: pass
@@ -1879,6 +1882,7 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         await client.send_message(cid, f"❌ تعذر فتح المانجا: {str(e)[:180]}")
 
 async def send_message_with_image(client,cid,text,key,markup=None):
+    text = translate_ui_text(cid, text)
     img=settings.get(key)
     if img:
         try: return await client.send_photo(chat_id=cid,photo=img,caption=text, reply_markup=markup)
@@ -2367,7 +2371,7 @@ async def unified_callback(client,callback):
 
     if data=="complaint_start":
         await callback.answer("📩"); user_data[uid]={"awaiting_complaint":True}
-        await msg.reply_text("📩 شكوى\n\n✍️ اكتب:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء",callback_data="cancel_complaint")]])); return
+        await msg.reply_text(translate_ui_text(uid,"📩 شكوى\n\n✍️ اكتب:"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel" if get_user_language(uid)=="en" else "❌ إلغاء",callback_data="cancel_complaint")]])); return
     if data=="cancel_complaint":
         user_data.pop(uid,None)
         try: await msg.delete()
@@ -2376,18 +2380,13 @@ async def unified_callback(client,callback):
     if data in ("help_full","help"):
         await callback.answer("❓")
         await msg.reply_text(
-            f"❓ مساعدة\n\n🔍 /search الاسم\n📚 4 مصادر\n\n"
-            f"📖 فردي: {settings.get('daily_reward_amount',100)}\n🧩 دمج: {settings.get('merge_daily_limit',50)}\n"
-            f"📎 حد الملف: {PDF_MAX_CHAPTERS}\n"
-            f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
-            f"👑 VIP: بلا حدود",
+            translate_ui_text(uid, f"❓ مساعدة\n\n🔍 /search الاسم\n📚 4 مصادر\n\n📖 فردي: {settings.get('daily_reward_amount',100)}\n🧩 دمج: {settings.get('merge_daily_limit',50)}\n📎 حد الملف: {PDF_MAX_CHAPTERS}\n🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n👑 VIP: بلا حدود"),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
     if data=="main_search":
         await callback.answer("🔍")
         user_data.setdefault(uid, {})["awaiting_search_query"] = True
         await msg.reply_text(
-            "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.\n\n"
-            "مثال: Solo Leveling\n\nللإلغاء أرسل /cancel",
+            translate_ui_text(uid, "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.\n\nمثال: Solo Leveling\n\nللإلغاء أرسل /cancel"),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
         )
         return
