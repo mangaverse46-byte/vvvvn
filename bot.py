@@ -2136,7 +2136,7 @@ async def _show_my_account(client,msg,uid,edit=False):
         await msg.reply_text(text,reply_markup=_account_keyboard(uid))
 
 async def _show_chapters_balance(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid):
         info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
         await msg.reply_text(translate_ui_text(uid,f"📊 رصيد الفصول\n\n👑 أنت VIP!\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود"), reply_markup=kb); return
@@ -2610,7 +2610,7 @@ async def unified_callback(client,callback):
             # Give each source its own position-based color; colors repeat after three.
             style = source_styles[index % len(source_styles)]
             kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}",style=style)])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
         await send_message_with_image(client,cid,translate_ui_text(uid,"📚 اختر مصدر أحدث الفصول:"),"sources_image",InlineKeyboardMarkup(kb)); return
@@ -2643,8 +2643,8 @@ async def unified_callback(client,callback):
             return
         if not selected:
             await safe_edit_fresh_text(client,msg,cid,"❌ لا توجد مانجا حديثة في هذا المصدر",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list",style="danger")],
-                                      [InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")]]))
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Sources" if get_user_language(uid)=="en" else "⬅️ المصادر",callback_data="latest_manga_list",style="danger")],
+                                      [InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")]]))
             return
         kb=[]
         for i,item in selected:
@@ -2699,7 +2699,7 @@ async def unified_callback(client,callback):
         mangas=await asyncio.to_thread(get_source("mangalik").get_manga_by_genre, slug, 1)
         if not mangas: await safe_edit(msg,"❌",InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌",callback_data="close_list")]])); return
         kb=[[InlineKeyboardButton(f"📖 {item.get('title','Manga')[:40]}",callback_data=f"cat_sel_{idx}_{i}")] for i,item in enumerate(mangas)]
-        kb.append([InlineKeyboardButton("🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        kb.append([InlineKeyboardButton("🔙 Back" if get_user_language(uid)=="en" else "🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
         await safe_edit(msg,f"🏷️ {name} ({len(mangas)})",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_sel_"):
@@ -3022,7 +3022,7 @@ async def unified_callback(client,callback):
             try: await msg.delete()
             except: pass
             await client.send_message(cid, f"❌ لا نتائج أو المصدر غير متاح\n{q}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 New search" if get_user_language(uid)=="en" else "🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
         user_data[uid]["search_results"]=res; user_data[uid]["source"]=src
         kb=[]
         for i,item in enumerate(res):
