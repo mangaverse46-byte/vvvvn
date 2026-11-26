@@ -15,6 +15,7 @@ InlineKeyboardMarkup = make_inline_keyboard
 
 BUTTON_CATALOG = {}
 BUTTON_COLOR_MODE = {}
+BUTTON_COLOR_PENDING = {}
 
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
@@ -2156,15 +2157,26 @@ async def unified_callback(client,callback):
 
     # Live color mode is isolated to the administrator who enabled it.
     # Ordinary users always follow the normal callback handlers below.
+    execute_original = False
     if is_admin_any(uid) and uid in BUTTON_COLOR_MODE:
         if data == "admin_color_mode_exit":
             BUTTON_COLOR_MODE.pop(uid, None)
+            BUTTON_COLOR_PENDING.pop(uid, None)
             await callback.answer("تم إيقاف وضع تغيير الألوان", show_alert=True)
             try:
                 await msg.answer("🎨 تم إيقاف وضع تغيير الألوان.")
             except Exception:
                 pass
             return
+
+        if data == "admin_live_color_execute":
+            original_callback = BUTTON_COLOR_PENDING.pop(uid, None)
+            if not original_callback:
+                await callback.answer("حدد الزر الأصلي أولاً", show_alert=True)
+                return
+            data = original_callback
+            BUTTON_COLOR_MODE[uid] = "__waiting__"
+            execute_original = True
 
         color_actions = {
             "admin_live_color_success": "success",
@@ -2204,32 +2216,36 @@ async def unified_callback(client,callback):
             await callback.answer("وضع تغيير الألوان مفعّل بالفعل")
             return
 
-        # Resolve the exact visible label, not just callback_data. Buttons with
-        # different labels but a shared callback can now be styled separately.
-        label = data
-        try:
-            for row in (msg.reply_markup.inline_keyboard if msg and msg.reply_markup else []):
-                for button in row:
-                    if getattr(button, "callback_data", None) == data:
-                        label = str(button.text)
-                        break
-        except Exception:
-            pass
-        target_key = f"{data}::{label}"
-        BUTTON_COLOR_MODE[uid] = target_key
-        await callback.answer("اختر لون الزر")
-        try:
-            await msg.answer(
-                f"🎨 تغيير لون الزر:\n{label}\nاختر اللون، ثم اضغط زرّاً آخر لتغيير لونه.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🟢 أخضر",callback_data="admin_live_color_success"),InlineKeyboardButton("🔴 أحمر",callback_data="admin_live_color_danger")],
-                    [InlineKeyboardButton("🔵 أزرق",callback_data="admin_live_color_primary"),InlineKeyboardButton("♻️ تلقائي",callback_data="admin_live_color_auto")],
-                    [InlineKeyboardButton("⏹️ إنهاء الوضع",callback_data="admin_color_mode_exit")]
-                ])
-            )
-        except Exception:
-            BUTTON_COLOR_MODE[uid] = "__waiting__"
-        return
+        if not execute_original:
+            # Resolve the exact visible label, not just callback_data.
+            # Buttons with different labels but a shared callback can now be styled separately.
+            label = data
+            try:
+                for row in (msg.reply_markup.inline_keyboard if msg and msg.reply_markup else []):
+                    for button in row:
+                        if getattr(button, "callback_data", None) == data:
+                            label = str(button.text)
+                            break
+            except Exception:
+                pass
+            target_key = f"{data}::{label}"
+            BUTTON_COLOR_MODE[uid] = target_key
+            BUTTON_COLOR_PENDING[uid] = data
+            await callback.answer("اختر لون الزر أو نفّذ الأمر الأصلي")
+            try:
+                await msg.answer(
+                    f"🎨 تغيير لون الزر:\n{label}\nاختر اللون، أو اضغط «أمر أصلي» لتنفيذ وظيفة الزر.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🟢 أخضر",callback_data="admin_live_color_success"),InlineKeyboardButton("🔴 أحمر",callback_data="admin_live_color_danger")],
+                        [InlineKeyboardButton("🔵 أزرق",callback_data="admin_live_color_primary"),InlineKeyboardButton("♻️ تلقائي",callback_data="admin_live_color_auto")],
+                        [InlineKeyboardButton("▶️ أمر أصلي",callback_data="admin_live_color_execute")],
+                        [InlineKeyboardButton("⏹️ إنهاء الوضع",callback_data="admin_color_mode_exit")]
+                    ])
+                )
+            except Exception:
+                BUTTON_COLOR_MODE[uid] = "__waiting__"
+                BUTTON_COLOR_PENDING.pop(uid, None)
+            return
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
         await callback.answer("⚠️ صيانة", show_alert=True); return
