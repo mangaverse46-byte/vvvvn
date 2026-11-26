@@ -14,9 +14,6 @@ from telethon import TelegramClient
 InlineKeyboardMarkup = make_inline_keyboard
 
 BUTTON_CATALOG = {}
-BUTTON_COLOR_MODE = {}
-BUTTON_COLOR_PENDING = {}
-BUTTON_COLOR_CONTEXT = {}
 
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
@@ -63,25 +60,8 @@ def InlineKeyboardButton(text, *args, **kwargs):
             kwargs.setdefault("callback_data", args[0])
         if len(args) == 2:
             kwargs.setdefault("url", args[1])
-    if "style" not in kwargs and callback:
-        custom = settings.get("button_styles", {}) if isinstance(globals().get("settings"), dict) else {}
-        # Store the color for this exact callback + visible label only.
-        style_key = f"{callback}::{label}"
-        if style_key in custom:
-            kwargs["style"] = custom[style_key]
-        elif callback in custom:
-            # Backward compatibility with colors saved by older versions.
-            kwargs["style"] = custom[callback]
-        else:
-            action = callback.casefold()
-            colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
-            if any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
-                group = "danger"
-            elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
-                group = "success"
-            else:
-                group = "primary"
-            kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
+    # Keep every inline button on one consistent color.
+    kwargs.setdefault("style", "primary")
     return _TelegramInlineKeyboardButton(text=label, **kwargs)
 
 from aiogram.enums import ParseMode, ChatMemberStatus
@@ -1986,24 +1966,6 @@ async def gift_channel_publisher_task():
         except Exception as e:  pass
         await asyncio.sleep(60)
 
-def show_admin_buttons_page(msg, page=0):
-    items = sorted(BUTTON_CATALOG.items(), key=lambda x: x[1].casefold())
-    total = len(items)
-    pages = max(1, (total + 7) // 8)
-    page = min(max(0, page), pages - 1)
-    rows = []
-    for idx in range(page * 8, min(total, (page + 1) * 8)):
-        cb, label = items[idx]
-        color = settings.get("button_styles", {}).get(cb, "تلقائي")
-        rows.append([InlineKeyboardButton(f"{idx+1}. {label[:34]} · {color}",callback_data=f"admin_btnpick_{idx}")])
-    nav=[]
-    if page>0: nav.append(InlineKeyboardButton("⬅️ السابق",callback_data=f"admin_btnpage_{page-1}"))
-    nav.append(InlineKeyboardButton(f"📄 {page+1}/{pages}",callback_data="admin_buttons_catalog"))
-    if page+1<pages: nav.append(InlineKeyboardButton("➡️ التالي",callback_data=f"admin_btnpage_{page+1}"))
-    rows.append(nav)
-    rows.append([InlineKeyboardButton("🔄 تحديث المكتشف",callback_data="admin_buttons_catalog"),InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back")])
-    return msg.edit_text(f"📋 كل أزرار البوت المكتشفة\nعدد الأزرار: {total}\nاختر زرّاً لتغيير لونه:",reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.MARKDOWN)
-
 def get_admin_panel_kb():
     status = "🔓 إيقاف الصيانة" if settings.get("maintenance_mode") else "🔒 وضع الصيانة"
     return InlineKeyboardMarkup([
@@ -2012,7 +1974,6 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("🖼️ الصور",callback_data="admin_images_section"), InlineKeyboardButton("📝 الرسائل",callback_data="admin_messages_section")],
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
-        [InlineKeyboardButton("🎨 وضع تغيير ألوان الأزرار",callback_data="admin_color_mode_start")],
         [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
         [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
         [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
@@ -2156,127 +2117,6 @@ async def admin_panel(client,message):
 async def unified_callback(client,callback):
     data=callback.data; uid=callback.from_user.id
     cid=callback.message.chat.id; msg=callback.message
-
-    # Live color mode is isolated to the administrator who enabled it.
-    # Ordinary users always follow the normal callback handlers below.
-    execute_original = False
-    if is_admin_any(uid) and uid in BUTTON_COLOR_MODE:
-        if data == "admin_color_mode_exit":
-            BUTTON_COLOR_MODE.pop(uid, None)
-            BUTTON_COLOR_PENDING.pop(uid, None)
-            BUTTON_COLOR_CONTEXT.pop(uid, None)
-            await callback.answer("تم إيقاف وضع تغيير الألوان", show_alert=True)
-            try:
-                await msg.answer("🎨 تم إيقاف وضع تغيير الألوان.")
-            except Exception:
-                pass
-            return
-
-        if data == "admin_live_color_execute":
-            original_callback = BUTTON_COLOR_PENDING.pop(uid, None)
-            original_context = BUTTON_COLOR_CONTEXT.pop(uid, None)
-            if not original_callback or not original_context:
-                await callback.answer("حدد الزر الأصلي أولاً", show_alert=True)
-                return
-            data = original_callback
-            cid = original_context.get("chat_id", cid)
-            msg = None
-            original_message_id = original_context.get("message_id")
-            # Fetch a fresh copy of the original Telegram message. Reusing the
-            # old callback message (the color menu) breaks pagination callbacks.
-            if original_message_id:
-                try:
-                    msg = await client.get_messages(cid, original_message_id)
-                except Exception:
-                    msg = None
-            if msg is None:
-                msg = original_context.get("message")
-            if msg is None:
-                await callback.answer("تعذر استعادة الرسالة الأصلية، اضغط الزر من جديد", show_alert=True)
-                BUTTON_COLOR_MODE[uid] = "__waiting__"
-                return
-            BUTTON_COLOR_MODE[uid] = "__waiting__"
-            execute_original = True
-
-        color_actions = {
-            "admin_live_color_success": "success",
-            "admin_live_color_danger": "danger",
-            "admin_live_color_primary": "primary",
-            "admin_live_color_auto": "auto",
-        }
-        if data in color_actions:
-            target = BUTTON_COLOR_MODE.get(uid)
-            if not target or target == "__waiting__":
-                await callback.answer("اضغط أولاً على الزر الذي تريد تغيير لونه", show_alert=True)
-                return
-            styles = dict(settings.get("button_styles", {}))
-            color = color_actions[data]
-            if color == "auto":
-                styles.pop(target, None)
-                # Also clear the legacy callback-wide override so "automatic"
-                # really restores the category color for this button.
-                legacy_callback = target.split("::", 1)[0]
-                styles.pop(legacy_callback, None)
-            else:
-                styles[target] = color
-            # Remove obsolete label-wide styles from the previous version.
-            styles = {k: v for k, v in styles.items() if not str(k).startswith("__label__::")}
-            settings["button_styles"] = styles
-            save_settings()
-            BUTTON_COLOR_MODE[uid] = "__waiting__"
-            BUTTON_COLOR_PENDING.pop(uid, None)
-            BUTTON_COLOR_CONTEXT.pop(uid, None)
-            await callback.answer("✅ تم حفظ لون الزر", show_alert=True)
-            try:
-                await msg.edit_text(
-                    "✅ تم حفظ اللون. وضع تغيير الألوان ما زال فعالاً. اضغط زرّاً آخر لتغيير لونه.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏹️ إنهاء الوضع",callback_data="admin_color_mode_exit")]])
-                )
-            except Exception:
-                pass
-            return
-
-        if data == "admin_color_mode_start":
-            await callback.answer("وضع تغيير الألوان مفعّل بالفعل")
-            return
-
-        if not execute_original:
-            # Resolve the exact visible label, not just callback_data.
-            # Buttons with different labels but a shared callback can now be styled separately.
-            label = data
-            try:
-                for row in (msg.reply_markup.inline_keyboard if msg and msg.reply_markup else []):
-                    for button in row:
-                        if getattr(button, "callback_data", None) == data:
-                            label = str(button.text)
-                            break
-            except Exception:
-                pass
-            # The selected button is identified by its callback and exact visible text.
-            target_key = f"{data}::{label}"
-            BUTTON_COLOR_MODE[uid] = target_key
-            BUTTON_COLOR_PENDING[uid] = data
-            BUTTON_COLOR_CONTEXT[uid] = {
-                "message": msg,
-                "chat_id": cid,
-                "message_id": getattr(msg, "id", None),
-            }
-            await callback.answer("اختر لون الزر أو نفّذ الأمر الأصلي")
-            try:
-                await msg.answer(
-                    f"🎨 تغيير لون الزر:\n{label}\nاختر اللون، أو اضغط «أمر أصلي» لتنفيذ وظيفة الزر.",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 أخضر",callback_data="admin_live_color_success"),InlineKeyboardButton("🔴 أحمر",callback_data="admin_live_color_danger")],
-                        [InlineKeyboardButton("🔵 أزرق",callback_data="admin_live_color_primary"),InlineKeyboardButton("♻️ تلقائي",callback_data="admin_live_color_auto")],
-                        [InlineKeyboardButton("▶️ أمر أصلي",callback_data="admin_live_color_execute")],
-                        [InlineKeyboardButton("⏹️ إنهاء الوضع",callback_data="admin_color_mode_exit")]
-                    ])
-                )
-            except Exception:
-                BUTTON_COLOR_MODE[uid] = "__waiting__"
-                BUTTON_COLOR_PENDING.pop(uid, None)
-                BUTTON_COLOR_CONTEXT.pop(uid, None)
-            return
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
         await callback.answer("⚠️ صيانة", show_alert=True); return
@@ -2791,14 +2631,6 @@ async def unified_callback(client,callback):
 
     # ============ ADMIN ============
     if is_admin_any(uid):
-        if data == "admin_color_mode_start":
-            BUTTON_COLOR_MODE[uid] = "__waiting__"
-            await msg.edit_text(
-                "🎨 وضع تغيير ألوان الأزرار مفعّل. اضغط على أي زر من أزرار البوت لتحديده، ثم اختر اللون.\n\nالمستخدمون الآخرون لن يتأثروا بوضع التحديد. اضغط إنهاء لإغلاق الوضع.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏹️ إنهاء الوضع",callback_data="admin_color_mode_exit")]])
-            )
-            await callback.answer("تم تفعيل وضع تغيير الألوان")
-            return
         if data == "admin_toggle_maintenance":
             current = settings.get("maintenance_mode", False); settings["maintenance_mode"] = not current; save_settings()
             await callback.answer("🔒" if not current else "🔓", show_alert=True)
