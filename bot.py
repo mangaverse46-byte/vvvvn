@@ -845,6 +845,78 @@ def translate_ui_text(uid, value):
     if get_user_language(uid) != "en" or not isinstance(value, str):
         return value
     translations = {
+        "⚠️ رابط تطبيق البوت غير مضبوط حالياً.": "⚠️ The bot app link is not configured yet.",
+        "⚠️ اشترك أولاً": "⚠️ Please subscribe first.",
+        "❌ إغلاق": "❌ Close",
+        "🔙 رجوع": "🔙 Back",
+        "📞 تواصل": "📞 Contact",
+        "🔗 مشاركة": "🔗 Share",
+        "🔍 بحث جديد": "🔍 New search",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️ إدارة": "⚙️ Manage",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا نتائج أو المصدر غير متاح\n": "❌ No results or the source is unavailable.\n",
+        "لا فصول": "No chapters",
+        "📚 فصل": "📚 chapters",
+        "فصل": "chapter",
+        "نتيجة": "results",
+        "📖 فصل": "📖 Chapter",
+        "📖 فصول": "📖 Chapters",
+        "❌ لا رصيد": "❌ No credits",
+        "⚠️ موجود": "⚠️ Already exists",
+        "🔗 الرابط جاهز — انسخه": "🔗 Link is ready — copy it.",
+        "📖 أحدث الفصول": "📖 Latest chapters",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "🔎 اكتب اسم المانجا": "🔎 Enter a manga title",
+        "📩 تقديم شكوى": "📩 Submit a complaint",
+        "👤 حسابي": "👤 My Account",
+        "🔥 أحدث المانجا": "🔥 Latest Manga",
+        "❓ مساعدة": "❓ Help",
+        "⭐ مفضلاتي": "⭐ My Favorites",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "🔄 جاري فحص الفصول الجديدة...": "🔄 Checking for new chapters...",
+        "✅ انتهى فحص المفضلات.": "✅ Favorites check completed.",
+        "⚠️ البوت في وضع الصيانة": "⚠️ The bot is under maintenance.",
+        "يرجى المحاولة لاحقاً": "Please try again later.",
+        "🚫 أنت محظور": "🚫 You are banned from using this bot.",
+        "⏳ جاري تحميل معلومات المانجا...": "⏳ Loading manga details...",
+        "⚠️ لا توجد بيانات، افتح المانجا أولاً": "⚠️ No data found. Open a manga first.",
+        "⚠️ مصدر المانجا غير متاح": "⚠️ Manga source is unavailable.",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "❌ فشل التحميل": "❌ Download failed.",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "🧩 دمج الفصول": "🧩 Merge chapters",
+        "💳 رصيد:": "💳 Balance:",
+        "حد أقصى": "Maximum",
+        "📝 أرسل: البداية-النهاية": "📝 Send: start-end",
+        "مثال:": "Example:",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "📌 آخر فصل:": "📌 Latest chapter:",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "❌ تعذر تحميل قائمة المصادر": "❌ Could not load the source list.",
+        "❌ تعذر جلب المعلومات": "❌ Could not retrieve the information.",
+        "🔄 تحديث": "🔄 Refresh",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "⬅️ المصادر": "⬅️ Sources",
+        "⬅️ السابق": "⬅️ Previous",
+        "التالي ➡️": "Next ➡️",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "✍️ اكتب:": "✍️ Type your message:",
+        "تم الإرسال": "Sent successfully",
+        "مفعلة": "Enabled",
+        "معطلة": "Disabled",
+        "⏳": "⏳",
+
         "🎉 مبروك! حصلت على هدية": "🎉 Congratulations! You received a gift",
         "📖 فصول مفردة:": "📖 Single chapters:",
         "🧩 فصول مدمجة:": "🧩 Merged chapters:",
@@ -2528,7 +2600,7 @@ async def unified_callback(client,callback):
         await callback.answer()
         post = _parse_telegram_post_link(settings.get("app_message_link"))
         if not post:
-            await msg.reply_text("⚠️ رابط تطبيق البوت غير مضبوط حالياً.")
+            await msg.reply_text(translate_ui_text(uid,"⚠️ رابط تطبيق البوت غير مضبوط حالياً."))
             return
         try:
             await client.copy_message(
@@ -2544,7 +2616,7 @@ async def unified_callback(client,callback):
     if data!="check_sub":
         is_sub,_=await is_user_subscribed(client,uid)
         if not is_sub:
-            await callback.answer("⚠️ اشترك أولاً",show_alert=True); await send_subscription_prompt(client,uid,cid); return
+            await callback.answer(translate_ui_text(uid,"⚠️ اشترك أولاً"),show_alert=True); await send_subscription_prompt(client,uid,cid); return
     if data=="close_list":
         try: await msg.delete()
         except: pass
@@ -2595,14 +2667,14 @@ async def unified_callback(client,callback):
         m,s,c=create_fav_list_markup(uid)
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,f"⭐ المفضلات ({c})\n⚙️ {s}\n\nاختر:","favorites_image",m)
+        await send_message_with_image(client,cid,translate_ui_text(uid,f"⭐ المفضلات ({c})\n⚙️ {s}\n\nاختر:"),"favorites_image",m)
         await callback.answer("⭐"); return
 
     if data=="toggle_notifications":
         if not is_vip(uid): await callback.answer(translate_ui_text(uid,"VIP فقط 👑"),show_alert=True); return
         cur=is_notifications_enabled(uid); set_notifications_enabled(uid,not cur)
         m,s,c=create_fav_list_markup(uid)
-        try: await msg.edit_text(f"⭐ ({c})\n⚙️ {s}\n\nاختر:",reply_markup=m)
+        try: await msg.edit_text(translate_ui_text(uid,f"⭐ ({c})\n⚙️ {s}\n\nاختر:"),reply_markup=m)
         except: pass
         await callback.answer("✅" if not cur else "❌"); return
 
@@ -2750,7 +2822,7 @@ async def unified_callback(client,callback):
             user_data.setdefault(uid,{})["search_results"]=[{"title":item[0],"url":manga_url,"id":ident}]
         if not manga_url:
             await callback.answer(translate_ui_text(uid,"رابط المانجا غير متوفر"),show_alert=True); return
-        await callback.answer("⏳"); await safe_edit(msg,"⏳ جاري تحميل معلومات المانجا...")
+        await callback.answer("⏳"); await safe_edit(msg,translate_ui_text(uid,"⏳ جاري تحميل معلومات المانجا..."))
         try:
             api=await asyncio.to_thread(get_source,src)
             info=await asyncio.to_thread(api.get_details,manga_url)
@@ -2984,7 +3056,7 @@ async def unified_callback(client,callback):
             if locked: unlock_download(uid)
 
     if data.startswith(("fav_add_","fav_remove_","toggle_notify_")):
-        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        if not is_vip(uid): await callback.answer(translate_ui_text(uid,"VIP فقط 👑"),show_alert=True); return
         src_short = data.split("_")[-1] if data.startswith("toggle_notify_") else data.split("_")[2]
         src = source_from_code(src_short)
         ident=user_data.get(uid, {}).get('identifier')
@@ -2998,7 +3070,7 @@ async def unified_callback(client,callback):
             except Exception:
                 lc = "0"
             if add_to_favorites(uid,info.get('title','?'),ident,src,info.get('manga_url',''),info.get('cover_url',''),lc): await callback.answer("✅")
-            else: await callback.answer("⚠️ موجود",show_alert=True)
+            else: await callback.answer(translate_ui_text(uid,"⚠️ موجود"),show_alert=True)
         elif data.startswith("fav_remove_"):
             if remove_from_favorites(uid,ident,src): await callback.answer("✅")
             else: await callback.answer("⚠️",show_alert=True)
@@ -3016,11 +3088,11 @@ async def unified_callback(client,callback):
         if not src: await callback.answer("⚠️"); return
         if uid not in user_data: await callback.answer("⚠️", show_alert=True); return
         ident=user_data[uid].get('identifier'); chs=user_data[uid].get('chapters',[])
-        if not chs: await callback.answer("لا فصول", show_alert=True); return
+        if not chs: await callback.answer(translate_ui_text(uid,"لا فصول"), show_alert=True); return
         user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
         mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
         mmax = PDF_MAX_CHAPTERS
-        await msg.reply_text(f"🧩 دمج الفصول\n\n📚 {len(chs)} فصل\n🔢 {mmax} حد أقصى\n💳 رصيد: {mr}\n\n📝 أرسل: البداية-النهاية\nمثال: 1-{mmax}\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
+        await msg.reply_text(translate_ui_text(uid,f"🧩 دمج الفصول\n\n📚 {len(chs)} فصل\n🔢 {mmax} حد أقصى\n💳 رصيد: {mr}\n\n📝 أرسل: البداية-النهاية\nمثال: 1-{mmax}\n\n/cancel"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]]))
         await callback.answer("⏳"); return
 
     if data.startswith("src_"):
@@ -3035,7 +3107,7 @@ async def unified_callback(client,callback):
         if not res:
             try: await msg.delete()
             except: pass
-            await client.send_message(cid, f"❌ لا نتائج أو المصدر غير متاح\n{q}",
+            await client.send_message(cid, translate_ui_text(uid,f"❌ لا نتائج أو المصدر غير متاح\n{q}"),
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 New search" if get_user_language(uid)=="en" else "🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
         user_data[uid]["search_results"]=res; user_data[uid]["source"]=src
         kb=[]
@@ -3045,7 +3117,7 @@ async def unified_callback(client,callback):
         kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,f"✅ {len(res)} نتيجة\n{q}","results_image",InlineKeyboardMarkup(kb)); return
+        await send_message_with_image(client,cid,translate_ui_text(uid,f"✅ {len(res)} نتيجة\n{q}"),"results_image",InlineKeyboardMarkup(kb)); return
 
     # ============ ADMIN ============
     if is_admin_any(uid):
