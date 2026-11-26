@@ -1554,7 +1554,7 @@ async def is_user_subscribed(client,uid):
     for ch in chs:
         try:
             m=await client.get_chat_member(chat_id=ch,user_id=uid)
-            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.BANNED]: unsub.append(ch)
+            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.KICKED]: unsub.append(ch)
         except Exception as e:
             if "user_not_participant" in str(e).lower(): unsub.append(ch)
     return (len(unsub)==0),(unsub if unsub else None)
