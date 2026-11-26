@@ -10,7 +10,7 @@ from urllib.parse import quote, urljoin, unquote
 from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard, create_bot, as_input_file
 import signal
 from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
-from aiogram.exceptions import TelegramEntityTooLarge
+from telethon import TelegramClient
 InlineKeyboardMarkup = make_inline_keyboard
 
 # Add a clear icon to any inline button label that does not already contain one.
@@ -627,6 +627,49 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 if not BOT_TOKEN or not OWNER_ID:
     raise RuntimeError("Missing BOT_TOKEN or OWNER_ID in .env")
+
+# Telethon MTProto uploader: direct Telegram uploads up to the bot-account limit.
+API_ID = int(os.getenv("API_ID", "0") or 0)
+API_HASH = os.getenv("API_HASH", "").strip()
+_mtproto_client = None
+_mtproto_lock = asyncio.Lock()
+
+
+async def send_pdf_direct(chat_id, document, file_name, caption=""):
+    """Upload a PDF directly over MTProto using this bot's token (not Bot API)."""
+    global _mtproto_client
+    if not API_ID or not API_HASH:
+        raise RuntimeError(
+            "إعدادات الرفع المباشر ناقصة: أضف API_ID و API_HASH إلى ملف .env"
+        )
+    async with _mtproto_lock:
+        if _mtproto_client is None:
+            _mtproto_client = TelegramClient(
+                "manga_virus_mtproto", API_ID, API_HASH,
+                connection_retries=5, retry_delay=2,
+                auto_reconnect=True,
+            )
+        if not _mtproto_client.is_connected():
+            await _mtproto_client.connect()
+        if not await _mtproto_client.is_user_authorized():
+            await _mtproto_client.start(bot_token=BOT_TOKEN)
+    if hasattr(document, "seek"):
+        document.seek(0)
+    return await _mtproto_client.send_file(
+        entity=int(chat_id),
+        file=document,
+        caption=caption,
+        force_document=True,
+        file_name=file_name,
+        parse_mode=None,
+    )
+
+
+async def close_mtproto_uploader():
+    global _mtproto_client
+    if _mtproto_client is not None and _mtproto_client.is_connected():
+        await _mtproto_client.disconnect()
+    _mtproto_client = None
 
 ADMINS = [OWNER_ID]; OWNER_IDS = [OWNER_ID]
 MAX_WORKERS = 15
@@ -2492,7 +2535,7 @@ async def unified_callback(client,callback):
                 title_for_caption=user_data.get(uid,{}).get('title','')
                 caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
-                await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text)
                 upload_elapsed = time.perf_counter() - upload_started
 
                 await lm.delete()
@@ -3125,8 +3168,8 @@ async def handle_all_text(client,message):
             await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
-                await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                    caption=f"🧩 ملف مدمج\n\n📚 {title}\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}")
                 increment_download_count(uid)
             except TelegramEntityTooLarge:
                 refund_merge(uid, count)
@@ -3583,6 +3626,10 @@ if __name__ == "__main__":
                     await app.stop()
                 except Exception:
                     pass
+            try:
+                await close_mtproto_uploader()
+            except Exception:
+                pass
 
     try:
         app.run(_bootstrap())
