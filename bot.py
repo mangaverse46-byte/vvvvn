@@ -745,6 +745,7 @@ def _init_db():
     c = _conn()
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS user_languages (uid INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'ar');
     CREATE TABLE IF NOT EXISTS favorites (uid INTEGER NOT NULL, identifier TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, manga_url TEXT NOT NULL, cover TEXT, last_chapter TEXT, notify INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (uid, identifier, source));
     CREATE TABLE IF NOT EXISTS fav_settings (uid INTEGER PRIMARY KEY, notifications_enabled INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -836,6 +837,17 @@ def add_user(uid):
         c = _conn()
         if c.execute("SELECT 1 FROM users WHERE uid=?", (u,)).fetchone(): return False
         c.execute("INSERT INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time())); c.commit(); return True
+def get_user_language(uid):
+    row = _conn().execute("SELECT language FROM user_languages WHERE uid=?", (int(uid),)).fetchone()
+    return str(row["language"]) if row and row["language"] in ("ar", "en") else None
+def set_user_language(uid, language):
+    language = "en" if str(language).lower() == "en" else "ar"
+    _execute("INSERT OR REPLACE INTO user_languages (uid, language) VALUES (?,?)", (int(uid), language))
+    return language
+def language_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🇬🇧 English", callback_data="language_en"), InlineKeyboardButton("🇮🇶 العربية", callback_data="language_ar")]])
+def language_prompt_text():
+    return "🌐 اختر لغة البوت / Choose Bot Language"
 def get_users_count(): return _conn().execute("SELECT COUNT(*) FROM users").fetchone()[0]
 def get_all_user_ids(): return [r["uid"] for r in _conn().execute("SELECT uid FROM users").fetchall()]
 def get_user_downloads(uid):
@@ -1634,13 +1646,17 @@ async def is_user_subscribed(client,uid):
     return (len(unsub)==0),(unsub if unsub else None)
 
 async def send_subscription_prompt(client,uid,cid,pending=None):
-    chs=settings.get("force_sub_channels",[]); text=settings.get("force_sub_message","⚠️ اشترك أولاً.")
+    chs=settings.get("force_sub_channels",[]); lang=get_user_language(uid) or "ar"
+    if lang == "en":
+        text=settings.get("force_sub_message_en") or "⚠️ You must join the channels below before using the bot.\n\nJoin all channels, then press Verify Subscription ✅"
+    else:
+        text=settings.get("force_sub_message","⚠️ يجب الاشتراك في القنوات أولاً\n\nاشترك ثم اضغط تحقق ✅")
     img=settings.get("force_sub_image"); bc=settings.get("force_sub_buttons",{})
     kb=[]
     for ch in chs:
         kb.append([InlineKeyboardButton(bc.get(ch) or f"📢 اشترك في {ch}", url=f"https://t.me/{ch[1:]}" if ch.startswith("@") else f"https://t.me/c/{str(ch).replace('-100','')}")])
     if pending: user_data[uid]={'pending_action':pending}
-    kb.append([InlineKeyboardButton("✅ تحقق من الاشتراك",callback_data="check_sub")])
+    kb.append([InlineKeyboardButton("✅ Verify Subscription" if lang == "en" else "✅ تحقق من الاشتراك",callback_data="check_sub")])
     markup=InlineKeyboardMarkup(kb)
     if img:
         try: await client.send_photo(chat_id=cid,photo=img,caption=text,reply_markup=markup); return
@@ -1796,12 +1812,14 @@ def _parse_telegram_post_link(value):
     return None
 
 async def build_main_keyboard(uid):
+    lang=get_user_language(uid) or "ar"
     rows = [
         [InlineKeyboardButton("🔎 اكتب اسم المانجا", callback_data="main_search")],
         [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
         [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
         [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
         [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
+        [InlineKeyboardButton("🌐 Bot Language", callback_data="change_language")],
     ]
     if settings.get("app_message_link"):
         rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
@@ -2072,6 +2090,10 @@ async def _start_cmd_impl(client,message):
             un=message.from_user.username or "لا يوجد"
             await client.send_message(OWNER_ID,f"👤 عضو جديد\n\n👤 {message.from_user.first_name or ''}\n🆔 {uid}\n📝 @{un}")
         except: pass
+    if not get_user_language(uid):
+        user_data[uid] = {"pending_language_start": message.text or "/start"}
+        await client.send_message(message.chat.id, language_prompt_text(), reply_markup=language_keyboard())
+        return
     is_sub,_=await is_user_subscribed(client,uid)
     if not is_sub:
         pa={'type':'start'}
@@ -2185,6 +2207,29 @@ async def unified_callback(client,callback):
         await callback.answer("⚠️ صيانة", show_alert=True); return
     if data=="check_sub":
         await check_subscription_and_continue(client,callback,user_data.get(uid,{}).get('pending_action')); return
+    if data=="change_language":
+        await callback.answer()
+        await msg.reply_text(language_prompt_text(), reply_markup=language_keyboard())
+        return
+    if data in ("language_ar", "language_en"):
+        selected = set_user_language(uid, "en" if data == "language_en" else "ar")
+        await callback.answer("Language saved" if selected == "en" else "تم حفظ اللغة")
+        pending_start = user_data.get(uid, {}).pop("pending_language_start", None)
+        try: await msg.delete()
+        except: pass
+        if pending_start is not None:
+            class LanguageStartMessage:
+                def __init__(self):
+                    self.from_user = callback.from_user
+                    self.chat = callback.message.chat
+                    self.text = pending_start
+                async def reply_text(self, text, *args, **kwargs):
+                    return await client.send_message(self.chat.id, text, *args, **kwargs)
+            await _start_cmd_impl(client, LanguageStartMessage())
+        else:
+            welcome = settings.get("welcome_message", "🌟 مرحباً!")
+            await client.send_message(cid, welcome, reply_markup=await build_main_keyboard(uid))
+        return
     if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
     if data == "send_app_message":
         await callback.answer()
