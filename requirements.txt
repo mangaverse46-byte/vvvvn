@@ -2,7 +2,6 @@
 # Runtime migration target: aiogram 3 (Telegram Bot API; Pyrogram is intentionally not listed).
 aiogram>=3.7,<4
 aiohttp>=3.9,<4
-img2pdf>=0.5,<1
 cloudscraper>=1.2,<2
 python-dotenv>=1,<2
 telethon>=1.42,<2
