@@ -682,7 +682,7 @@ async def send_pdf_direct(chat_id, document, file_name, caption="", progress_mes
         caption=caption,
         force_document=True,
         file_name=file_name,
-        parse_mode=None,
+        parse_mode="html",
         progress_callback=progress_callback,
     )
 
@@ -3208,7 +3208,8 @@ async def unified_callback(client,callback):
             )
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
-                caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
+                manga_title_quote = f"<blockquote>{html.escape(str(title_for_caption or ''))}</blockquote>"
+                caption_text=build_caption("single_caption",title=manga_title_quote,chapter=disp)
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
                 await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text, progress_message=lm)
                 upload_elapsed = time.perf_counter() - upload_started
@@ -3935,7 +3936,7 @@ async def handle_all_text(client,message):
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
                 await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                    caption=f"🧩 ملف مدمج\n\n📚 {title}\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}", progress_message=lm)
+                    caption=f"🧩 ملف مدمج\n\n📚 <blockquote>{html.escape(str(title or ''))}</blockquote>\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}", progress_message=lm)
                 increment_download_count(uid)
             except Exception as upload_error:
                 refund_merge(uid, count)
