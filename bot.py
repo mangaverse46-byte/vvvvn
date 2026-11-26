@@ -1953,8 +1953,8 @@ async def _show_my_account(client,msg,uid,edit=False):
     try:
         u=await client.get_chat(uid); un=f"@{u.username}" if u.username else "—"
     except: un="—"
-    text=(f"👤 حسابي\n\n{type_line}\n\n🆔 المعرّف: {uid}\n📝 اليوزر: {un}\n"
-          f"📅 مسجل: {joined}\n⬇️ التحميلات: {get_user_downloads(uid)}")
+    text=translate_ui_text(uid, (f"👤 حسابي\n\n{type_line}\n\n🆔 المعرّف: {uid}\n📝 اليوزر: {un}\n"
+          f"📅 مسجل: {joined}\n⬇️ التحميلات: {get_user_downloads(uid)}"))
     if edit: await safe_edit(msg, text, _account_keyboard(uid))
     else:
         try: await msg.delete()
@@ -1965,7 +1965,7 @@ async def _show_chapters_balance(client,msg,uid):
     kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid):
         info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
-        await msg.reply_text(f"📊 رصيد الفصول\n\n👑 أنت VIP!\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود", reply_markup=kb); return
+        await msg.reply_text(translate_ui_text(uid,f"📊 رصيد الفصول\n\n👑 أنت VIP!\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود"), reply_markup=kb); return
     rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
     used=int(rec.get("used",0)); total=base+bonus; rem=max(0,total-used)
     mbase=get_merge_base(uid); mbonus=int(rec.get("merge_bonus",0)); mused=int(rec.get("merge_used",0))
@@ -1980,17 +1980,15 @@ async def _show_chapters_balance(client,msg,uid):
     pct=int((rem/total)*10) if total>0 else 0; bar="█"*pct+"░"*(10-pct)
     mpct=int((mrem/mtotal)*10) if mtotal>0 else 0; mbar="█"*mpct+"░"*(10-mpct)
     await msg.reply_text(
-        f"📊 رصيدي\n\n"
-        f"📖 فردي\n├ 🎯 {base}\n├ 🎁 {bonus}\n├ 📦 {total}\n├ ✅ {used}\n└ 🔋 {rem}\n[{bar}]{single_note}\n\n"
-        f"🧩 دمج\n├ 🎯 {mbase}\n├ 🎁 {mbonus}\n├ 📦 {mtotal}\n├ ✅ {mused}\n└ 🔋 {mrem}\n[{mbar}]{merge_note}{forced_note}",
+        translate_ui_text(uid, f"📊 رصيدي\n\n📖 فردي\n├ 🎯 {base}\n├ 🎁 {bonus}\n├ 📦 {total}\n├ ✅ {used}\n└ 🔋 {rem}\n[{bar}]{single_note}\n\n🧩 دمج\n├ 🎯 {mbase}\n├ 🎁 {mbonus}\n├ 📦 {mtotal}\n├ ✅ {mused}\n└ 🔋 {mrem}\n[{mbar}]{merge_note}{forced_note}"),
         reply_markup=kb)
 
 async def _show_share_link(client,msg,uid):
     link=get_referral_link(uid)
-    text=(f"🔗 مشاركة البوت\n\nاحصل على مكافآت لكل صديق:\n\n"
+    text=translate_ui_text(uid, (f"🔗 مشاركة البوت\n\nاحصل على مكافآت لكل صديق:\n\n"
           f"📖 فردي: +{settings.get('referral_bonus_single',50)}\n"
           f"🧩 دمج: +{settings.get('referral_bonus_merge',20)}\n\n"
-          f"رابطك:\n{link}")
+          f"رابطك:\n{link}"))
     kb=InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 جرب هذا البوت!')}")],
         [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
