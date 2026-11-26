@@ -63,12 +63,17 @@ def InlineKeyboardButton(text, *args, **kwargs):
     if "style" not in kwargs and callback:
         action = callback.casefold()
         colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
-        # All manga search-result buttons use the same color.
-        if action.startswith("sel_"):
+        # Consistent visual rules: search results and merge are green,
+        # source choices are blue, navigation is red, and cancel/close is red.
+        if action.startswith("sel_") or action.startswith("mrg_") or "merge" in action:
             group = "success"
+        elif action.startswith("src_") or action.startswith("latest_src_"):
+            group = "primary"
+        elif action.startswith(("pg_", "cat_pg_")) or any(x in action for x in ("previous", "prev", "next", "page_")):
+            group = "danger"
         elif any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
             group = "danger"
-        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "merge", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
+        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
             group = "success"
         else:
             group = "primary"
