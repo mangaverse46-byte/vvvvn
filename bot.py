@@ -845,6 +845,20 @@ def translate_ui_text(uid, value):
     if get_user_language(uid) != "en" or not isinstance(value, str):
         return value
     translations = {
+        "🎉 مبروك! حصلت على هدية": "🎉 Congratulations! You received a gift",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "❌ رابط غير موجود أو محذوف": "❌ This gift link does not exist or has been deleted.",
+        "🔒 مخصص لمستخدمين معينين": "🔒 This gift is restricted to specific users.",
+        "⏰ انتهت مدة الرابط، اسف": "⏰ Sorry, this gift link has expired.",
+        "⚠️ وصل للحد الأقصى، اسف": "⚠️ Sorry, this gift link has reached its maximum number of uses.",
+        "ℹ️ استلمت من هذا الرابط مسبقاً": "ℹ️ You have already claimed this gift.",
+        "📖 فصل جديد": "📖 New chapter",
+        "📖 فصل": "📖 Chapter",
+        "🔔 دخل شخص عبر رابط الهدية": "🔔 Someone joined through your gift link",
+        "📊": "📊",
+        "📢 بدأ إرسال الإعلان": "📢 Announcement sent",
+
         "⚠️ البوت في وضع الصيانة": "⚠️ The bot is under maintenance.",
         "يرجى المحاولة لاحقاً": "Please try again later.",
         "🚫 أنت محظور": "🚫 You are banned from using this bot.",
@@ -1617,9 +1631,9 @@ async def publish_gift_now(client, admin_uid, code):
 async def _process_gift_claim(client, cid, uid, code):
     status, link = claim_gift(code, uid)
     if status == 'ok':
-        parts = ["🎉 مبروك! حصلت على هدية\n\n"]
-        if link['single_amount'] > 0: parts.append(f"📖 فصول مفردة: +{link['single_amount']}\n")
-        if link['merge_amount'] > 0: parts.append(f"🧩 فصول مدمجة: +{link['merge_amount']}\n")
+        parts = [translate_ui_text(uid, "🎉 مبروك! حصلت على هدية\n\n")]
+        if link['single_amount'] > 0: parts.append(translate_ui_text(uid, f"📖 فصول مفردة: +{link['single_amount']}\n"))
+        if link['merge_amount'] > 0: parts.append(translate_ui_text(uid, f"🧩 فصول مدمجة: +{link['merge_amount']}\n"))
         await client.send_message(cid, "".join(parts))
         admin_id = link.get('created_by')
         if admin_id:
@@ -1632,15 +1646,15 @@ async def _process_gift_claim(client, cid, uid, code):
             except: pass
         if link['used_count'] >= link['max_users'] and link.get('channel_message_id'):
             asyncio.create_task(_delayed_gift_delete(client, code, 60))
-    elif status == 'not_found': await client.send_message(cid, "❌ رابط غير موجود أو محذوف")
-    elif status == 'not_allowed': await client.send_message(cid, "🔒 مخصص لمستخدمين معينين")
+    elif status == 'not_found': await client.send_message(cid, translate_ui_text(uid, "❌ رابط غير موجود أو محذوف"))
+    elif status == 'not_allowed': await client.send_message(cid, translate_ui_text(uid, "🔒 مخصص لمستخدمين معينين"))
     elif status == 'expired':
-        await client.send_message(cid, "⏰ انتهت مدة الرابط، اسف")
+        await client.send_message(cid, translate_ui_text(uid, "⏰ انتهت مدة الرابط، اسف"))
         if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
     elif status == 'limit':
-        await client.send_message(cid, "⚠️ وصل للحد الأقصى، اسف")
+        await client.send_message(cid, translate_ui_text(uid, "⚠️ وصل للحد الأقصى، اسف"))
         if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
-    elif status == 'already': await client.send_message(cid, "ℹ️ استلمت من هذا الرابط مسبقاً")
+    elif status == 'already': await client.send_message(cid, translate_ui_text(uid, "ℹ️ استلمت من هذا الرابط مسبقاً"))
 
 # ============ أدوات ============
 def clean_url(s):
