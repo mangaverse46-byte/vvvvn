@@ -3122,7 +3122,8 @@ async def unified_callback(client,callback):
         except Exception as e: await safe_edit(msg,f"❌ {e}"); return
         if not chs: await safe_edit(msg,"❌"); return
         user_data[uid]={'chapters':chs,'title':t,'identifier':ident,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover}
-        cap=f"{t} (محدث) 🔄\n{d}\n📚 {len(chs)} فصل"
+        bio=format_manga_bio(d)
+        cap=f"{t} (محدث) 🔄\n{bio}\n📚 {len(chs)} فصل"
         user_data[uid]['base_caption']=cap
         m,_,_=create_chapters_markup(chs,0,ident,src,uid)
         try: await msg.delete()
