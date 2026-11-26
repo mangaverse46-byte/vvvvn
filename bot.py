@@ -65,8 +65,14 @@ def InlineKeyboardButton(text, *args, **kwargs):
             kwargs.setdefault("url", args[1])
     if "style" not in kwargs and callback:
         custom = settings.get("button_styles", {}) if isinstance(globals().get("settings"), dict) else {}
+        # Buttons with the same visible label share one global color.
+        label_group = re.sub(r"[^\\w\\s]", " ", label, flags=re.UNICODE)
+        label_group = " ".join(label_group.split()).casefold()
+        group_key = f"__label__::{label_group}"
         style_key = f"{callback}::{label}"
-        if style_key in custom:
+        if group_key in custom:
+            kwargs["style"] = custom[group_key]
+        elif style_key in custom:
             kwargs["style"] = custom[style_key]
         elif callback in custom:
             # Backward compatibility with colors saved by older versions.
@@ -2249,7 +2255,9 @@ async def unified_callback(client,callback):
                             break
             except Exception:
                 pass
-            target_key = f"{data}::{label}"
+            label_group = re.sub(r"[^\\w\\s]", " ", label, flags=re.UNICODE)
+            label_group = " ".join(label_group.split()).casefold()
+            target_key = f"__label__::{label_group}"
             BUTTON_COLOR_MODE[uid] = target_key
             BUTTON_COLOR_PENDING[uid] = data
             BUTTON_COLOR_CONTEXT[uid] = {
