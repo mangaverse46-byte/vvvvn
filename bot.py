@@ -10,6 +10,7 @@ from urllib.parse import quote, urljoin, unquote
 from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard, create_bot, as_input_file
 import signal
 from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
+from aiogram.exceptions import TelegramEntityTooLarge
 InlineKeyboardMarkup = make_inline_keyboard
 
 # Add a clear icon to any inline button label that does not already contain one.
@@ -3121,11 +3122,26 @@ async def handle_all_text(client,message):
             # One shared HTTP session; all chapter image requests run concurrently.
             buf = await download_images_parallel(chapter_groups,client=client)
             if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
-            increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
+            await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
                 await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
                     caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+                increment_download_count(uid)
+            except TelegramEntityTooLarge:
+                refund_merge(uid, count)
+                await lm.edit_text(
+                    "⚠️ **حجم ملف PDF أكبر من الحد الذي يسمح تيليجرام للبوت برفعه.**\n"
+                    "تم إرجاع رصيد الدمج إلى حسابك. أرسل نطاقاً أصغر من الفصول وحاول مرة أخرى."
+                )
+                return
+            except Exception:
+                refund_merge(uid, count)
+                await lm.edit_text(
+                    "❌ **تعذّر رفع ملف PDF إلى تيليجرام.**\n"
+                    "تم إرجاع رصيد الدمج إلى حسابك؛ حاول مرة أخرى لاحقاً."
+                )
+                raise
             finally:
                 try: buf.close()
                 except Exception: pass
