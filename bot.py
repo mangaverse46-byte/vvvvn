@@ -1969,7 +1969,7 @@ async def publish_gift_now(client, admin_uid, code):
         pass
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, f'فشل النشر: {e}', None
-    _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.id, time.time() + interval * 3600, new_code))
+    _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.message_id, time.time() + interval * 3600, new_code))
     return True, None, new_code
 
 async def _process_gift_claim(client, cid, uid, code):
@@ -3381,7 +3381,14 @@ async def unified_callback(client,callback):
         try:
             api=await asyncio.to_thread(get_source,src)
             res=await asyncio.to_thread(api.search,q)
-        except Exception as e:  pass
+        except Exception as e:
+            error_text = str(e).replace("\\n", " ")[:220]
+            await client.send_message(
+                cid,
+                translate_ui_text(uid, f"❌ تعذر تنفيذ البحث في هذا المصدر.\\nالسبب: {error_text}"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد", callback_data="main_search")]])
+            )
+            return
         if not res:
             try: await msg.delete()
             except: pass
@@ -3598,7 +3605,8 @@ async def unified_callback(client,callback):
             await callback.answer("🔙"); return
         if data=="sec_broadcast_stats":
             await msg.edit_text(
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                "📊 الإحصائيات والبث\nاختر الإجراء:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊 الإحصائيات",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("📊"); return
         if data=="admin_broadcast":
             await msg.delete(); await msg.reply_text("📢 إرسال إعلان للمستخدمين\nأرسل نص الإعلان الذي تريد نشره للجميع.\n\nللإلغاء أرسل /cancel")
@@ -4120,7 +4128,7 @@ async def handle_all_text(client,message):
         code = user_data[uid]["awaiting_gift_channel"]; ch = message.text.strip()
         if not (ch.startswith("@") or ch.startswith("-100")): await message.reply_text("📢 معرّف القناة غير صحيح.\nأرسل @username أو آيدي القناة الذي يبدأ بـ -100."); return
         try:
-            await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.id)
+            await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.message_id)
         except Exception as e: await message.reply_text(f"❌ {e}"); return
         set_gift_channel(code, ch); user_data.pop(uid, None)
         await message.reply_text(f"✅ {ch}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
