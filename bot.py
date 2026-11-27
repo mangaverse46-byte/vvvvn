@@ -1905,7 +1905,7 @@ def make_quote(text):
     # Captions are sent with Telegram HTML parse mode; remove Markdown bold
     # markers and wrap the complete custom caption in a real blockquote.
     clean = str(text).replace("**", "").strip()
-    clean = re.sub(r"(?m)^\\s*>\\s?", "", clean)
+    clean = re.sub(r"(?m)^\s*>\s?", "", clean)
     return f"<blockquote>{clean}</blockquote>"
 def build_caption(template_key,**kwargs):
     try:
