@@ -15,9 +15,6 @@ InlineKeyboardMarkup = make_inline_keyboard
 
 BUTTON_CATALOG = {}
 
-# Allow only one merge job at a time to protect low-resource VPS instances.
-_MERGE_JOB_SEMAPHORE = asyncio.Semaphore(1)
-
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
     label = str(text).strip()
@@ -3915,11 +3912,7 @@ async def handle_all_text(client,message):
         if not settings.get("allow_parallel_downloads", False):
             if is_downloading(uid) or not try_lock_download(uid): await message.reply_text(translate_ui_text(uid,"⏳ يوجد تحميل آخر قيد التنفيذ.\nانتظر حتى يكتمل ثم حاول مجدداً.")); return
         locked = not settings.get("allow_parallel_downloads", False)
-        merge_slot_acquired = False
         try:
-            # Serialize merge jobs across all users, even if parallel downloads are enabled.
-            await _MERGE_JOB_SEMAPHORE.acquire()
-            merge_slot_acquired = True
             success, rem = try_deduct_merge(uid, count)
             if not success: await message.reply_text(translate_ui_text(uid,"❌ تعذّر بدء تحميل الفصل.\nلم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.")); return
             user_data[uid].pop('awaiting_merge_range', None)
@@ -3930,7 +3923,7 @@ async def handle_all_text(client,message):
             api = await asyncio.to_thread(get_source,src)
 
             # Extract chapter image lists concurrently, while showing completed chapter counts.
-            extract_sem = asyncio.Semaphore(1)
+            extract_sem = asyncio.Semaphore(6)
             progress_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
@@ -3988,7 +3981,7 @@ async def handle_all_text(client,message):
 
             # Download chapters sequentially; images within each chapter stay parallel.
             buf = await download_images_parallel(
-                chapter_groups, client=client, concurrency=4,
+                chapter_groups, client=client, concurrency=48,
                 progress_callback=update_merge_download_progress,
             )
             if not buf:
@@ -4021,8 +4014,6 @@ async def handle_all_text(client,message):
             try: await lm.delete()
             except: pass
         finally:
-            if merge_slot_acquired:
-                _MERGE_JOB_SEMAPHORE.release()
             if locked: unlock_download(uid)
         return
 
