@@ -181,7 +181,7 @@ def _request(action, params=None, payload=None, use_cache=True):
 
     # Retry only temporary gateway/rate-limit/network failures. Do not hide permanent 4xx errors.
     last_error = None
-    for attempt in range(3):
+    for attempt in range(4):
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=45) as response:
@@ -198,7 +198,7 @@ def _request(action, params=None, payload=None, use_cache=True):
                 raise
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
-            if attempt == 2:
+            if attempt == 3:
                 raise
         time.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.5))
     raise RuntimeError(f"API request failed: {last_error}")
@@ -3170,7 +3170,7 @@ async def unified_callback(client,callback):
                         pass
                     frame += 1
                     try:
-                        await asyncio.wait_for(timer_stop.wait(), timeout=2.5)
+                        await asyncio.wait_for(timer_stop.wait(), timeout=0.8)
                     except asyncio.TimeoutError:
                         pass
 
