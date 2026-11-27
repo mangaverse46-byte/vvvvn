@@ -503,7 +503,27 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
-    # Keep original image bytes and their original order; no conversion or compression.
+    # Preserve page order and original image bytes; omit only pages that failed to download.
+    valid_images = [io.BytesIO(data) for data in downloaded if data]
+    if not valid_images:
+        print(f"[Image download] 0/{len(image_urls)} images downloaded", flush=True)
+        return None
+
+    failed = len(image_urls) - len(valid_images)
+    if failed:
+        print(f"[Image download] {len(valid_images)}/{len(image_urls)} images downloaded; {failed} failed", flush=True)
+
+    try:
+        import img2pdf
+        pdf_data = img2pdf.convert(*valid_images)
+        if not pdf_data:
+            return None
+        result = io.BytesIO(pdf_data)
+        result.seek(0)
+        return result
+    except Exception as exc:
+        print(f"[PDF creation] {type(exc).__name__}: {exc}", flush=True)
+        return None
 
 async def download_images_parallel(urls, client=None, headers=None):
     return await create_pdf_from_images(urls, client=client, headers=headers)
