@@ -476,7 +476,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
         async def fetch(position, url):
             async with semaphore:
-                for attempt in range(4):
+                for attempt in range(3):
                     try:
                         async with session.get(url, allow_redirects=True) as response:
                             if response.status == 200:
@@ -496,9 +496,9 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                             else:
                                 return
                     except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                        if attempt == 3:
+                        if attempt == 2:
                             return
-                    if attempt < 3:
+                    if attempt < 2:
                         await asyncio.sleep(0.2 * (attempt + 1))
 
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
@@ -3905,7 +3905,7 @@ async def handle_all_text(client,message):
                         pass
                     frame += 1
                     try:
-                        await asyncio.wait_for(merge_timer_stop.wait(), timeout=0.8)
+                        await asyncio.wait_for(merge_timer_stop.wait(), timeout=2.5)
                     except asyncio.TimeoutError:
                         pass
 
