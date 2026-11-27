@@ -787,7 +787,7 @@ DEFAULTS = {
     "force_sub_channels":[],"force_sub_message":"⚠️ يجب الاشتراك في القنوات أولاً\n\nاشترك ثم اضغط تحقق ✅",
     "force_sub_image":None,"force_sub_buttons":{},
     "daily_reward_amount":100,"daily_reward_interval":86400,"merge_daily_limit":50,"merge_max_per_file":10,
-    "single_caption":"[ Ch {chapter} ] {title}\n@T7T0K_bot",
+    "single_caption":"<blockquote>[ Ch {chapter} ] {title}\n@{bot_username}</blockquote>",
     "vip_contact_second":None,"allow_parallel_downloads":False,
     "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
     "button_colors":{"success":"success","danger":"danger","primary":"primary"},
@@ -808,6 +808,9 @@ def save_settings():
 settings = load_settings()
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
+# Migrate the former built-in caption once, while preserving custom admin captions.
+if settings.get("single_caption") == "[ Ch {chapter} ] {title}\n@T7T0K_bot":
+    settings["single_caption"] = DEFAULTS["single_caption"]
 save_settings()
 # Restore the previously discovered button catalog after a bot restart.
 BUTTON_CATALOG.update(settings.get("button_catalog", {}))
@@ -1899,13 +1902,11 @@ def clean_manga_title(title,identifier):
     return t.strip() or identifier.replace("-"," ").title()
 def make_quote(text):
     if not text: return text
-    out=[]
-    for line in text.split("\n"):
-        s=line.rstrip()
-        if not s: out.append(""); continue
-        if s.startswith(">"): out.append(s)
-        else: out.append(f"> {s}")
-    return "\n".join(out)
+    # Captions are sent with Telegram HTML parse mode; remove Markdown bold
+    # markers and wrap the complete custom caption in a real blockquote.
+    clean = str(text).replace("**", "").strip()
+    clean = re.sub(r"(?m)^\\s*>\\s?", "", clean)
+    return f"<blockquote>{clean}</blockquote>"
 def build_caption(template_key,**kwargs):
     try:
         template=settings.get(template_key,"")
@@ -3192,8 +3193,13 @@ async def unified_callback(client,callback):
             )
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
-                manga_title_quote = f"<blockquote>{html.escape(str(title_for_caption or ''))}</blockquote>"
-                caption_text=build_caption("single_caption",title=manga_title_quote,chapter=disp)
+                manga_title_quote = html.escape(str(title_for_caption or ''))
+                caption_text=build_caption(
+                    "single_caption",
+                    title=manga_title_quote,
+                    chapter=html.escape(str(disp)),
+                    bot_username=html.escape(str(BOT_USERNAME or "bot")),
+                )
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
                 await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text, progress_message=lm)
                 upload_elapsed = time.perf_counter() - upload_started
