@@ -181,7 +181,7 @@ def _request(action, params=None, payload=None, use_cache=True):
 
     # Retry only temporary gateway/rate-limit/network failures. Do not hide permanent 4xx errors.
     last_error = None
-    for attempt in range(4):
+    for attempt in range(3):
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=45) as response:
@@ -198,7 +198,7 @@ def _request(action, params=None, payload=None, use_cache=True):
                 raise
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last_error = exc
-            if attempt == 3:
+            if attempt == 2:
                 raise
         time.sleep(min(2 ** attempt, 8) + random.uniform(0, 0.5))
     raise RuntimeError(f"API request failed: {last_error}")
@@ -467,10 +467,10 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not image_urls:
         return None
 
-    timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
+    timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=40)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
     connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
-    semaphore = asyncio.Semaphore(8)
+    semaphore = asyncio.Semaphore(16)
     downloaded = [None] * len(image_urls)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
@@ -490,7 +490,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                     delay = min(20.0, max(0.5, float(retry)))
                                 except (TypeError, ValueError):
                                     delay = min(8.0, 0.5 * (2 ** attempt))
-                                if attempt < 3:
+                                if attempt < 2:
                                     await asyncio.sleep(delay)
                                     continue
                             else:
@@ -499,7 +499,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                         if attempt == 3:
                             return
                     if attempt < 3:
-                        await asyncio.sleep(0.25 * (attempt + 1))
+                        await asyncio.sleep(0.2 * (attempt + 1))
 
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
@@ -515,7 +515,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
 
     try:
         import img2pdf
-        pdf_data = img2pdf.convert(*valid_images)
+        pdf_data = await asyncio.to_thread(img2pdf.convert, *valid_images)
         if not pdf_data:
             return None
         result = io.BytesIO(pdf_data)
@@ -3170,7 +3170,7 @@ async def unified_callback(client,callback):
                         pass
                     frame += 1
                     try:
-                        await asyncio.wait_for(timer_stop.wait(), timeout=0.8)
+                        await asyncio.wait_for(timer_stop.wait(), timeout=2.5)
                     except asyncio.TimeoutError:
                         pass
 
@@ -3842,7 +3842,7 @@ async def handle_all_text(client,message):
             api = await asyncio.to_thread(get_source,src)
 
             # Extract chapter image lists concurrently, while showing completed chapter counts.
-            extract_sem = asyncio.Semaphore(4)
+            extract_sem = asyncio.Semaphore(6)
             progress_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
@@ -3858,9 +3858,10 @@ async def handle_all_text(client,message):
                     if urls:
                         progress["ok"] += 1
                         progress["images"] += len(urls)
-                    await lm.edit_text(
-                        translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: {progress['done']}/{count}\n✅ الناجح: {progress['ok']}\n🖼️ الصور المستخرجة: {progress['images']}")
-                    )
+                    if progress["done"] == count or progress["done"] % 3 == 0:
+                        await lm.edit_text(
+                            translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: {progress['done']}/{count}\n✅ الناجح: {progress['ok']}\n🖼️ الصور المستخرجة: {progress['images']}")
+                        )
                 return index, urls or None
 
             await lm.edit_text(
