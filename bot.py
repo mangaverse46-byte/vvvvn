@@ -456,7 +456,7 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48, progress_callback=None):
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48, progress_callback=None, image_progress_callback=None):
     """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
     import img2pdf
@@ -521,10 +521,29 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
                 if asyncio.iscoroutine(result):
                     await result
             chapter_downloaded = [None] * len(chapter_urls)
-            await asyncio.gather(
-                *(fetch(position, url, chapter_downloaded)
-                  for position, url in enumerate(chapter_urls))
-            )
+            if image_progress_callback:
+                image_progress = {"done": 0}
+                image_progress_lock = asyncio.Lock()
+
+                async def fetch_with_progress(position, url):
+                    await fetch(position, url, chapter_downloaded)
+                    async with image_progress_lock:
+                        image_progress["done"] += 1
+                        result = image_progress_callback(
+                            image_progress["done"], len(chapter_urls)
+                        )
+                        if asyncio.iscoroutine(result):
+                            await result
+
+                await asyncio.gather(
+                    *(fetch_with_progress(position, url)
+                      for position, url in enumerate(chapter_urls))
+                )
+            else:
+                await asyncio.gather(
+                    *(fetch(position, url, chapter_downloaded)
+                      for position, url in enumerate(chapter_urls))
+                )
             # Append this chapter's pages in their original order before
             # starting downloads for the next chapter.
             downloaded.extend(chapter_downloaded)
@@ -603,10 +622,11 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
     buf.seek(0)
     return buf
 
-async def download_images_parallel(urls, client=None, headers=None, concurrency=48, progress_callback=None):
+async def download_images_parallel(urls, client=None, headers=None, concurrency=48, progress_callback=None, image_progress_callback=None):
     return await create_pdf_from_images(
         urls, client=client, headers=headers, concurrency=concurrency,
         progress_callback=progress_callback,
+        image_progress_callback=image_progress_callback,
     )
 
 def get_source(source_id):
@@ -2358,11 +2378,9 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
         async def pdf(ch, progress=None):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
-            if progress:
-                await progress("extract", len(urls))
-            result = await download_images_parallel(urls, client=client)
-            if progress:
-                await progress("pdf", len(urls))
+            result = await download_images_parallel(
+                urls, client=client, image_progress_callback=progress
+            )
             return result
         cover_url = _extract_cover_url(info)
         if cover_url:
@@ -3073,11 +3091,9 @@ async def unified_callback(client,callback):
             kind=info.get("kind") or ""
             async def pdf(ch,_api=api,_client=client,progress=None):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                if progress:
-                    await progress("extract", len(image_urls))
-                result=await download_images_parallel(image_urls,client=_client)
-                if progress:
-                    await progress("pdf", len(image_urls))
+                result = await download_images_parallel(
+                    image_urls, client=_client, image_progress_callback=progress
+                )
                 return result
             user_data[uid]={"chapters":chs,"title":title,"identifier":ident,"page":0,"source":src,
                 "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind,
@@ -3179,11 +3195,9 @@ async def unified_callback(client,callback):
             cover=info.get("cover_url")
             async def pdf(ch,_api=api,_c=client,progress=None):
                 urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                if progress:
-                    await progress("extract", len(urls))
-                result=await download_images_parallel(urls,client=_c)
-                if progress:
-                    await progress("pdf", len(urls))
+                result = await download_images_parallel(
+                    urls, client=_c, image_progress_callback=progress
+                )
                 return result
             ref=api.BASE
         except Exception as e: await safe_edit(msg,f"❌ {e}"); return
@@ -3226,43 +3240,29 @@ async def unified_callback(client,callback):
             lt = f"⏳ جاري تحميل الفصل {disp}..."
             if rem>=0: lt += f"\n📊 المتبقي: {rem}"
             lm=await msg.reply_text(translate_ui_text(uid,lt))
-            timer_stop = asyncio.Event()
-            bar_frames = [
-                "▰▱▱▱▱▱▱▱▱▱",
-                "▰▰▱▱▱▱▱▱▱▱",
-                "▰▰▰▱▱▱▱▱▱▱",
-                "▰▰▰▰▱▱▱▱▱▱",
-                "▰▰▰▰▰▱▱▱▱▱",
-                "▰▰▰▰▰▰▱▱▱▱",
-                "▰▰▰▰▰▰▰▱▱▱",
-                "▰▰▰▰▰▰▰▰▱▱",
-                "▰▰▰▰▰▰▰▰▰▱",
-                "▰▰▰▰▰▰▰▰▰▰",
-            ]
+            image_progress_state = {"last_update": 0}
 
-            async def loading_timer():
-                frame = 0
-                while not timer_stop.is_set():
-                    try:
-                        await lm.edit_text(
-                            translate_ui_text(uid, f"📥 جاري تحميل الفصل {disp} وتجهيز PDF...\n\n{bar_frames[frame % len(bar_frames)]}")
+            async def update_single_image_progress(done, total):
+                if done < total and done - image_progress_state["last_update"] < 5:
+                    return
+                image_progress_state["last_update"] = done
+                percent = min(100, int(done * 100 / max(1, total)))
+                filled = min(10, percent // 10)
+                bar = "▰" * filled + "▱" * (10 - filled)
+                try:
+                    await lm.edit_text(
+                        translate_ui_text(
+                            uid,
+                            f"📥 جاري تحميل الفصل {disp}\n\n{bar} {percent}%\n🖼️ الصور المحمّلة: {done}/{total}\n📄 تجهيز PDF..."
                         )
-                    except Exception:
-                        pass
-                    frame += 1
-                    try:
-                        await asyncio.wait_for(timer_stop.wait(), timeout=0.8)
-                    except asyncio.TimeoutError:
-                        pass
+                    )
+                except Exception:
+                    pass
 
-            timer_task = asyncio.create_task(loading_timer())
             try:
-                buf = await pdf_func(target)
+                buf = await pdf_func(target, progress=update_single_image_progress)
             except Exception:
                 buf = None
-            finally:
-                timer_stop.set()
-                await timer_task
             if not buf:
                 refund_chapter(uid)
                 await lm.edit_text(translate_ui_text(uid, "❌ فشل التحميل"))
