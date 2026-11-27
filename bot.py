@@ -3912,7 +3912,7 @@ async def handle_all_text(client,message):
             merge_bar_task = asyncio.create_task(merge_loading_bar())
             try:
                 # One shared HTTP session; all chapter image requests run concurrently.
-                buf = await download_images_parallel(chapter_groups,client=client,concurrency=16)
+                buf = await download_images_parallel(chapter_groups,client=client,concurrency=48)
             finally:
                 merge_timer_stop.set()
                 await merge_bar_task
