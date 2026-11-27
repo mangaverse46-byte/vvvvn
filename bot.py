@@ -2,19 +2,29 @@
 # -*- coding: utf-8 -*-
 """🤖 بوت مانجا — SQLite + img2pdf + روابط هدايا + مشاركة (نهائي)"""
 
-import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib
+import sys, subprocess, importlib.util, json, os, re, io, math, time, sqlite3, secrets, base64, zlib, hashlib, html
 import asyncio, aiohttp
-import zipfile, threading, tempfile
+import zipfile, threading, tempfile, shutil
 from datetime import datetime
 from urllib.parse import quote, urljoin, unquote
-from pyrogram import Client, filters
+from aiogram3_runtime import LegacyFilters as filters, make_legacy_app, make_inline_keyboard, create_bot, as_input_file
 import signal
-from pyrogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import InlineKeyboardButton as _TelegramInlineKeyboardButton
+from telethon import TelegramClient
+InlineKeyboardMarkup = make_inline_keyboard
+
+BUTTON_CATALOG = {}
 
 # Add a clear icon to any inline button label that does not already contain one.
 def InlineKeyboardButton(text, *args, **kwargs):
     label = str(text).strip()
+    if args and "callback_data" not in kwargs:
+        kwargs["callback_data"] = args[0]
     callback = str(kwargs.get("callback_data") or "")
+    if callback:
+        BUTTON_CATALOG[callback] = label
+    # The key includes the visible label as well as callback_data. This lets
+    # buttons that share a callback but have different labels keep separate colors.
     # Give icon-only controls an action word so buttons are never emoji-only.
     if label in ("🔙", "⬅️", "➡️", "❌", "✅", "📋", "🔄", "⚙️", "🖼️", "📭"):
         label = {"🔙":"⬅️ رجوع", "⬅️":"⬅️ السابق", "➡️":"➡️ التالي", "❌":"❌ إغلاق",
@@ -41,10 +51,48 @@ def InlineKeyboardButton(text, *args, **kwargs):
         lower = label.casefold()
         icon = "🔙" if any(x in lower for x in ("رجوع", "السابق", "عودة")) else "🏠" if any(x in lower for x in ("الرئيسية", "الرئيس", "home")) else "🔍" if any(x in lower for x in ("بحث", "search")) else "📚" if any(x in lower for x in ("مانجا", "فصول", "مصادر", "manga", "chapter")) else "⚙️" if any(x in lower for x in ("إعداد", "ادمن", "إدارة", "admin")) else "📌"
         label = f"{icon} {label}"
-    return _TelegramInlineKeyboardButton(label, *args, **kwargs)
+    # aiogram 3 uses keyword-only Pydantic model fields; the legacy
+    # wrapper accepts Pyrogram-style positional callback_data/url arguments.
+    if args:
+        if len(args) > 2:
+            raise TypeError("InlineKeyboardButton accepts at most text, callback_data, url")
+        if len(args) >= 1:
+            kwargs.setdefault("callback_data", args[0])
+        if len(args) == 2:
+            kwargs.setdefault("url", args[1])
+    if "style" not in kwargs and callback:
+        action = callback.casefold()
+        colors = settings.get("button_colors", {}) if isinstance(globals().get("settings"), dict) else {}
+        # Source colors are selected by the visible source name.
+        # Navigation colors are selected by the visible button label.
+        lower_label = label.casefold()
+        if action.startswith("sel_") or action.startswith("mrg_") or "merge" in action:
+            group = "success"
+        elif action.startswith(("src_", "latest_src_")):
+            if "mangalik" in lower_label or "مانجا ليك" in lower_label:
+                group = "danger"
+            elif "azora" in lower_label or "ازورا" in lower_label:
+                group = "primary"
+            else:
+                group = "success"
+        elif action.startswith(("pg_", "cat_pg_")) or action.startswith(("f_", "l_")):
+            if "السابق" in lower_label or "أول فصل" in lower_label:
+                group = "primary"
+            elif "التالي" in lower_label or "آخر فصل" in lower_label:
+                group = "danger"
+            else:
+                group = "primary"
+        elif any(x in action for x in ("close", "cancel", "delete", "remove", "ban", "complaint", "reset", "unban")):
+            group = "danger"
+        elif any(x in action for x in ("search", "latest", "source", "chapter", "download", "genre", "category", "fav", "confirm", "check_sub", "gift_claim")):
+            group = "success"
+        else:
+            group = "primary"
+        kwargs["style"] = colors.get(group, group) if isinstance(colors, dict) else group
+    return _TelegramInlineKeyboardButton(text=label, **kwargs)
 
-from pyrogram.enums import ParseMode, ChatMemberStatus
-from pyrogram.errors import MessageNotModified
+from aiogram.enums import ChatMemberStatus
+
 import gc
 
 # ===== BEGIN MERGED MANGA API MODULE =====
@@ -408,7 +456,7 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None):
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=4, progress_callback=None, image_progress_callback=None):
     """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
     import img2pdf
@@ -418,32 +466,25 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     else:
         chapter_groups = [list(urls or [])]
 
-    indexed_urls = [
-        (chapter_index, image_index, url)
-        for chapter_index, group in enumerate(chapter_groups)
-        for image_index, url in enumerate(group)
-        if url
-    ]
-    if not indexed_urls:
+    if not any(group for group in chapter_groups):
         return None
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
 
-    # Keep a single reusable HTTP session, but avoid opening an unlimited
-    # number of simultaneous sockets (which can slow CDNs and cause timeouts).
-    # 48 active downloads is a conservative starting point for chapter images.
+    # Download one chapter at a time. Images within the current chapter
+    # still download concurrently, while chapter order remains deterministic.
     connector = aiohttp.TCPConnector(
         limit=64, limit_per_host=48, ttl_dns_cache=600,
         keepalive_timeout=60, enable_cleanup_closed=True,
     )
-    download_sem = asyncio.Semaphore(48)
-    downloaded = [None] * len(indexed_urls)
+    download_sem = asyncio.Semaphore(max(1, int(concurrency)))
+    downloaded = []
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
-        async def fetch(position, url):
+        async def fetch(position, url, chapter_downloaded):
             async with download_sem:
                 for attempt in range(4):
                     try:
@@ -451,7 +492,7 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                             if response.status == 200:
                                 data = await response.read()
                                 if data and len(data) > 100:
-                                    downloaded[position] = data
+                                    chapter_downloaded[position] = data
                                     return
                             elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
                                 retry = response.headers.get("Retry-After", "2")
@@ -471,9 +512,46 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                     if attempt < 3:
                         await asyncio.sleep(0.25 * (attempt + 1))
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
-        )
+        for chapter_index, chapter_urls in enumerate(chapter_groups, start=1):
+            chapter_urls = [url for url in chapter_urls if url]
+            if not chapter_urls:
+                continue
+            if progress_callback:
+                result = progress_callback(chapter_index, len(chapter_groups), chapter_index - 1)
+                if asyncio.iscoroutine(result):
+                    await result
+            chapter_downloaded = [None] * len(chapter_urls)
+            if image_progress_callback:
+                image_progress = {"done": 0}
+                image_progress_lock = asyncio.Lock()
+
+                async def fetch_with_progress(position, url):
+                    await fetch(position, url, chapter_downloaded)
+                    async with image_progress_lock:
+                        image_progress["done"] += 1
+                        result = image_progress_callback(
+                            image_progress["done"], len(chapter_urls)
+                        )
+                        if asyncio.iscoroutine(result):
+                            await result
+
+                await asyncio.gather(
+                    *(fetch_with_progress(position, url)
+                      for position, url in enumerate(chapter_urls))
+                )
+            else:
+                await asyncio.gather(
+                    *(fetch(position, url, chapter_downloaded)
+                      for position, url in enumerate(chapter_urls))
+                )
+            # Append this chapter's pages in their original order before
+            # starting downloads for the next chapter.
+            downloaded.extend(chapter_downloaded)
+            chapter_downloaded.clear()
+            if progress_callback:
+                result = progress_callback(chapter_index, len(chapter_groups), chapter_index)
+                if asyncio.iscoroutine(result):
+                    await result
 
     # Manga engine image URLs are expected to be JPEG. img2pdf also supports
     # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
@@ -544,8 +622,12 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     buf.seek(0)
     return buf
 
-async def download_images_parallel(urls, client=None, headers=None):
-    return await create_pdf_from_images(urls, client=client, headers=headers)
+async def download_images_parallel(urls, client=None, headers=None, concurrency=4, progress_callback=None, image_progress_callback=None):
+    return await create_pdf_from_images(
+        urls, client=client, headers=headers, concurrency=concurrency,
+        progress_callback=progress_callback,
+        image_progress_callback=image_progress_callback,
+    )
 
 def get_source(source_id):
     """Return the API-backed adapter for one enabled manga source."""
@@ -605,19 +687,96 @@ def install_package(p):
 def ensure_installed(p):
     if importlib.util.find_spec(p) is None:
         install_package(p)
-for pkg in ["pyrogram","aiohttp","img2pdf","cloudscraper","python-dotenv"]:
+for pkg in ["aiogram","aiohttp","cloudscraper","python-dotenv","img2pdf"]:
     ensure_installed(pkg)
 
 from dotenv import load_dotenv
 load_dotenv()
 
 # Credentials are read from the local .env file; never commit real secrets.
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-if not API_ID or not API_HASH or not BOT_TOKEN or not OWNER_ID:
-    raise RuntimeError("Missing API_ID, API_HASH, BOT_TOKEN or OWNER_ID in .env")
+if not BOT_TOKEN or not OWNER_ID:
+    raise RuntimeError("Missing BOT_TOKEN or OWNER_ID in .env")
+
+# Telethon MTProto uploader: direct Telegram uploads up to the bot-account limit.
+API_ID = int(os.getenv("API_ID", "0") or 0)
+API_HASH = os.getenv("API_HASH", "").strip()
+_mtproto_client = None
+_mtproto_lock = asyncio.Lock()
+
+
+async def send_pdf_direct(chat_id, document, file_name, caption="", progress_message=None):
+    """Upload a PDF directly through MTProto and show throttled upload progress."""
+    global _mtproto_client
+    if not API_ID or not API_HASH:
+        raise RuntimeError(
+            "إعدادات الرفع المباشر ناقصة: أضف API_ID و API_HASH إلى ملف .env"
+        )
+    async with _mtproto_lock:
+        if _mtproto_client is None:
+            _mtproto_client = TelegramClient(
+                "manga_virus_mtproto", API_ID, API_HASH,
+                connection_retries=5, retry_delay=2,
+                auto_reconnect=True, receive_updates=False,
+            )
+        if not _mtproto_client.is_connected():
+            await _mtproto_client.connect()
+        if not await _mtproto_client.is_user_authorized():
+            await _mtproto_client.start(bot_token=BOT_TOKEN)
+
+    if hasattr(document, "seek"):
+        document.seek(0)
+    try:
+        document.name = file_name
+    except Exception:
+        pass
+
+    loop = asyncio.get_running_loop()
+    last_update = [0.0]
+
+    async def update_progress(current, total):
+        if not progress_message or not total:
+            return
+        percent = min(100, int(current * 100 / total))
+        try:
+            await progress_message.edit_text(
+                f"📤 يتم رفع PDF إلى تيليجرام...\n\n"
+                f"⚡ نسبة الإنجاز: {percent}%\n"
+                f"📦 المرفوع: {current / (1024 * 1024):.1f} MB من {total / (1024 * 1024):.1f} MB",
+                parse_mode=None,
+            )
+        except Exception:
+            pass
+
+    def progress_callback(current, total):
+        if not progress_message or not total:
+            return
+        now = time.monotonic()
+        percent = min(100, int(current * 100 / total))
+        if percent < 5 or (percent < 100 and now - last_update[0] < 3):
+            return
+        last_update[0] = now
+        loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(update_progress(current, total))
+        )
+
+    return await _mtproto_client.send_file(
+        entity=int(chat_id),
+        file=document,
+        caption=caption,
+        force_document=True,
+        file_name=file_name,
+        parse_mode="html",
+        progress_callback=progress_callback,
+    )
+
+
+async def close_mtproto_uploader():
+    global _mtproto_client
+    if _mtproto_client is not None and _mtproto_client.is_connected():
+        await _mtproto_client.disconnect()
+    _mtproto_client = None
 
 ADMINS = [OWNER_ID]; OWNER_IDS = [OWNER_ID]
 MAX_WORKERS = 15
@@ -671,6 +830,7 @@ def _init_db():
     c = _conn()
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS user_languages (uid INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'ar');
     CREATE TABLE IF NOT EXISTS favorites (uid INTEGER NOT NULL, identifier TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, manga_url TEXT NOT NULL, cover TEXT, last_chapter TEXT, notify INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (uid, identifier, source));
     CREATE TABLE IF NOT EXISTS fav_settings (uid INTEGER PRIMARY KEY, notifications_enabled INTEGER NOT NULL DEFAULT 1);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -723,14 +883,16 @@ def _validate_db_file(path):
 
 # ============ Settings ============
 DEFAULTS = {
-    "welcome_message":"🌟 **مرحباً بك في بوت المانجا** 🌟\n\n📖 اختر من الأزرار أدناه:",
+    "welcome_message":"🌟 مرحباً بك في بوت المانجا 🌟\n\n📖 اختر من الأزرار أدناه:",
     "bdf_image":None,"welcome_image":None,"favorites_image":None,"results_image":None,"sources_image":None,
-    "force_sub_channels":[],"force_sub_message":"⚠️ **يجب الاشتراك في القنوات أولاً**\n\nاشترك ثم اضغط تحقق ✅",
+    "force_sub_channels":[],"force_sub_message":"⚠️ يجب الاشتراك في القنوات أولاً\n\nاشترك ثم اضغط تحقق ✅",
     "force_sub_image":None,"force_sub_buttons":{},
     "daily_reward_amount":100,"daily_reward_interval":86400,"merge_daily_limit":50,"merge_max_per_file":10,
-    "single_caption":"**[ Ch {chapter} ] {title}**\n@T7T0K_bot",
+    "single_caption":"[ Ch {chapter} ] {title}\n@{bot_username}",
     "vip_contact_second":None,"allow_parallel_downloads":False,
     "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
+    "button_colors":{"success":"success","danger":"danger","primary":"primary"},
+    "app_message_link":None,"tutorial_video_url":None,
 }
 def load_settings():
     s = dict(DEFAULTS)
@@ -747,7 +909,12 @@ def save_settings():
 settings = load_settings()
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
+# Migrate the former built-in caption once, while preserving custom admin captions.
+if settings.get("single_caption") == "[ Ch {chapter} ] {title}\n@T7T0K_bot":
+    settings["single_caption"] = DEFAULTS["single_caption"]
 save_settings()
+# Restore the previously discovered button catalog after a bot restart.
+BUTTON_CATALOG.update(settings.get("button_catalog", {}))
 NEW_SINGLE_CAPTION = DEFAULTS["single_caption"]
 
 # ============ Users ============
@@ -758,6 +925,528 @@ def add_user(uid):
         c = _conn()
         if c.execute("SELECT 1 FROM users WHERE uid=?", (u,)).fetchone(): return False
         c.execute("INSERT INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time())); c.commit(); return True
+def get_user_language(uid):
+    row = _conn().execute("SELECT language FROM user_languages WHERE uid=?", (int(uid),)).fetchone()
+    return str(row["language"]) if row and row["language"] in ("ar", "en") else None
+def translate_ui_text(uid, value):
+    """Translate common user-facing bot text for users who selected English."""
+    if get_user_language(uid) != "en" or not isinstance(value, str):
+        return value
+    translations = {
+        "❌ إغلاق": "❌ Close",
+        "❌ إغلاق القائمة": "❌ Close menu",
+        "❌ إغلاق اللوحة": "❌ Close panel",
+        "🔙 رجوع": "🔙 Back",
+        "⬅️ المصادر": "⬅️ Sources",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "📞 تواصل": "📞 Contact",
+        "🔗 مشاركة": "🔗 Share",
+        "🔍 بحث جديد": "🔍 New search",
+        "❌ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.": "❌ An error occurred while starting the bot. The error was logged. Please try again shortly.",
+        "🔄 جاري فحص الفصول الجديدة...": "🔄 Checking for new chapters...",
+        "✅ انتهى فحص المفضلات.": "✅ Favorites check completed.",
+        "⛔ هذا الأمر للأدمن فقط.": "⛔ This command is for admins only.",
+        "⛔ غير مصرح": "⛔ Unauthorized.",
+        "⚠️ صيانة": "⚠️ Maintenance",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Please type:",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️": "⚙️ Settings",
+        "VIP فقط 👑": "VIP only 👑",
+        "⭐ المفضلات لمشتركي VIP فقط": "⭐ Favorites are available to VIP members only.",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled in the engine.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "🔍 اكتب اسم المانجا بعد الأمر، مثال:": "🔍 Enter a manga title after the command. Example:",
+        "❌ ملغى": "❌ Cancelled.",
+        "ℹ️ لا شيء قيد التنفيذ": "ℹ️ Nothing is currently in progress.",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "🔗 الرابط جاهز — انسخه": "🔗 Link is ready — copy it.",
+        "⚠️ لا توجد بيانات، افتح المانجا أولاً": "⚠️ No data found. Open a manga first.",
+        "⚠️ مصدر المانجا غير متاح": "⚠️ Manga source is unavailable.",
+        "❌ لا رصيد": "❌ Insufficient balance.",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "❌ فشل التحميل": "❌ Download failed.",
+        "⚠️ موجود": "⚠️ Already exists.",
+        "لا فصول": "No chapters available.",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "نتيجة": "results",
+        "فصل": "chapter",
+        "حد أقصى": "maximum",
+        "💳 رصيد:": "💳 Balance:",
+        "📝 أرسل: البداية-النهاية": "📝 Send: start-end",
+        "مثال:": "Example:",
+        "📚": "📚",
+        "🎉 مبروك!": "🎉 Congratulations!",
+        "حصلت على:": "You received:",
+        "👤 عضو جديد": "👤 New member",
+        "⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.": "⚠️ An error occurred while starting the bot. The error was logged. Please try again shortly.",
+        "⚠️ رابط تطبيق البوت غير مضبوط حالياً.": "⚠️ The bot app link is not configured yet.",
+        "❌ لا توجد فصول": "❌ No chapters available.",
+        "❌ لا توجد نتائج": "❌ No results found.",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search for:",
+        "🔍 اكتب اسم المانجا": "🔍 Enter a manga title",
+        "⭐": "⭐",
+        "🔔": "🔔",
+        "🔕": "🔕",
+
+        "⚠️ رابط تطبيق البوت غير مضبوط حالياً.": "⚠️ The bot app link is not configured yet.",
+        "⚠️ اشترك أولاً": "⚠️ Please subscribe first.",
+        "❌ إغلاق": "❌ Close",
+        "🔙 رجوع": "🔙 Back",
+        "📞 تواصل": "📞 Contact",
+        "🔗 مشاركة": "🔗 Share",
+        "🔍 بحث جديد": "🔍 New search",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️ إدارة": "⚙️ Manage",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا نتائج أو المصدر غير متاح\n": "❌ No results or the source is unavailable.\n",
+        "لا فصول": "No chapters",
+        "📚 فصل": "📚 chapters",
+        "فصل": "chapter",
+        "نتيجة": "results",
+        "📖 فصل": "📖 Chapter",
+        "📖 فصول": "📖 Chapters",
+        "❌ لا رصيد": "❌ No credits",
+        "⚠️ موجود": "⚠️ Already exists",
+        "🔗 الرابط جاهز — انسخه": "🔗 Link is ready — copy it.",
+        "📖 أحدث الفصول": "📖 Latest chapters",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "🔎 اكتب اسم المانجا": "🔎 Enter a manga title",
+        "📩 تقديم شكوى": "📩 Submit a complaint",
+        "👤 حسابي": "👤 My Account",
+        "🔥 أحدث المانجا": "🔥 Latest Manga",
+        "❓ مساعدة": "❓ Help",
+        "⭐ مفضلاتي": "⭐ My Favorites",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "🔄 جاري فحص الفصول الجديدة...": "🔄 Checking for new chapters...",
+        "✅ انتهى فحص المفضلات.": "✅ Favorites check completed.",
+        "⚠️ البوت في وضع الصيانة": "⚠️ The bot is under maintenance.",
+        "يرجى المحاولة لاحقاً": "Please try again later.",
+        "🚫 أنت محظور": "🚫 You are banned from using this bot.",
+        "⏳ جاري تحميل معلومات المانجا...": "⏳ Loading manga details...",
+        "⚠️ لا توجد بيانات، افتح المانجا أولاً": "⚠️ No data found. Open a manga first.",
+        "⚠️ مصدر المانجا غير متاح": "⚠️ Manga source is unavailable.",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "❌ فشل التحميل": "❌ Download failed.",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "🧩 دمج الفصول": "🧩 Merge chapters",
+        "💳 رصيد:": "💳 Balance:",
+        "حد أقصى": "Maximum",
+        "📝 أرسل: البداية-النهاية": "📝 Send: start-end",
+        "مثال:": "Example:",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "📌 آخر فصل:": "📌 Latest chapter:",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "❌ تعذر تحميل قائمة المصادر": "❌ Could not load the source list.",
+        "❌ تعذر جلب المعلومات": "❌ Could not retrieve the information.",
+        "🔄 تحديث": "🔄 Refresh",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "⬅️ المصادر": "⬅️ Sources",
+        "⬅️ السابق": "⬅️ Previous",
+        "التالي ➡️": "Next ➡️",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "✍️ اكتب:": "✍️ Type your message:",
+        "تم الإرسال": "Sent successfully",
+        "مفعلة": "Enabled",
+        "معطلة": "Disabled",
+        "⏳": "⏳",
+
+        "🎉 مبروك! حصلت على هدية": "🎉 Congratulations! You received a gift",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "❌ رابط غير موجود أو محذوف": "❌ This gift link does not exist or has been deleted.",
+        "🔒 مخصص لمستخدمين معينين": "🔒 This gift is restricted to specific users.",
+        "⏰ انتهت مدة الرابط، اسف": "⏰ Sorry, this gift link has expired.",
+        "⚠️ وصل للحد الأقصى، اسف": "⚠️ Sorry, this gift link has reached its maximum number of uses.",
+        "ℹ️ استلمت من هذا الرابط مسبقاً": "ℹ️ You have already claimed this gift.",
+        "📖 فصل جديد": "📖 New chapter",
+        "📖 فصل": "📖 Chapter",
+        "🔔 دخل شخص عبر رابط الهدية": "🔔 Someone joined through your gift link",
+        "📊": "📊",
+        "📢 بدأ إرسال الإعلان": "📢 Announcement sent",
+
+        "⚠️ البوت في وضع الصيانة": "⚠️ The bot is under maintenance.",
+        "يرجى المحاولة لاحقاً": "Please try again later.",
+        "🚫 أنت محظور": "🚫 You are banned from using this bot.",
+        "🎁 تم تجديد رصيدك!": "🎁 Your balance has been renewed!",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "📢 اشترك في": "📢 Join",
+        "📞 تواصل": "📞 Contact",
+        "📩 تقديم شكوى": "📩 Submit a complaint",
+        "🔘": "🔘",
+        "📖 رصيد الفصول": "📖 Chapter balance",
+        "💰": "💰",
+        "⏰": "⏰",
+        "❌ لا رصيد": "❌ No credits",
+        "❌ لا توجد نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "⚠️": "⚠️",
+        "تم التحقق!": "Verified!",
+        "❌ لا فصول": "❌ No chapters are available.",
+
+        "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
+        "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
+        "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
+        "أرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.": "Send the starting chapter, a hyphen, then the ending chapter. Example: 1-10.",
+        "📚 لم يتم العثور على فصول ضمن هذا النطاق.": "📚 No chapters were found in this range.",
+        "تحقق من أرقام الفصول وأرسل نطاقاً آخر.": "Check the chapter numbers and send another range.",
+        "📄 عدد الفصول يتجاوز الحد المسموح.": "📄 The chapter count exceeds the allowed limit.",
+        "طلبت": "Requested",
+        "فصلاً، والحد الأقصى لهذا الملف": "chapters; the maximum allowed in this file is",
+        "💳 رصيد الدمج غير كافٍ.": "💳 Not enough merge credits.",
+        "❌ تعذّر بدء تحميل الفصل.": "❌ Could not start the chapter download.",
+        "لم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.": "No credits were deducted. Please try again shortly.",
+        "🧩 استخراج الفصول": "🧩 Extracting chapters",
+        "📚 المكتمل:": "📚 Completed:",
+        "✅ الناجح:": "✅ Successful:",
+        "🖼️ الصور المستخرجة:": "🖼️ Images extracted:",
+        "❌ لم يستخرج المحرك صور الفصول": "❌ The engine could not extract chapter images.",
+        "🧩 جاري تجهيز ملف الفصول المدمجة...": "🧩 Preparing the merged chapter file...",
+        "🧩 ملف مدمج": "🧩 Merged file",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "📖 فصل": "📖 chapters",
+        "🔄 تحديث": "🔄 Refresh",
+        "📤 يتم إرسال الملف إلى تيليجرام...": "📤 Sending the file to Telegram...",
+        "⚡ نسبة الإنجاز:": "⚡ Progress:",
+        "📦 الحجم المرسل:": "📦 Uploaded size:",
+        "💎 VIP": "💎 VIP",
+        "أسبوعي / شهري / سنوي": "Weekly / Monthly / Yearly",
+        "✨ المميزات:": "✨ Benefits:",
+        "├ ♾️ تحميل غير محدود": "├ ♾️ Unlimited downloads",
+        "├ ⭐ المفضلة": "├ ⭐ Favorites",
+        "├ 🧩 دمج غير محدود": "├ 🧩 Unlimited merges",
+        "└ ⚡ أولوية في الدعم": "└ ⚡ Priority support",
+        "💬 تواصل:": "💬 Contact:",
+        "📅 الخطة:": "📅 Plan:",
+        "⏳ يوم": "⏳ days",
+        "📆": "📆",
+        "📚": "📚",
+        "🔎 اختر المصدر": "🔎 Choose a source",
+        "❌ لا توجد نتائج": "❌ No results found",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🔙 رجوع": "🔙 Back",
+        "⬅️ المصادر": "⬅️ Sources",
+        "التالي ➡️": "Next ➡️",
+        "⬅️ السابق": "⬅️ Previous",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "🧩 دمج الفصول": "🧩 Merge chapters",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "⬅️ مصادر أحدث الفصول": "⬅️ Latest chapter sources",
+        "❌ إغلاق": "❌ Close",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Type your message:",
+        "تم الإرسال": "Sent successfully",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "ادعُ صديقاً": "Invite a friend",
+        "⏳ جاري تحميل الفصل": "⏳ Downloading chapter",
+        "📥 جاري تحميل الفصل": "📥 Downloading chapter",
+        "وتجهيز PDF...": "and preparing the PDF...",
+        "📊 المتبقي:": "📊 Remaining:",
+        "❌ فشل التحميل": "❌ Download failed.",
+
+        "⚠️ أرسل اسم مانجا صحيحاً للبحث.": "⚠️ Please send a valid manga title to search.",
+        "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
+        "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
+        "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
+        "أرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.": "Send the starting chapter, a hyphen, then the ending chapter. Example: 1-10.",
+        "📚 لم يتم العثور على فصول ضمن هذا النطاق.": "📚 No chapters were found in this range.",
+        "تحقق من أرقام الفصول وأرسل نطاقاً آخر.": "Check the chapter numbers and send another range.",
+        "📄 عدد الفصول يتجاوز الحد المسموح.": "📄 The chapter count exceeds the allowed limit.",
+        "💳 رصيد الدمج غير كافٍ.": "💳 Not enough merge credits.",
+        "المطلوب:": "Required:",
+        "المتاح:": "Available:",
+        "يمكنك تجديد الرصيد أو ترقية حسابك إلى VIP.": "You can renew your balance or upgrade to VIP.",
+        "⏳ يوجد تحميل آخر قيد التنفيذ.": "⏳ Another download is already in progress.",
+        "انتظر حتى يكتمل ثم حاول مجدداً.": "Please wait until it finishes, then try again.",
+        "❌ تعذّر بدء تحميل الفصل.": "❌ Could not start the chapter download.",
+        "لم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.": "No credits were deducted. Please try again shortly.",
+        "🧩 بدأ تجهيز ملف دمج الفصول": "🧩 Preparing the merged chapter file",
+        "📚 النطاق:": "📚 Range:",
+        "🔢 عدد الفصول:": "🔢 Number of chapters:",
+        "⏳ يرجى الانتظار...": "⏳ Please wait...",
+        "❌ لم يستخرج المحرك صور الفصول": "❌ The engine could not extract the chapter images.",
+        "❌ فشل تجهيز ملف دمج الفصول.": "❌ Failed to create the merged chapter file.",
+        "تمت إعادة الرصيد إلى حسابك.": "Your credits have been refunded.",
+        "🧩 ملف مدمج": "🧩 Merged file",
+        "❌ لا يوجد رصيد": "❌ You have no remaining credits.",
+        "ادعُ صديقاً 🔗": "Invite a friend 🔗",
+        "⏳ جاري تحميل الفصل": "⏳ Downloading chapter",
+        "📥 جاري تحميل الفصل": "📥 Downloading chapter",
+        "وتجهيز PDF...": "and preparing the PDF...",
+        "📊 المتبقي:": "📊 Remaining:",
+        "❌ فشل التحميل": "❌ Download failed.",
+        "VIP فقط 👑": "VIP only 👑",
+        "🔒 ميزة VIP": "🔒 VIP feature",
+        "⭐ المفضلات لمشتركي VIP فقط": "⭐ Favorites are available to VIP members only.",
+        "اختر:": "Choose:",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "⏳ جاري تحميل معلومات المانجا...": "⏳ Loading manga details...",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "❌ تعذر جلب المعلومات": "❌ Could not retrieve manga information.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "📌 آخر فصل:": "📌 Latest chapter:",
+        "🔗 رابط مشاركة المانجا": "🔗 Manga sharing link",
+        "💡 انسخ الرابط وشاركه مع أصدقائك": "💡 Copy the link and share it with your friends.",
+        "✨ عند فتحه يفتح البوت ويعرض المانجا تلقائياً": "✨ Opening it will launch the bot and display the manga automatically.",
+        "👑 أنت VIP!": "👑 You are a VIP member!",
+        "✨ تحميل غير محدود": "✨ Unlimited downloads",
+        "⏰ تجديد:": "⏰ Resets in:",
+        "⚡ تصفير:": "⚡ Reset in:",
+        "🔗 مشاركة البوت": "🔗 Share the bot",
+        "احصل على مكافآت لكل صديق:": "Earn rewards for every friend:",
+        "رابطك:": "Your link:",
+        "🎁 جرب هذا البوت!": "🎁 Try this bot!",
+        "👤 تواصل مع الأدمن": "👤 Contact the admin",
+        "👥 تواصل بديل": "👥 Alternative contact",
+        "💎 VIP": "💎 VIP",
+        "💎 تفاصيل VIP": "💎 VIP details",
+        "✅ أنت VIP": "✅ You are a VIP member.",
+        "❌ لست VIP": "❌ You are not a VIP member.",
+        "💡 يمكنك الترقية": "💡 You can upgrade.",
+        "⏰ VIP — بلا انتظار": "⏰ VIP — No waiting",
+        "⏰ الوقت": "⏰ Timers",
+        "⏱️ مدة التجديد:": "⏱️ Reset interval:",
+        "📅 مسجل:": "📅 Joined:",
+        "⬇️ التحميلات:": "⬇️ Downloads:",
+        "🆔 المعرّف:": "🆔 ID:",
+        "📝 اليوزر:": "📝 Username:",
+        "❌ تعذر فتح المانجا:": "❌ Could not open manga:",
+        "⚠️ هذا المصدر لم يعد متاحاً.": "⚠️ This source is no longer available.",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "⚠️ رابط المانجا غير موجود": "⚠️ Manga link not found.",
+        "⚠️ لا توجد بيانات، افتح المانجا أولاً": "⚠️ No manga data. Open a manga first.",
+        "⚠️ مصدر المانجا غير متاح": "⚠️ Manga source is unavailable.",
+        "🔗 الرابط جاهز — انسخه": "🔗 Link is ready — copy it.",
+        "⚠️ اشترك أولاً": "⚠️ Please subscribe first.",
+        "⚠️ اشترك في جميع القنوات أولاً": "⚠️ Please join all required channels first.",
+        "🔍 بحث جديد": "🔍 New search",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "مفعلة": "Enabled",
+        "معطلة": "Disabled",
+        "الإشعارات مفعلة": "Notifications enabled",
+        "الإشعارات معطلة": "Notifications disabled",
+
+        "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.": "🔎 Send the name of the manga or manhwa you want to search for.",
+        "مثال: Solo Leveling": "Example: Solo Leveling",
+        "للإلغاء أرسل /cancel": "To cancel, send /cancel",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search:",
+        "🔍 اكتب اسم المانجا بعد الأمر، مثال:": "🔍 Enter the manga name after the command. Example:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "❌ إغلاق": "❌ Close",
+        "❌ إلغاء": "❌ Cancel",
+        "❌ ملغى": "❌ Cancelled",
+        "ℹ️ لا شيء قيد التنفيذ": "ℹ️ Nothing is currently in progress.",
+        "📩 شكوى": "📩 Complaint",
+        "✍️ اكتب:": "✍️ Please type your message:",
+        "❓ مساعدة": "❓ Help",
+        "🔍 /search الاسم": "🔍 /search name",
+        "📚 4 مصادر": "📚 4 sources",
+        "📖 فردي:": "📖 Single downloads:",
+        "🧩 دمج:": "🧩 Chapter merges:",
+        "📎 حد الملف:": "📎 File limit:",
+        "🔗 إحالة: فردي": "🔗 Referral: single",
+        " / دمج": " / merge",
+        "👑 VIP: بلا حدود": "👑 VIP: Unlimited",
+        "⚠️ هذا المصدر لم يعد متاحاً.": "⚠️ This source is no longer available.",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "📖 فصل": "📖 chapters",
+        "📌 آخر فصل:": "📌 Latest chapter:",
+        "📚 اختر مصدر أحدث الفصول:": "📚 Choose a source for the latest chapters:",
+        "🔥 أحدث الفصول في المصدر المحدد:": "🔥 Latest chapters from the selected source:",
+        "❌ تعذر تحميل قائمة المصادر": "❌ Could not load the source list.",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "⬅️ المصادر": "⬅️ Sources",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "⏳ جاري تحميل معلومات المانجا...": "⏳ Loading manga details...",
+        "رابط المانجا غير متوفر": "Manga link is unavailable.",
+        "❌ تعذر جلب المعلومات": "❌ Could not retrieve the information.",
+        "❌ لا توجد فصول": "❌ No chapters are available.",
+        "⚠️ رابط المانجا غير موجود": "⚠️ Manga link not found.",
+        "🔄": "🔄",
+        "VIP فقط 👑": "VIP only 👑",
+        "🔒 ميزة VIP": "🔒 VIP feature",
+        "⭐ المفضلات لمشتركي VIP فقط": "⭐ Favorites are available to VIP members only.",
+        "⭐ المفضلات": "⭐ Favorites",
+        "⚙️": "⚙️",
+        "اختر:": "Choose:",
+        "مفعلة": "Enabled",
+        "معطلة": "Disabled",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "👤 حسابي": "👤 My Account",
+        "👤 عضو عادي": "👤 Standard member",
+        "👑 عضو VIP — تحميل غير محدود": "👑 VIP member — Unlimited downloads",
+        "📊 رصيدي": "📊 My balance",
+        "📊 رصيد الفصول": "📊 Chapter balance",
+        "🔗 مشاركة البوت": "🔗 Share the bot",
+        "احصل على مكافآت لكل صديق:": "Earn rewards for every friend:",
+        "رابطك:": "Your link:",
+        "📤 مشاركة": "📤 Share",
+        "👑 ترقية VIP": "👑 Upgrade to VIP",
+        "✨ المميزات:": "✨ Benefits:",
+        "├ ♾️ تحميل غير محدود": "├ ♾️ Unlimited downloads",
+        "├ ⭐ المفضلة": "├ ⭐ Favorites",
+        "├ 🧩 دمج غير محدود": "├ 🧩 Unlimited merges",
+        "└ ⚡ أولوية في الدعم": "└ ⚡ Priority support",
+        "💬 تواصل:": "💬 Contact:",
+        "💎 تفاصيل VIP": "💎 VIP details",
+        "❌ لست VIP": "❌ You are not a VIP member.",
+        "💡 يمكنك الترقية": "💡 You can upgrade.",
+        "⏰ الوقت": "⏰ Timers",
+        "⏳ VIP — بلا انتظار": "⏳ VIP — No waiting",
+        "✅ جاهز": "✅ Ready",
+        "📅 مسجل:": "📅 Joined:",
+        "⬇️ التحميلات:": "⬇️ Downloads:",
+        "🆔 المعرّف:": "🆔 ID:",
+        "📝 اليوزر:": "📝 Username:",
+        "📖 فردي": "📖 Single downloads",
+        "🧩 دمج": "🧩 Merges",
+        "📚": "📚",
+        "📊 رصيد الفصول": "📊 Chapter balance",
+        "📊 رصيدي": "📊 My balance",
+        "📖 فردي": "📖 Single downloads",
+        "🧩 دمج": "🧩 Merges",
+        "👤 عضو عادي": "👤 Standard member",
+        "👑 عضو VIP — تحميل غير محدود": "👑 VIP member — Unlimited downloads",
+        "📅 الخطة:": "📅 Plan:",
+        "📅 أسبوع": "📅 Week",
+        "📆 شهر": "📆 Month",
+        "🗓️ سنة": "🗓️ Year",
+        "⏳ المدة المتبقية:": "⏳ Time remaining:",
+        "⏰ تجديد:": "⏰ Resets in:",
+        "⚡ تصفير:": "⚡ Reset in:",
+        "🔗 مشاركة البوت": "🔗 Share the bot",
+        "احصل على مكافآت لكل صديق:": "Earn rewards for every friend:",
+        "رابطك:": "Your link:",
+        "👑 ترقية VIP": "👑 Upgrade to VIP",
+        "💎 تفاصيل VIP": "💎 VIP details",
+        "❌ لست VIP": "❌ You are not a VIP member.",
+        "💡 يمكنك الترقية": "💡 You can upgrade.",
+        "⏰ VIP — بلا انتظار": "⏰ VIP — No waiting",
+        "⏰ الوقت": "⏰ Timers",
+        "⏱️ مدة التجديد:": "⏱️ Reset interval:",
+        "📅 مسجل:": "📅 Joined:",
+        "⬇️ التحميلات:": "⬇️ Downloads:",
+        "🆔 المعرّف:": "🆔 User ID:",
+        "📝 اليوزر:": "📝 Username:",
+        "⚠️ أرسل اسم مانجا صحيحاً للبحث.": "⚠️ Please send a valid manga title to search.",
+        "⚠️ نص الشكوى قصير جداً": "⚠️ Your complaint is too short.",
+        "اكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.": "Please provide more details (at least 3 characters) so we can understand the issue.",
+        "🔢 صيغة نطاق الفصول غير صحيحة.": "🔢 Invalid chapter range format.",
+        "أرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.": "Send the starting chapter, a hyphen, then the ending chapter. Example: 1-10.",
+        "📚 لم يتم العثور على فصول ضمن هذا النطاق.": "📚 No chapters were found in this range.",
+        "تحقق من أرقام الفصول وأرسل نطاقاً آخر.": "Check the chapter numbers and send another range.",
+        "📄 عدد الفصول يتجاوز الحد المسموح.": "📄 The chapter count exceeds the allowed limit.",
+        "طلبت": "Requested",
+        "فصلاً، والحد الأقصى لهذا الملف": "chapters; the maximum allowed in this file is",
+        "💳 رصيد الدمج غير كافٍ.": "💳 Not enough merge credits.",
+        "المطلوب:": "Required:",
+        "المتاح:": "Available:",
+        "يمكنك تجديد الرصيد أو ترقية حسابك إلى VIP.": "You can renew your balance or upgrade to VIP.",
+        "⏳ يوجد تحميل آخر قيد التنفيذ.": "⏳ Another download is already in progress.",
+        "انتظر حتى يكتمل ثم حاول مجدداً.": "Please wait until it finishes, then try again.",
+        "❌ تعذّر بدء تحميل الفصل.": "❌ Could not start the chapter download.",
+        "لم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.": "No credits were deducted. Please try again shortly.",
+        "🧩 بدأ تجهيز ملف دمج الفصول": "🧩 Preparing the merged chapter file",
+        "📚 النطاق:": "📚 Range:",
+        "🔢 عدد الفصول:": "🔢 Number of chapters:",
+        "⏳ يرجى الانتظار...": "⏳ Please wait...",
+        "🧩 استخراج الفصول": "🧩 Extracting chapters",
+        "📚 المكتمل:": "📚 Completed:",
+        "✅ الناجح:": "✅ Successful:",
+        "🖼️ الصور المستخرجة:": "🖼️ Images extracted:",
+        "❌ لم يستخرج المحرك صور الفصول": "❌ The engine could not extract chapter images.",
+        "🧩 جاري تجهيز ملف الفصول المدمجة...": "🧩 Preparing the merged chapter file...",
+        "❌ فشل تجهيز ملف دمج الفصول.": "❌ Failed to create the merged chapter file.",
+        "تمت إعادة الرصيد إلى حسابك.": "Your credits have been refunded.",
+        "📤 يتم إرسال الملف إلى تيليجرام...": "📤 Sending the file to Telegram...",
+        "⚡ نسبة الإنجاز:": "⚡ Progress:",
+        "📦 الحجم المرسل:": "📦 Uploaded size:",
+        "❌ تعذّر رفع ملف PDF إلى تيليجرام.": "❌ Could not upload the PDF to Telegram.",
+        "تم إرجاع رصيد الدمج إلى حسابك؛ حاول مرة أخرى لاحقاً.": "Your merge credits have been refunded. Please try again later.",
+        "🧩 ملف مدمج": "🧩 Merged file",
+        "📖 فصول مفردة:": "📖 Single chapters:",
+        "🧩 فصول مدمجة:": "🧩 Merged chapters:",
+        "🎉 مبروك!": "🎉 Congratulations!",
+        "حصلت على:": "You received:",
+        "🎁 تم تجديد رصيدك!": "🎁 Your balance has been renewed!",
+        "📖 فصل جديد": "📖 New chapter",
+        "🔔 دخل شخص عبر رابط الهدية": "🔔 Someone joined through your gift link",
+        "⏰ انتهت مدة الرابط، اسف": "⏰ Sorry, this gift link has expired.",
+        "⚠️ وصل للحد الأقصى، اسف": "⚠️ Sorry, this gift link has reached its maximum number of uses.",
+        "ℹ️ استلمت من هذا الرابط مسبقاً": "ℹ️ You have already claimed this gift.",
+        "❌ رابط غير موجود أو محذوف": "❌ This gift link does not exist or has been deleted.",
+        "🔒 مخصص لمستخدمين معينين": "🔒 This gift is restricted to specific users.",
+        "📢 اشترك في": "📢 Join",
+        "⚠️ اشترك في جميع القنوات أولاً": "⚠️ Please join all required channels first.",
+        "تم التحقق!": "Verified!",
+        "🔍 اختر المصدر للبحث عن:": "🔍 Choose a source to search:",
+        "❌ لا توجد مصادر مفعلة داخل المحرك.": "❌ No sources are currently enabled in the engine.",
+        "❌ تعذر الاتصال بمحرك المانجا:": "❌ Could not connect to the manga engine:",
+        "❌ لا نتائج أو المصدر غير متاح": "❌ No results or the source is unavailable.",
+        "❌ لا توجد فصول.": "❌ No chapters are available.",
+        "❌ تعذر جلب معلومات المانجا.": "❌ Could not retrieve manga information.",
+        "❌ تعذر تحميل أحدث الفصول من هذا المصدر": "❌ Could not load the latest chapters from this source.",
+        "❌ لا توجد مانجا حديثة في هذا المصدر": "❌ No recent manga found in this source.",
+        "🔔 الإشعارات مفعلة": "🔔 Notifications enabled",
+        "🔕 الإشعارات معطلة": "🔕 Notifications disabled",
+        "⭐ إضافة للمفضلة": "⭐ Add to favorites",
+        "🗑️ إزالة من المفضلة": "🗑️ Remove from favorites",
+        "🔗 مشاركة المانجا": "🔗 Share manga",
+        "التالي ➡️": "Next ➡️",
+        "⬅️ السابق": "⬅️ Previous",
+        "⏮ أول فصل": "⏮ First chapter",
+        "آخر فصل ⏭": "Last chapter ⏭",
+        "🔙 رجوع": "🔙 Back",
+        "❌ إغلاق": "❌ Close",
+        "❌ إلغاء": "❌ Cancel",
+        "🔍 بحث جديد": "🔍 New search",
+        "🏠 القائمة الرئيسية": "🏠 Main menu",
+        "🏷️ التصنيفات": "🏷️ Categories",
+        "🔥 أحدث المانجا": "🔥 Latest Manga",
+        "👤 حسابي": "👤 My Account",
+        "❓ مساعدة": "❓ Help",
+        "⭐ مفضلاتي": "⭐ My Favorites",
+    }
+    result = value
+    for ar, en in sorted(translations.items(), key=lambda item: len(item[0]), reverse=True):
+        result = result.replace(ar, en)
+    return result
+
+def set_user_language(uid, language):
+    language = "en" if str(language).lower() == "en" else "ar"
+    _execute("INSERT OR REPLACE INTO user_languages (uid, language) VALUES (?,?)", (int(uid), language))
+    return language
+def language_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🇬🇧 English", callback_data="language_en"), InlineKeyboardButton("🇮🇶 العربية", callback_data="language_ar")]])
+def language_prompt_text():
+    return "🌐 اختر لغة البوت / Choose Bot Language"
 def get_users_count(): return _conn().execute("SELECT COUNT(*) FROM users").fetchone()[0]
 def get_all_user_ids(): return [r["uid"] for r in _conn().execute("SELECT uid FROM users").fetchall()]
 def get_user_downloads(uid):
@@ -1233,30 +1922,28 @@ async def publish_gift_now(client, admin_uid, code):
     if mode == 'manual':
         try:
             await client.send_message(admin_uid,
-                f"🎁 **رابط هدية جديد**\n\n🔗 `{url}`\n\n"
-                f"📖 فردي: `{link['single_amount']}`\n🧩 دمج: `{link['merge_amount']}`\n"
-                f"👥 حد: `{link['max_users']}`\n"
-                f"⏰ ينتهي: `{time.strftime('%Y-%m-%d %H:%M', time.localtime(link['expires_at']))}`\n\n"
+                f"🎁 رابط هدية جديد\n\n🔗 {url}\n\n"
+                f"📖 فردي: {link['single_amount']}\n🧩 دمج: {link['merge_amount']}\n"
+                f"👥 حد: {link['max_users']}\n"
+                f"⏰ ينتهي: {time.strftime('%Y-%m-%d %H:%M', time.localtime(link['expires_at']))}\n\n"
                 f"💡 انسخ الرابط وانشره:",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(url)}&text={quote('🎁 هدية!')}")],
                     [InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{new_code}")],
-                    [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
-                parse_mode=ParseMode.MARKDOWN)
+                    [InlineKeyboardButton("❌ Close" if en else "❌ إغلاق", callback_data="close_list")]]))
             return True, None, new_code
         except Exception as e:
             return False, f'فشل: {e}', None
     if not old_channel:
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, '📢 لم تحدد قناة', None
-    parts = ["🎁 **هدية فصول مجانية!**\n"]
-    if link["single_amount"] > 0: parts.append(f"📖 فصول مفردة: **{link['single_amount']}**")
-    if link["merge_amount"] > 0: parts.append(f"🧩 فصول مدمجة: **{link['merge_amount']}**")
-    parts.append(f"\n👥 متبقٍ: `{link['max_users']}`")
+    parts = ["🎁 هدية فصول مجانية!\n"]
+    if link["single_amount"] > 0: parts.append(f"📖 فصول مفردة: {link['single_amount']}")
+    if link["merge_amount"] > 0: parts.append(f"🧩 فصول مدمجة: {link['merge_amount']}")
+    parts.append(f"\n👥 متبقٍ: {link['max_users']}")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 استلم الآن", url=url)]])
     try:
-        m = await client.send_message(old_channel, "\n".join(parts), reply_markup=kb,
-                                      parse_mode=ParseMode.MARKDOWN, disable_notification=True)
+        m = await client.send_message(old_channel, "\n".join(parts), reply_markup=kb, disable_notification=True)
     except Exception as e:
         pass
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
@@ -1267,31 +1954,30 @@ async def publish_gift_now(client, admin_uid, code):
 async def _process_gift_claim(client, cid, uid, code):
     status, link = claim_gift(code, uid)
     if status == 'ok':
-        parts = ["🎉 **مبروك! حصلت على هدية**\n\n"]
-        if link['single_amount'] > 0: parts.append(f"📖 فصول مفردة: +`{link['single_amount']}`\n")
-        if link['merge_amount'] > 0: parts.append(f"🧩 فصول مدمجة: +`{link['merge_amount']}`\n")
-        await client.send_message(cid, "".join(parts), parse_mode=ParseMode.MARKDOWN)
+        parts = [translate_ui_text(uid, "🎉 مبروك! حصلت على هدية\n\n")]
+        if link['single_amount'] > 0: parts.append(translate_ui_text(uid, f"📖 فصول مفردة: +{link['single_amount']}\n"))
+        if link['merge_amount'] > 0: parts.append(translate_ui_text(uid, f"🧩 فصول مدمجة: +{link['merge_amount']}\n"))
+        await client.send_message(cid, "".join(parts))
         admin_id = link.get('created_by')
         if admin_id:
             try:
-                u = await client.get_users(uid); uname = f"@{u.username}" if u.username else (u.first_name or str(uid))
+                u = await client.get_chat(uid); uname = f"@{u.username}" if u.username else (u.first_name or str(uid))
                 await client.send_message(admin_id,
-                    f"🔔 **دخل شخص عبر رابط الهدية**\n\n🔗 `{link['code']}`\n👤 {uname} (`{uid}`)\n"
-                    f"📊 `{link['used_count']}/{link['max_users']}`",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{link['code']}")]]),
-                    parse_mode=ParseMode.MARKDOWN)
+                    f"🔔 دخل شخص عبر رابط الهدية\n\n🔗 {link['code']}\n👤 {uname} ({uid})\n"
+                    f"📊 {link['used_count']}/{link['max_users']}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{link['code']}")]]))
             except: pass
         if link['used_count'] >= link['max_users'] and link.get('channel_message_id'):
             asyncio.create_task(_delayed_gift_delete(client, code, 60))
-    elif status == 'not_found': await client.send_message(cid, "❌ **رابط غير موجود أو محذوف**", parse_mode=ParseMode.MARKDOWN)
-    elif status == 'not_allowed': await client.send_message(cid, "🔒 **مخصص لمستخدمين معينين**", parse_mode=ParseMode.MARKDOWN)
+    elif status == 'not_found': await client.send_message(cid, translate_ui_text(uid, "❌ رابط غير موجود أو محذوف"))
+    elif status == 'not_allowed': await client.send_message(cid, translate_ui_text(uid, "🔒 مخصص لمستخدمين معينين"))
     elif status == 'expired':
-        await client.send_message(cid, "⏰ **انتهت مدة الرابط، اسف**", parse_mode=ParseMode.MARKDOWN)
+        await client.send_message(cid, translate_ui_text(uid, "⏰ انتهت مدة الرابط، اسف"))
         if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
     elif status == 'limit':
-        await client.send_message(cid, "⚠️ **وصل للحد الأقصى، اسف**", parse_mode=ParseMode.MARKDOWN)
+        await client.send_message(cid, translate_ui_text(uid, "⚠️ وصل للحد الأقصى، اسف"))
         if link and link.get('channel_message_id'): asyncio.create_task(_delayed_gift_delete(client, code, 60))
-    elif status == 'already': await client.send_message(cid, "ℹ️ **استلمت من هذا الرابط مسبقاً**", parse_mode=ParseMode.MARKDOWN)
+    elif status == 'already': await client.send_message(cid, translate_ui_text(uid, "ℹ️ استلمت من هذا الرابط مسبقاً"))
 
 # ============ أدوات ============
 def clean_url(s):
@@ -1317,18 +2003,17 @@ def clean_manga_title(title,identifier):
     return t.strip() or identifier.replace("-"," ").title()
 def make_quote(text):
     if not text: return text
-    out=[]
-    for line in text.split("\n"):
-        s=line.rstrip()
-        if not s: out.append(""); continue
-        if s.startswith(">"): out.append(s)
-        else: out.append(f"> {s}")
-    return "\n".join(out)
+    # Normalize old/custom captions, then put the quote on its own lines.
+    clean = str(text).replace("**", "").strip()
+    clean = re.sub(r"(?is)^\s*<blockquote(?:\s+[^>]*)?>\s*|\s*</blockquote>\s*$", "", clean)
+    clean = re.sub(r"(?m)^\s*>\s?", "", clean).strip()
+    return f"<blockquote>\n{clean}\n</blockquote>"
 def build_caption(template_key,**kwargs):
     try:
         template=settings.get(template_key,"")
         kwargs.update({"date":time.strftime("%Y-%m-%d"),"time":time.strftime("%H:%M")})
-        return template.format(**kwargs)
+        result = template.format(**kwargs)
+        return make_quote(result) if template_key == "single_caption" else result
     except Exception as e: return ""
 def _chapter_tracking_value(chapter):
     if not isinstance(chapter, dict):
@@ -1380,10 +2065,10 @@ def _trigger_notify(uid, kind="both"):
     except RuntimeError: pass
 async def _send_renewal_notify(uid, kind="both"):
     try:
-        parts = ["🎁 **تم تجديد رصيدك!**\n\n"]
-        if kind in ("single", "both"): parts.append(f"📖 فصول مفردة: `{settings.get('daily_reward_amount',100)}`\n")
-        if kind in ("merge", "both"): parts.append(f"🧩 فصول مدمجة: `{settings.get('merge_daily_limit',50)}`\n")
-        if len(parts) > 1: await app.send_message(uid, "".join(parts), parse_mode=ParseMode.MARKDOWN)
+        parts = [translate_ui_text(uid, "🎁 تم تجديد رصيدك!\n\n")]
+        if kind in ("single", "both"): parts.append(translate_ui_text(uid, f"📖 فصول مفردة: {settings.get('daily_reward_amount',100)}\n"))
+        if kind in ("merge", "both"): parts.append(translate_ui_text(uid, f"🧩 فصول مدمجة: {settings.get('merge_daily_limit',50)}\n"))
+        if len(parts) > 1: await app.send_message(uid, "".join(parts))
     except: pass
 set_notify_callback(_send_renewal_notify)
 
@@ -1413,36 +2098,37 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
 
     # Navigation is available in every mode: previous/next and first/last.
     nav = []
+    en = get_user_language(uid) == "en" if uid is not None else False
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"pg_{src_short}_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Previous" if en else "⬅️ السابق", callback_data=f"pg_{src_short}_{page-1}"))
     if page < total - 1:
-        nav.append(InlineKeyboardButton("التالي ➡️", callback_data=f"pg_{src_short}_{page+1}"))
+        nav.append(InlineKeyboardButton("Next ➡️" if en else "التالي ➡️", callback_data=f"pg_{src_short}_{page+1}"))
     if nav:
         kb.append(nav)
 
     ends = []
     if page > 0:
-        ends.append(InlineKeyboardButton("⏮ أول فصل", callback_data=f"f_{src_short}"))
+        ends.append(InlineKeyboardButton("⏮ First chapter" if en else "⏮ أول فصل", callback_data=f"f_{src_short}"))
     if page < total - 1:
-        ends.append(InlineKeyboardButton("آخر فصل ⏭", callback_data=f"l_{src_short}"))
+        ends.append(InlineKeyboardButton("Last chapter ⏭" if en else "آخر فصل ⏭", callback_data=f"l_{src_short}"))
     if ends:
         kb.append(ends)
 
     if uid is not None and is_vip(uid):
         if is_favorite(uid, ident, src):
-            kb.append([InlineKeyboardButton("🗑️ إزالة من المفضلة", callback_data=f"fav_remove_{src_short}")])
-            kb.append([InlineKeyboardButton("🔔 الإشعارات مفعلة" if get_fav_notify(uid, ident, src) else "🔕 الإشعارات معطلة", callback_data=f"toggle_notify_{src_short}")])
+            kb.append([InlineKeyboardButton("🗑️ Remove from favorites" if en else "🗑️ إزالة من المفضلة", callback_data=f"fav_remove_{src_short}")])
+            kb.append([InlineKeyboardButton(("🔔 Notifications enabled" if get_fav_notify(uid, ident, src) else "🔕 Notifications disabled") if en else ("🔔 الإشعارات مفعلة" if get_fav_notify(uid, ident, src) else "🔕 الإشعارات معطلة"), callback_data=f"toggle_notify_{src_short}")])
         else:
-            kb.append([InlineKeyboardButton("⭐ إضافة للمفضلة", callback_data=f"fav_add_{src_short}")])
+            kb.append([InlineKeyboardButton("⭐ Add to favorites" if en else "⭐ إضافة للمفضلة", callback_data=f"fav_add_{src_short}")])
 
-    kb.append([InlineKeyboardButton("🧩 دمج الفصول", callback_data=f"mrg_{src_short}")])
+    kb.append([InlineKeyboardButton("🧩 Merge chapters" if en else "🧩 دمج الفصول", callback_data=f"mrg_{src_short}")])
     if ident and BOT_USERNAME:
-        kb.append([InlineKeyboardButton("🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
+        kb.append([InlineKeyboardButton("🔗 Share manga" if en else "🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
     if latest_mode:
         latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
-        kb.append([InlineKeyboardButton("⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="latest_home")])
-    kb.append([InlineKeyboardButton("🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if en else "🏠 القائمة الرئيسية", callback_data="latest_home")])
+    kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     return InlineKeyboardMarkup(kb), page, total
 
 def pack_share_url(url):
@@ -1482,14 +2168,15 @@ def get_manga_share(code):
 
 def create_fav_list_markup(uid):
     favs=get_favorites(uid); n=is_notifications_enabled(uid)
-    tt="🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة"
+    en = get_user_language(uid) == "en"
+    tt=("🔔 Notifications enabled" if n else "🔕 Notifications disabled") if en else ("🔔 الإشعارات مفعلة" if n else "🔕 الإشعارات معطلة")
     if not favs:
-        return InlineKeyboardMarkup([[InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),"مفعلة" if n else "معطلة",0
+        return InlineKeyboardMarkup([[InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")]]),("Enabled" if n else "Disabled") if en else ("مفعلة" if n else "معطلة"),0
     kb=[]
     for i, f in enumerate(favs):
         kb.append([InlineKeyboardButton(f"📖 {clean_manga_title(f.get('title',''),f.get('identifier',''))[:35]}",callback_data=f"fav_open_{i}")])
-    kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-    return InlineKeyboardMarkup(kb),"مفعلة" if n else "معطلة",len(favs)
+    kb.append([InlineKeyboardButton(tt,callback_data="toggle_notifications"), InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")])
+    return InlineKeyboardMarkup(kb),("Enabled" if n else "Disabled") if en else ("مفعلة" if n else "معطلة"),len(favs)
 
 async def download_image_bytesio(url,referer=None):
     if not url: return None
@@ -1514,35 +2201,44 @@ async def download_image_bytesio(url,referer=None):
     except: pass
     return None
 
+def format_manga_bio(description):
+    """Render the source-provided manga bio as a Telegram blockquote."""
+    description = str(description or "").strip()
+    return f"<blockquote>{html.escape(description)}</blockquote>" if description else ""
+
+
 async def send_cover_message(msg,cover,text,markup,referer=None):
+    text = translate_ui_text(msg.chat.id, text)
     if cover:
         for rf in [referer,None]:
             try:
                 cb=await download_image_bytesio(cover,referer=rf)
-                if cb: return await msg.reply_photo(photo=cb,caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+                if cb: return await msg.reply_photo(photo=cb,caption=text,reply_markup=markup,parse_mode="HTML")
             except: pass
-    return await msg.reply_text(text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    return await msg.reply_text(text,reply_markup=markup,parse_mode="HTML")
 
 async def safe_edit_fresh_text(client, msg, chat_id, text, markup=None):
     """Show a text-only screen; never leave an old manga cover behind a list."""
+    text = translate_ui_text(chat_id, text)
     if msg.photo or msg.video or msg.document or msg.animation:
         try:
             await msg.delete()
         except Exception:
             pass
-        return await client.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+        return await client.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     return await safe_edit(msg, text, markup)
 
 
 async def safe_edit(msg,text,markup=None):
+    text = translate_ui_text(msg.chat.id, text)
     if msg.photo or msg.video or msg.document or msg.animation:
-        try: return await msg.edit_caption(caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+        try: return await msg.edit_caption(caption=text,reply_markup=markup)
         except: pass
-    try: return await msg.edit_text(text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    try: return await msg.edit_text(text=text,reply_markup=markup)
     except: pass
     try: await msg.delete()
     except: pass
-    try: return await msg.reply_text(text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    try: return await msg.reply_text(text=text,reply_markup=markup)
     except: return None
 
 async def is_user_subscribed(client,uid):
@@ -1553,38 +2249,53 @@ async def is_user_subscribed(client,uid):
     for ch in chs:
         try:
             m=await client.get_chat_member(chat_id=ch,user_id=uid)
-            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.BANNED]: unsub.append(ch)
+            if m.status in [ChatMemberStatus.LEFT,ChatMemberStatus.KICKED]: unsub.append(ch)
         except Exception as e:
             if "user_not_participant" in str(e).lower(): unsub.append(ch)
     return (len(unsub)==0),(unsub if unsub else None)
 
 async def send_subscription_prompt(client,uid,cid,pending=None):
-    chs=settings.get("force_sub_channels",[]); text=settings.get("force_sub_message","⚠️ اشترك أولاً.")
+    chs=settings.get("force_sub_channels",[]); lang=get_user_language(uid) or "ar"
+    if lang == "en":
+        text=settings.get("force_sub_message_en") or "⚠️ You must join the channels below before using the bot.\n\nJoin all channels, then press Verify Subscription ✅"
+    else:
+        text=settings.get("force_sub_message","⚠️ يجب الاشتراك في القنوات أولاً\n\nاشترك ثم اضغط تحقق ✅")
     img=settings.get("force_sub_image"); bc=settings.get("force_sub_buttons",{})
     kb=[]
     for ch in chs:
         kb.append([InlineKeyboardButton(bc.get(ch) or f"📢 اشترك في {ch}", url=f"https://t.me/{ch[1:]}" if ch.startswith("@") else f"https://t.me/c/{str(ch).replace('-100','')}")])
     if pending: user_data[uid]={'pending_action':pending}
-    kb.append([InlineKeyboardButton("✅ تحقق من الاشتراك",callback_data="check_sub")])
+    kb.append([InlineKeyboardButton("✅ Verify Subscription" if lang == "en" else "✅ تحقق من الاشتراك",callback_data="check_sub")])
     markup=InlineKeyboardMarkup(kb)
     if img:
-        try: await client.send_photo(chat_id=cid,photo=img,caption=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN); return
+        try: await client.send_photo(chat_id=cid,photo=img,caption=text,reply_markup=markup); return
         except: pass
-    await client.send_message(chat_id=cid,text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    await client.send_message(chat_id=cid,text=text,reply_markup=markup)
 
 async def check_subscription_and_continue(client,cb,pending=None):
     uid=cb.from_user.id; cid=cb.message.chat.id; msg=cb.message
     is_sub,_=await is_user_subscribed(client,uid)
     if is_sub:
-        await cb.answer("✅ تم التحقق!")
+        await cb.answer(translate_ui_text(uid,"تم التحقق!"))
         try: await msg.delete()
         except: pass
         await _try_reward_referral(client,uid)
         if pending:
             at=pending.get('type')
             class FM:
-                def __init__(s,c,ci,ui,t=""): s.chat=type('C',(),{'id':ci})(); s.from_user=type('U',(),{'id':ui}); s.text=t
-                async def reply_text(s,t,*a,**k): return await client.send_message(s.chat.id,t,*a,**k)
+                """Small Bot-API message facade for replaying a pending command."""
+                def __init__(s, c, ci, ui, t=""):
+                    s.chat = type("C", (), {"id": ci, "type": "private"})()
+                    s.from_user = type(
+                        "U", (),
+                        {"id": ui, "username": None, "first_name": "", "last_name": ""},
+                    )()
+                    s.text = t
+                    s.message_id = 0
+                    s.reply_to_message = None
+
+                async def reply_text(s, t, *a, **k):
+                    return await client.send_message(s.chat.id, t, *a, **k)
             fm=FM(client,cid,uid,"")
             if at=='search': fm.text=f"/search {pending.get('query','')}"; await search_cmd(client,fm)
             elif at=='check': await check_cmd(client,fm)
@@ -1595,24 +2306,25 @@ async def check_subscription_and_continue(client,cb,pending=None):
                     await _show_manga_by_deeplink(client, cid, uid, sd['src'], sd['ident'])
                 fm.text=""; await start_cmd(client,fm)
     else:
-        await cb.answer("⚠️ اشترك في جميع القنوات أولاً",show_alert=True)
+        await cb.answer(translate_ui_text(uid,"⚠️ اشترك في جميع القنوات أولاً"),show_alert=True)
         await send_subscription_prompt(client,uid,cid,pending)
 
-app=Client("manga_bot",api_id=API_ID,api_hash=API_HASH,bot_token=BOT_TOKEN)
+app=make_legacy_app(BOT_TOKEN)
 
 async def _send_shared_manga_card(client, cid, info, caption, markup):
     """Send the shared manga cover when available, with URL and downloaded-file fallbacks."""
+    caption = translate_ui_text(cid, caption)
     cover = _extract_cover_url(info)
     if not cover:
         return await client.send_message(
-            cid, caption, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+            cid, caption, reply_markup=markup, parse_mode="HTML"
         )
     cover = urljoin(str(info.get("url") or ""), cover)
     # First let Telegram fetch the image directly; this is fastest for public image URLs.
     try:
         return await client.send_photo(
             chat_id=cid, photo=cover, caption=caption,
-            reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+            reply_markup=markup, parse_mode="HTML"
         )
     except Exception as direct_error:
         pass
@@ -1638,7 +2350,7 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
                         photo.seek(0)
                         return await client.send_photo(
                             chat_id=cid, photo=photo, caption=caption,
-                            reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+                            reply_markup=markup, parse_mode="HTML"
                         )
                 else:
                     pass
@@ -1646,31 +2358,29 @@ async def _send_shared_manga_card(client, cid, info, caption, markup):
         pass
     # Keep the manga usable even if its source has no accessible cover.
     return await client.send_message(
-        cid, caption, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
+        cid, caption, reply_markup=markup, parse_mode="HTML"
     )
 
 async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
     src = source_from_code(src_short)
     if not src:
-        await client.send_message(cid, "⚠️ هذا المصدر لم يعد متاحاً.")
+        await client.send_message(cid, translate_ui_text(uid, "⚠️ هذا المصدر لم يعد متاحاً."))
         return
     try:
         api = await asyncio.to_thread(get_source, src)
         manga_url = str(ident)
         info = await asyncio.to_thread(api.get_details, manga_url)
         if not info:
-            await client.send_message(cid, "❌ تعذر جلب معلومات المانجا."); return
+            await client.send_message(cid, translate_ui_text(uid, "❌ تعذر جلب معلومات المانجا.")); return
         chapters = list(reversed(info.get("chapters", [])))
         if not chapters:
-            await client.send_message(cid, "❌ لا توجد فصول."); return
+            await client.send_message(cid, translate_ui_text(uid, "❌ لا توجد فصول.")); return
         title = clean_manga_title(info.get("name") or info.get("title") or "Manga", manga_url)
         async def pdf(ch, progress=None):
             urls = await asyncio.to_thread(api.get_chapter_images, ch)
-            if progress:
-                await progress("extract", len(urls))
-            result = await download_images_parallel(urls, client=client)
-            if progress:
-                await progress("pdf", len(urls))
+            result = await download_images_parallel(
+                urls, client=client, image_progress_callback=progress
+            )
             return result
         cover_url = _extract_cover_url(info)
         if cover_url:
@@ -1678,137 +2388,170 @@ async def _show_manga_by_deeplink(client, cid, uid, src_short, ident):
         user_data[uid] = {"chapters": chapters, "title": title, "identifier": info.get("id") or manga_url,
             "page": 0, "source": src, "create_pdf_func": pdf, "manga_url": manga_url,
             "cover_url": cover_url, "genres": info.get("genres", []), "kind": info.get("kind", "")}
-        cap = f"**{title}**\n\n{(info.get('description') or '')[:300]}\n\n📖 **{len(chapters)} فصل**"
+        bio = format_manga_bio((info.get("description") or "")[:300])
+        cap = f"{title}\n\n{bio}\n\n📖 {len(chapters)} فصل"
         user_data[uid]["base_caption"] = cap
         markup,_,_ = create_chapters_markup(chapters, 0, user_data[uid]["identifier"], src, uid)
         await _send_shared_manga_card(client, cid, info, cap, markup)
     except Exception as e:
-        await client.send_message(cid, f"❌ تعذر فتح المانجا: {str(e)[:180]}")
+        await client.send_message(cid, translate_ui_text(uid, f"❌ تعذر فتح المانجا: {str(e)[:180]}"))
 
 async def send_message_with_image(client,cid,text,key,markup=None):
+    text = translate_ui_text(cid, text)
     img=settings.get(key)
     if img:
-        try: return await client.send_photo(chat_id=cid,photo=img,caption=text, reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+        try: return await client.send_photo(chat_id=cid,photo=img,caption=text, reply_markup=markup)
         except: pass
-    return await client.send_message(chat_id=cid,text=text,reply_markup=markup,parse_mode=ParseMode.MARKDOWN)
+    return await client.send_message(chat_id=cid,text=text,reply_markup=markup)
+
+def _parse_telegram_post_link(value):
+    """Return (chat_id, message_id) for a public or private Telegram post URL."""
+    value = str(value or "").strip()
+    match = re.fullmatch(
+        r"https?://(?:www\.)?(?:t\.me|telegram\.me)/(?:s/)?([A-Za-z0-9_]{5,})/(\d+)/?",
+        value, re.IGNORECASE
+    )
+    if match:
+        return "@" + match.group(1), int(match.group(2))
+    match = re.fullmatch(
+        r"https?://(?:www\.)?(?:t\.me|telegram\.me)/c/(\d+)/(\d+)/?",
+        value, re.IGNORECASE
+    )
+    if match:
+        return int("-100" + match.group(1)), int(match.group(2))
+    return None
 
 async def build_main_keyboard(uid):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 بحث عن مانجا", callback_data="main_search")],
-        [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
-        [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
-        [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
-        [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
-    ])
+    lang=get_user_language(uid) or "ar"
+    if lang == "en":
+        rows = [
+            [InlineKeyboardButton("🔎 Search Manga", callback_data="main_search")],
+            [InlineKeyboardButton("👤 My Account", callback_data="my_account"), InlineKeyboardButton("🔥 Latest Manga", callback_data="latest_manga_list")],
+            [InlineKeyboardButton("🏷️ Categories", callback_data="main_categories"), InlineKeyboardButton("❓ Help", callback_data="help_full")],
+            [InlineKeyboardButton("⭐ My Favorites", callback_data="fav_list")],
+            [InlineKeyboardButton("📩 Submit a Complaint", callback_data="complaint_start")],
+            [InlineKeyboardButton("🌐", callback_data="change_language")],
+        ]
+        if settings.get("app_message_link"):
+            rows.append([InlineKeyboardButton("📲 Bot App", callback_data="send_app_message")])
+        if settings.get("tutorial_video_url"):
+            rows.append([InlineKeyboardButton("🎬 Tutorial Video", url=settings["tutorial_video_url"])])
+    else:
+        rows = [
+            [InlineKeyboardButton("🔎 اكتب اسم المانجا", callback_data="main_search")],
+            [InlineKeyboardButton("👤 حسابي", callback_data="my_account"), InlineKeyboardButton("🔥 أحدث المانجا", callback_data="latest_manga_list")],
+            [InlineKeyboardButton("🏷️ التصنيفات", callback_data="main_categories"), InlineKeyboardButton("❓ مساعدة", callback_data="help_full")],
+            [InlineKeyboardButton("⭐ مفضلاتي", callback_data="fav_list")],
+            [InlineKeyboardButton("📩 تقديم شكوى", callback_data="complaint_start")],
+            [InlineKeyboardButton("🌐", callback_data="change_language")],
+        ]
+        if settings.get("app_message_link"):
+            rows.append([InlineKeyboardButton("📲 تطبيق بوت", callback_data="send_app_message")])
+        if settings.get("tutorial_video_url"):
+            rows.append([InlineKeyboardButton("🎬 آخر فيديو تعليمي", url=settings["tutorial_video_url"])])
+    return InlineKeyboardMarkup(rows)
 
-def _account_keyboard():
+def _account_keyboard(uid=None):
+    en = uid is not None and get_user_language(uid) == "en"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 رصيدي",callback_data="acc_chapters"), InlineKeyboardButton("🔗 مشاركة",callback_data="acc_share")],
-        [InlineKeyboardButton("⏰ وقت التجديد",callback_data="acc_daily_timer"), InlineKeyboardButton("👑 ترقية VIP",callback_data="acc_upgrade")],
-        [InlineKeyboardButton("💎 تفاصيل VIP",callback_data="acc_vip_details"), InlineKeyboardButton("🔄 تحديث",callback_data="my_account_refresh")],
-        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")],
+        [InlineKeyboardButton("📊 My balance" if en else "📊 رصيدي",callback_data="acc_chapters"), InlineKeyboardButton("🔗 Share" if en else "🔗 مشاركة",callback_data="acc_share")],
+        [InlineKeyboardButton("⏰ Reset timer" if en else "⏰ وقت التجديد",callback_data="acc_daily_timer"), InlineKeyboardButton("👑 Upgrade to VIP" if en else "👑 ترقية VIP",callback_data="acc_upgrade")],
+        [InlineKeyboardButton("💎 VIP details" if en else "💎 تفاصيل VIP",callback_data="acc_vip_details"), InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث",callback_data="my_account_refresh")],
+        [InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")],
     ])
 
 async def _show_my_account(client,msg,uid,edit=False):
-    if is_vip(uid): type_line="👑 **عضو VIP** — تحميل غير محدود"
-    else: type_line=f"👤 **عضو عادي**\n📖 فردي: `{int(get_daily_remaining(uid))}`\n🧩 دمج: `{int(get_merge_remaining(uid))}`"
+    if is_vip(uid): type_line="👑 عضو VIP — تحميل غير محدود"
+    else: type_line=f"👤 عضو عادي\n📖 فردي: {int(get_daily_remaining(uid))}\n🧩 دمج: {int(get_merge_remaining(uid))}"
+    type_line = translate_ui_text(uid, type_line)
     joined=time.strftime("%Y-%m-%d",time.localtime(get_user_joined(uid)))
     try:
-        u=await client.get_users(uid); un=f"@{u.username}" if u.username else "—"
+        u=await client.get_chat(uid); un=f"@{u.username}" if u.username else "—"
     except: un="—"
-    text=(f"👤 **حسابي**\n\n{type_line}\n\n🆔 **المعرّف:** `{uid}`\n📝 **اليوزر:** {un}\n"
-          f"📅 **مسجل:** `{joined}`\n⬇️ **التحميلات:** `{get_user_downloads(uid)}`")
-    if edit: await safe_edit(msg, text, _account_keyboard())
+    text=translate_ui_text(uid, (f"👤 حسابي\n\n{type_line}\n\n🆔 المعرّف: {uid}\n📝 اليوزر: {un}\n"
+          f"📅 مسجل: {joined}\n⬇️ التحميلات: {get_user_downloads(uid)}"))
+    if edit: await safe_edit(msg, text, _account_keyboard(uid))
     else:
         try: await msg.delete()
         except: pass
-        await msg.reply_text(text,reply_markup=_account_keyboard(),parse_mode=ParseMode.MARKDOWN)
+        await msg.reply_text(text,reply_markup=_account_keyboard(uid))
 
 async def _show_chapters_balance(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid):
         info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
-        await msg.reply_text(f"📊 **رصيد الفصول**\n\n👑 **أنت VIP!**\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود", reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+        await msg.reply_text(translate_ui_text(uid,f"📊 رصيد الفصول\n\n👑 أنت VIP!\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n\n✨ تحميل غير محدود"), reply_markup=kb); return
     rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
     used=int(rec.get("used",0)); total=base+bonus; rem=max(0,total-used)
     mbase=get_merge_base(uid); mbonus=int(rec.get("merge_bonus",0)); mused=int(rec.get("merge_used",0))
     mtotal=mbase+mbonus; mrem=max(0,mtotal-mused)
     single_note=""; merge_note=""; forced_note=""
     if rec.get("single_reset_at", 0) > time.time():
-        h,m,s=get_time_until_reset(uid, "single"); single_note=f"\n⏰ تجديد: `{h:02d}:{m:02d}:{s:02d}`"
+        h,m,s=get_time_until_reset(uid, "single"); single_note=f"\n⏰ تجديد: {h:02d}:{m:02d}:{s:02d}"
     if rec.get("merge_reset_at", 0) > time.time():
-        h,m,s=get_time_until_reset(uid, "merge"); merge_note=f"\n⏰ تجديد: `{h:02d}:{m:02d}:{s:02d}`"
+        h,m,s=get_time_until_reset(uid, "merge"); merge_note=f"\n⏰ تجديد: {h:02d}:{m:02d}:{s:02d}"
     if rec.get("reset_expires", 0) > time.time():
-        h,m,s=get_time_until_reset(uid, "forced"); forced_note=f"\n⚡ تصفير: `{h:02d}:{m:02d}:{s:02d}`"
+        h,m,s=get_time_until_reset(uid, "forced"); forced_note=f"\n⚡ تصفير: {h:02d}:{m:02d}:{s:02d}"
     pct=int((rem/total)*10) if total>0 else 0; bar="█"*pct+"░"*(10-pct)
     mpct=int((mrem/mtotal)*10) if mtotal>0 else 0; mbar="█"*mpct+"░"*(10-mpct)
     await msg.reply_text(
-        f"📊 **رصيدي**\n\n"
-        f"📖 **فردي**\n├ 🎯 `{base}`\n├ 🎁 `{bonus}`\n├ 📦 `{total}`\n├ ✅ `{used}`\n└ 🔋 **`{rem}`**\n`[{bar}]`{single_note}\n\n"
-        f"🧩 **دمج**\n├ 🎯 `{mbase}`\n├ 🎁 `{mbonus}`\n├ 📦 `{mtotal}`\n├ ✅ `{mused}`\n└ 🔋 **`{mrem}`**\n`[{mbar}]`{merge_note}{forced_note}",
-        reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+        translate_ui_text(uid, f"📊 رصيدي\n\n📖 فردي\n├ 🎯 {base}\n├ 🎁 {bonus}\n├ 📦 {total}\n├ ✅ {used}\n└ 🔋 {rem}\n[{bar}]{single_note}\n\n🧩 دمج\n├ 🎯 {mbase}\n├ 🎁 {mbonus}\n├ 📦 {mtotal}\n├ ✅ {mused}\n└ 🔋 {mrem}\n[{mbar}]{merge_note}{forced_note}"),
+        reply_markup=kb)
 
 async def _show_share_link(client,msg,uid):
     link=get_referral_link(uid)
-    text=(f"🔗 **مشاركة البوت**\n\nاحصل على مكافآت لكل صديق:\n\n"
-          f"📖 فردي: +`{settings.get('referral_bonus_single',50)}`\n"
-          f"🧩 دمج: +`{settings.get('referral_bonus_merge',20)}`\n\n"
-          f"**رابطك:**\n`{link}`")
+    text=translate_ui_text(uid, (f"🔗 مشاركة البوت\n\nاحصل على مكافآت لكل صديق:\n\n"
+          f"📖 فردي: +{settings.get('referral_bonus_single',50)}\n"
+          f"🧩 دمج: +{settings.get('referral_bonus_merge',20)}\n\n"
+          f"رابطك:\n{link}"))
     kb=InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 جرب هذا البوت!')}")],
-        [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
-    await msg.reply_text(text,reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+        [InlineKeyboardButton("📤 Share" if get_user_language(uid)=="en" else "📤 مشاركة",url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 Try this bot!' if get_user_language(uid)=='en' else '🎁 جرب هذا البوت!')}")],
+        [InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
+    await msg.reply_text(text,reply_markup=kb)
 
-async def _show_vip_upgrade(client,msg):
+async def _show_vip_upgrade(client,msg,uid):
     au=None
-    try: o=await client.get_users(OWNER_ID); au=o.username
+    try: o=await client.get_chat(OWNER_ID); au=o.username
     except: pass
     cu=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}"
     second=settings.get("vip_contact_second"); cu2=f"https://t.me/{str(second)[1:]}" if second and str(second).startswith("@") else None
-    rows=[[InlineKeyboardButton("👤 تواصل مع الأدمن",url=cu)]]
-    if cu2: rows.append([InlineKeyboardButton("👥 تواصل بديل",url=cu2)])
-    rows.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+    en = get_user_language(uid) == "en"
+    rows=[[InlineKeyboardButton("👤 Contact admin" if en else "👤 تواصل مع الأدمن",url=cu)]]
+    if cu2: rows.append([InlineKeyboardButton("👥 Alternative contact" if en else "👥 تواصل بديل",url=cu2)])
+    rows.append([InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")])
     await msg.reply_text(
-        f"👑 **ترقية VIP**\n\n"
-        f"✨ **المميزات:**\n"
-        f"├ ♾️ تحميل غير محدود\n"
-        f"├ ⭐ المفضلة\n"
-        f"├ 🧩 دمج غير محدود\n"
-        f"└ ⚡ أولوية في الدعم\n\n"
-        f"💰 أسبوعي / شهري / سنوي\n\n"
-        f"💬 تواصل:",
-        reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.MARKDOWN)
+        translate_ui_text(uid, f"👑 ترقية VIP\n\n✨ المميزات:\n├ ♾️ تحميل غير محدود\n├ ⭐ المفضلة\n├ 🧩 دمج غير محدود\n└ ⚡ أولوية في الدعم\n\n💰 أسبوعي / شهري / سنوي\n\n💬 تواصل:"),
+        reply_markup=InlineKeyboardMarkup(rows))
 
 async def _show_vip_details(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
+    en = get_user_language(uid) == "en"
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if en else "❌ إغلاق",callback_data="close_list")]])
     if is_vip(uid):
         info=get_vip_info(uid); days=max(0,int((info["expires"]-time.time())//86400))
         exp=time.strftime("%Y-%m-%d %H:%M",time.localtime(info["expires"]))
-        await msg.reply_text(f"💎 **تفاصيل VIP**\n\n✅ **أنت VIP**\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n📆 `{exp}`", reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
-    else: await msg.reply_text("💎 **VIP**\n\n❌ لست VIP\n\n💡 يمكنك الترقية", reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+        await msg.reply_text(translate_ui_text(uid,f"💎 تفاصيل VIP\n\n✅ أنت VIP\n\n📅 {VIP_PLAN_NAMES.get(info['plan'],'?')}\n⏳ {days} يوم\n📆 {exp}"), reply_markup=kb)
+    else: await msg.reply_text(translate_ui_text(uid,"💎 VIP\n\n❌ لست VIP\n\n💡 يمكنك الترقية"), reply_markup=kb)
 
 async def _show_daily_timer(client,msg,uid):
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
-    if is_vip(uid): await msg.reply_text("⏰ **VIP — بلا انتظار**",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
+    if is_vip(uid): await msg.reply_text(translate_ui_text(uid, "⏰ VIP — بلا انتظار"),reply_markup=kb); return
     rec=get_daily_usage(uid); base=get_user_base(uid); bonus=int(rec.get("bonus",0))
     rem=max(0,(base+bonus)-int(rec.get("used",0)))
     mbase=get_merge_base(uid); mbonus=int(rec.get("merge_bonus",0)); mrem=max(0,(mbase+mbonus)-int(rec.get("merge_used",0)))
-    if rec.get("single_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"single"); single_timer=f"⏳ `{h:02d}:{m:02d}:{s:02d}`"
+    if rec.get("single_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"single"); single_timer=f"⏳ {h:02d}:{m:02d}:{s:02d}"
     else: single_timer="✅ جاهز"
-    if rec.get("merge_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"merge"); merge_timer=f"⏳ `{h:02d}:{m:02d}:{s:02d}`"
+    if rec.get("merge_reset_at",0)>time.time(): h,m,s=get_time_until_reset(uid,"merge"); merge_timer=f"⏳ {h:02d}:{m:02d}:{s:02d}"
     else: merge_timer="✅ جاهز"
+    unit = "hours" if get_user_language(uid) == "en" else "ساعة"
     await msg.reply_text(
-        f"⏰ **الوقت**\n\n"
-        f"📖 **فردي**\n├ 🔋 `{rem}`\n└ {single_timer}\n\n"
-        f"🧩 **دمج**\n├ 🔋 `{mrem}`\n└ {merge_timer}\n\n"
-        f"⏱️ مدة التجديد: `{settings.get('daily_reward_interval',86400)//3600}` ساعة",
-        reply_markup=kb,parse_mode=ParseMode.MARKDOWN)
+        translate_ui_text(uid, f"⏰ الوقت\n\n📖 فردي\n├ 🔋 {rem}\n└ {single_timer}\n\n🧩 دمج\n├ 🔋 {mrem}\n└ {merge_timer}\n\n⏱️ مدة التجديد: {settings.get('daily_reward_interval',86400)//3600}") + f" {unit}",
+        reply_markup=kb)
 
 def create_backup_with_custom_token(tk,bn):
     ts=datetime.now().strftime("%Y%m%d_%H%M%S"); safe=re.sub(r'[^A-Za-z0-9_-]','_',bn)[:30]
     zn=f"bot_{safe}_{ts}.zip"; zp=os.path.join(BACKUP_DIR,zn); tmp_db=zp+".db"
     backup_to(tmp_db)
-    cfg={"api_id":API_ID,"api_hash":API_HASH,"bot_token":tk,"bot_name":bn,"admins":ADMINS,"owner_ids":OWNER_IDS,"backup_date":ts}
+    cfg={"bot_token":tk,"bot_name":bn,"admins":ADMINS,"owner_ids":OWNER_IDS,"backup_date":ts}
     install='#!/usr/bin/env python3\nimport os, shutil\nBASE=os.path.dirname(os.path.abspath(__file__))\nd=os.path.join(BASE,"data")\nif os.path.isdir(d):\n    for f in os.listdir(d): shutil.copy2(os.path.join(d,f),os.path.join(os.getcwd(),f))\n'
     with zipfile.ZipFile(zp,'w',zipfile.ZIP_DEFLATED) as z:
         z.write(tmp_db, "data/bot.db")
@@ -1844,23 +2587,23 @@ def cleanup_old_backups(keep=10):
 
 async def send_zip_via_added_bots(manual=False):
     bots=get_all_bots()
-    if not bots: return 0,0,"🤖 **لا توجد بوتات نسخ مسجلة حالياً.**\n\nيمكنك إضافة بوت جديد من زر الإضافة."
+    if not bots: return 0,0,"🤖 لا توجد بوتات نسخ مسجلة حالياً.\n\nيمكنك إضافة بوت جديد من زر الإضافة."
     title="يدوية" if manual else "تلقائية"; success=failed=0
     for bid,info in list(bots.items()):
         try:
             token=info.get("token"); target_id=info.get("target_id"); name=info.get("name","?")
             if not token or not target_id: failed+=1; continue
             zp,zn=create_backup_with_custom_token(token,name); sz=os.path.getsize(zp)/1024
-            cap=(f"💾 **{title} - {name}**\n\n📅 `{time.strftime('%Y-%m-%d %H:%M')}`\n👥 `{get_users_count()}`\n👑 VIP: `{len(get_all_vips())}`\n📥 `{get_download_count()}`\n📦 `{sz:.1f} KB`")
-            temp_bot=Client(name=f"send_{bid}_{int(time.time())}",api_id=API_ID, api_hash=API_HASH,bot_token=token,in_memory=True)
+            cap=(f"💾 {title} - {name}\n\n📅 {time.strftime('%Y-%m-%d %H:%M')}\n👥 {get_users_count()}\n👑 VIP: {len(get_all_vips())}\n📥 {get_download_count()}\n📦 {sz:.1f} KB")
+            temp_bot=create_bot(token)
             try:
-                await temp_bot.start()
-                with open(zp,'rb') as f: await temp_bot.send_document(chat_id=target_id,document=f,file_name=zn, caption=cap,parse_mode=ParseMode.MARKDOWN)
-                await temp_bot.stop(); success+=1
+                await temp_bot.send_document(chat_id=target_id,document=as_input_file(zp, filename=zn),caption=cap)
+                success+=1
                 if not manual: update_bot_last_sent(bid, time.time())
-            except Exception as e:
+            except Exception:
                 failed+=1
-                try: await temp_bot.stop()
+            finally:
+                try: await temp_bot.session.close()
                 except: pass
             try: os.remove(zp)
             except: pass
@@ -1923,6 +2666,7 @@ def get_admin_panel_kb():
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
         [InlineKeyboardButton("⚙️ التحميل",callback_data="admin_download_settings")],
+        [InlineKeyboardButton("🔗 روابط أزرار المستخدمين",callback_data="admin_links_section")],
         [InlineKeyboardButton("👮 الأدمنز",callback_data="admin_manage_admins"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
         [InlineKeyboardButton("🎉 الهدايا",callback_data="admin_gifts_section"), InlineKeyboardButton("🔗 روابط الهدايا",callback_data="admin_gift_links")],
         [InlineKeyboardButton("♻️ تصفير الفصول",callback_data="admin_reset_section")],
@@ -1936,9 +2680,9 @@ def get_admin_panel_kb():
 async def _start_cmd_impl(client,message):
     uid=message.from_user.id
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
-        await message.reply_text("⚠️ **البوت في وضع الصيانة**\n\nيرجى المحاولة لاحقاً", parse_mode=ParseMode.MARKDOWN); return
+        await message.reply_text(translate_ui_text(uid,"⚠️ البوت في وضع الصيانة\n\nيرجى المحاولة لاحقاً")); return
     if is_banned(uid) and uid not in OWNER_IDS:
-        await message.reply_text("🚫 **أنت محظور**", parse_mode=ParseMode.MARKDOWN); return
+        await message.reply_text(translate_ui_text(uid,"🚫 أنت محظور")); return
     is_new=add_user(uid); ref_owner=None; gift_code=None; show_data=None
     if len(message.text.split())>1:
         pl=message.text.split()[1]
@@ -1961,8 +2705,12 @@ async def _start_cmd_impl(client,message):
     if is_new:
         try:
             un=message.from_user.username or "لا يوجد"
-            await client.send_message(OWNER_ID,f"👤 **عضو جديد**\n\n👤 {message.from_user.first_name or ''}\n🆔 `{uid}`\n📝 @{un}",parse_mode=ParseMode.MARKDOWN)
+            await client.send_message(OWNER_ID,f"👤 عضو جديد\n\n👤 {message.from_user.first_name or ''}\n🆔 {uid}\n📝 @{un}")
         except: pass
+    if not get_user_language(uid):
+        user_data.setdefault(uid, {})["pending_language_start"] = message.text or "/start"
+        await client.send_message(message.chat.id, language_prompt_text(), reply_markup=language_keyboard())
+        return
     is_sub,_=await is_user_subscribed(client,uid)
     if not is_sub:
         pa={'type':'start'}
@@ -1975,8 +2723,8 @@ async def _start_cmd_impl(client,message):
     if show_data:
         await _show_manga_by_deeplink(client, message.chat.id, uid, show_data['src'], show_data['ident'])
         return
-    kb=await build_main_keyboard(uid); wt=settings.get("welcome_message","🌟 **مرحباً!**")
-    if is_vip(uid): wt+="\n\n👑 **أنت VIP!**"
+    kb=await build_main_keyboard(uid); wt=settings.get("welcome_message","🌟 مرحباً!")
+    if is_vip(uid): wt+="\n\n👑 أنت VIP!"
     await send_message_with_image(client,message.chat.id,wt,"welcome_image",kb)
 
 
@@ -1992,7 +2740,7 @@ async def start_cmd(client, message):
         details = traceback.format_exc()
         pass
         try:
-            await message.reply_text("⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل.")
+            await message.reply_text(translate_ui_text(uid,"⚠️ حدث خطأ أثناء تشغيل البوت. تم تسجيل الخطأ، حاول مرة أخرى بعد قليل."))
         except Exception as send_exc:
             pass
         try:
@@ -2007,58 +2755,64 @@ async def _try_reward_referral(client,new_uid):
     if not mark_rewarded(po,new_uid): return
     add_bonus(po,settings.get("referral_bonus_single",50)); add_merge_bonus(po,settings.get("referral_bonus_merge",20))
     try:
-        await client.send_message(po,f"🎉 **مبروك!**\n\nحصلت على:\n📖 +`{settings.get('referral_bonus_single',50)}`\n🧩 +`{settings.get('referral_bonus_merge',20)}`",parse_mode=ParseMode.MARKDOWN)
+        await client.send_message(po,translate_ui_text(po,f"🎉 مبروك!\n\nحصلت على:\n📖 +{settings.get('referral_bonus_single',50)}\n🧩 +{settings.get('referral_bonus_merge',20)}"))
     except: pass
     user_data.get(new_uid,{}).pop("pending_referral_owner",None)
 
 @app.on_message(filters.command("search"))
-async def search_cmd(client,message):
+async def search_cmd(client,message,query_override=None):
     uid = message.from_user.id
-    parts = message.text.split(maxsplit=1)
-    query = parts[1].strip() if len(parts) > 1 else ""
+    if query_override is None:
+        parts = message.text.split(maxsplit=1)
+        query = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        query = str(query_override).strip()
     if not query:
-        await message.reply_text("🔍 اكتب اسم المانجا بعد الأمر، مثال:\n/search Solo Leveling")
+        await message.reply_text(translate_ui_text(uid, "🔍 اكتب اسم المانجا بعد الأمر، مثال:\n/search Solo Leveling"))
         return
     user_data.setdefault(uid, {})["search_query"] = query
     try:
         sources = await asyncio.to_thread(get_sources)
     except Exception as e:
-        await message.reply_text(f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}"); return
+        await message.reply_text(translate_ui_text(uid, f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}")); return
     rows = []
-    for source in sources:
+    source_styles = ("primary", "success", "danger")
+    for index, source in enumerate(sources):
         sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
-        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}")])
-    rows.append([InlineKeyboardButton("❌ إغلاق", callback_data="close_list")])
+        # Cycle through Telegram's three supported button colors so adjacent sources differ.
+        style = source_styles[index % len(source_styles)]
+        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}", style=style)])
+    rows.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     if not sources:
-        await message.reply_text("❌ لا توجد مصادر مفعلة داخل المحرك."); return
-    await send_message_with_image(client, message.chat.id, "🔍 **اختر المصدر للبحث عن:**\n" + query, "sources_image", InlineKeyboardMarkup(rows))
+        await message.reply_text(translate_ui_text(uid, "❌ لا توجد مصادر مفعلة داخل المحرك.")); return
+    await send_message_with_image(client, message.chat.id, translate_ui_text(uid, "🔍 اختر المصدر للبحث عن:\n") + query, "sources_image", InlineKeyboardMarkup(rows))
 
 @app.on_message(filters.command("check"))
 async def check_cmd(client,message):
     if not is_admin_any(message.from_user.id):
-        await message.reply_text("⛔ هذا الأمر للأدمن فقط."); return
-    await message.reply_text("🔄 جاري فحص الفصول الجديدة...")
+        await message.reply_text(translate_ui_text(uid,"⛔ هذا الأمر للأدمن فقط.")); return
+    await message.reply_text(translate_ui_text(uid,"🔄 جاري فحص الفصول الجديدة..."))
     await check_new_chapters()
-    await message.reply_text("✅ انتهى فحص المفضلات.")
+    await message.reply_text(translate_ui_text(uid,"✅ انتهى فحص المفضلات."))
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_cmd(client,message):
     uid=message.from_user.id
-    if user_data.get(uid): user_data.pop(uid,None); await message.reply_text("❌ **ملغى**")
-    else: await message.reply_text("ℹ️ **لا شيء قيد التنفيذ**")
+    if user_data.get(uid): user_data.pop(uid,None); await message.reply_text(translate_ui_text(uid, "❌ ملغى"))
+    else: await message.reply_text(translate_ui_text(uid, "ℹ️ لا شيء قيد التنفيذ"))
 
 @app.on_message(filters.command("admin") & filters.private)
 async def admin_panel(client,message):
     uid=message.from_user.id
-    if not is_admin_any(uid): await message.reply_text("⛔ **غير مصرح**"); return
+    if not is_admin_any(uid): await message.reply_text("⛔ غير مصرح"); return
     if is_added_admin(uid) and not is_main_admin(uid):
         kb=InlineKeyboardMarkup([
             [InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
             [InlineKeyboardButton("🎁 هدية للجميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 لفرد",callback_data="admin_gift_one")],
             [InlineKeyboardButton("📬 الشكاوى",callback_data="admin_complaints")],
             [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
-        await message.reply_text("🛠️ **لوحة الأدمن**",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
-    await message.reply_text("🛠️ **لوحة التحكم**\n\n👇 اختر:", reply_markup=get_admin_panel_kb(),parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text("🛠️ لوحة الأدمن",reply_markup=kb); return
+    await message.reply_text("🛠️ لوحة التحكم\n\n👇 اختر:", reply_markup=get_admin_panel_kb())
 
 # ============ Unified Callback ============
 @app.on_callback_query()
@@ -2067,14 +2821,57 @@ async def unified_callback(client,callback):
     cid=callback.message.chat.id; msg=callback.message
 
     if settings.get("maintenance_mode", False) and not is_admin_any(uid):
-        await callback.answer("⚠️ صيانة", show_alert=True); return
+        await callback.answer(translate_ui_text(uid,"⚠️ صيانة"), show_alert=True); return
     if data=="check_sub":
         await check_subscription_and_continue(client,callback,user_data.get(uid,{}).get('pending_action')); return
+    if data=="change_language":
+        await callback.answer()
+        await msg.reply_text(language_prompt_text(), reply_markup=language_keyboard())
+        return
+    if data in ("language_ar", "language_en"):
+        selected = set_user_language(uid, "en" if data == "language_en" else "ar")
+        await callback.answer("Language saved" if selected == "en" else "تم حفظ اللغة")
+        pending_start = user_data.get(uid, {}).pop("pending_language_start", None)
+        try: await msg.delete()
+        except: pass
+        if pending_start is not None:
+            class LanguageStartMessage:
+                def __init__(self):
+                    self.from_user = callback.from_user
+                    self.chat = callback.message.chat
+                    self.text = pending_start
+                async def reply_text(self, text, *args, **kwargs):
+                    return await client.send_message(self.chat.id, text, *args, **kwargs)
+            await _start_cmd_impl(client, LanguageStartMessage())
+        else:
+            if selected == "en":
+                welcome = "🖤 Welcome to Manga Virus 🦠\\nYour gateway to the world of manga and manhwa!"
+            else:
+                welcome = settings.get("welcome_message", "🌟 مرحباً!")
+            await client.send_message(cid, welcome, reply_markup=await build_main_keyboard(uid))
+        return
     if is_banned(uid) and uid not in OWNER_IDS: await callback.answer("🚫",show_alert=True); return
+    if data == "send_app_message":
+        await callback.answer()
+        post = _parse_telegram_post_link(settings.get("app_message_link"))
+        if not post:
+            await msg.reply_text(translate_ui_text(uid,"⚠️ رابط تطبيق البوت غير مضبوط حالياً."))
+            return
+        try:
+            await client.copy_message(
+                chat_id=cid,
+                from_chat_id=post[0],
+                message_id=post[1],
+            )
+        except Exception:
+            await msg.reply_text(
+                "⚠️ تعذر إرسال منشور التطبيق. تأكد أن البوت يستطيع الوصول إلى القناة أو المجموعة التي تحتوي الرابط."
+            )
+        return
     if data!="check_sub":
         is_sub,_=await is_user_subscribed(client,uid)
         if not is_sub:
-            await callback.answer("⚠️ اشترك أولاً",show_alert=True); await send_subscription_prompt(client,uid,cid); return
+            await callback.answer(translate_ui_text(uid,"⚠️ اشترك أولاً"),show_alert=True); await send_subscription_prompt(client,uid,cid); return
     if data=="close_list":
         try: await msg.delete()
         except: pass
@@ -2082,7 +2879,7 @@ async def unified_callback(client,callback):
 
     if data=="complaint_start":
         await callback.answer("📩"); user_data[uid]={"awaiting_complaint":True}
-        await msg.reply_text("📩 **شكوى**\n\n✍️ اكتب:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء",callback_data="cancel_complaint")]]),parse_mode=ParseMode.MARKDOWN); return
+        await msg.reply_text(translate_ui_text(uid,"📩 شكوى\n\n✍️ اكتب:"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel" if get_user_language(uid)=="en" else "❌ إلغاء",callback_data="cancel_complaint")]])); return
     if data=="cancel_complaint":
         user_data.pop(uid,None)
         try: await msg.delete()
@@ -2091,47 +2888,48 @@ async def unified_callback(client,callback):
     if data in ("help_full","help"):
         await callback.answer("❓")
         await msg.reply_text(
-            f"❓ **مساعدة**\n\n🔍 `/search الاسم`\n📚 4 مصادر\n\n"
-            f"📖 فردي: `{settings.get('daily_reward_amount',100)}`\n🧩 دمج: `{settings.get('merge_daily_limit',50)}`\n"
-            f"📎 حد الملف: `{PDF_MAX_CHAPTERS}`\n"
-            f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
-            f"👑 VIP: بلا حدود",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
+            translate_ui_text(uid, f"❓ مساعدة\n\n🔍 /search الاسم\n📚 4 مصادر\n\n📖 فردي: {settings.get('daily_reward_amount',100)}\n🧩 دمج: {settings.get('merge_daily_limit',50)}\n📎 حد الملف: {PDF_MAX_CHAPTERS}\n🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n👑 VIP: بلا حدود"),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])); return
     if data=="main_search":
         await callback.answer("🔍")
-        await msg.reply_text("🔍 **للبحث:**\n`/search اسم المانجا`",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
+        user_data.setdefault(uid, {})["awaiting_search_query"] = True
+        await msg.reply_text(
+            translate_ui_text(uid, "🔎 أرسل اسم المانجا أو المانهوا التي تريد البحث عنها.\n\nمثال: Solo Leveling\n\nللإلغاء أرسل /cancel"),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
+        )
+        return
     if data=="my_account": await callback.answer("👤"); await _show_my_account(client,msg,uid,edit=False); return
     if data=="my_account_refresh": await callback.answer("🔄"); await _show_my_account(client,msg,uid,edit=True); return
     if data=="acc_chapters": await callback.answer("📊"); await _show_chapters_balance(client,msg,uid); return
     if data=="acc_share": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
-    if data=="acc_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="acc_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg,uid); return
     if data=="acc_vip_details": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
     if data=="acc_daily_timer": await callback.answer("⏰"); await _show_daily_timer(client,msg,uid); return
     if data=="share_referral": await callback.answer("🔗"); await _show_share_link(client,msg,uid); return
-    if data=="vip_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg); return
+    if data=="vip_upgrade": await callback.answer("👑"); await _show_vip_upgrade(client,msg,uid); return
     if data=="vip_info": await callback.answer("💎"); await _show_vip_details(client,msg,uid); return
 
     if data=="fav_list":
         if not is_vip(uid):
-            await callback.answer("VIP فقط 👑", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"VIP فقط 👑"), show_alert=True)
             try: await msg.delete()
             except: pass
             try:
-                o=await client.get_users(OWNER_ID); au=o.username
+                o=await client.get_chat(OWNER_ID); au=o.username
             except: au=None
-            rows=[[InlineKeyboardButton("📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]
-            await msg.reply_text("🔒 **ميزة VIP**\n\n⭐ المفضلات لمشتركي VIP فقط", reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.MARKDOWN); return
+            rows=[[InlineKeyboardButton("📞 Contact" if get_user_language(uid)=="en" else "📞 تواصل", url=f"https://t.me/{au}" if au else f"tg://user?id={OWNER_ID}")],[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")]]
+            await msg.reply_text(translate_ui_text(uid, "🔒 ميزة VIP\n\n⭐ المفضلات لمشتركي VIP فقط"), reply_markup=InlineKeyboardMarkup(rows)); return
         m,s,c=create_fav_list_markup(uid)
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,f"⭐ **المفضلات** ({c})\n⚙️ {s}\n\nاختر:","favorites_image",m)
+        await send_message_with_image(client,cid,translate_ui_text(uid,f"⭐ المفضلات ({c})\n⚙️ {s}\n\nاختر:"),"favorites_image",m)
         await callback.answer("⭐"); return
 
     if data=="toggle_notifications":
-        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        if not is_vip(uid): await callback.answer(translate_ui_text(uid,"VIP فقط 👑"),show_alert=True); return
         cur=is_notifications_enabled(uid); set_notifications_enabled(uid,not cur)
         m,s,c=create_fav_list_markup(uid)
-        try: await msg.edit_text(f"⭐ **({c})**\n⚙️ {s}\n\nاختر:",reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        try: await msg.edit_text(translate_ui_text(uid,f"⭐ ({c})\n⚙️ {s}\n\nاختر:"),reply_markup=m)
         except: pass
         await callback.answer("✅" if not cur else "❌"); return
 
@@ -2142,18 +2940,21 @@ async def unified_callback(client,callback):
         except Exception as e:
             sources = []
         if not sources:
-            await safe_edit(msg,"❌ تعذر تحميل قائمة المصادر")
+            await safe_edit(msg,translate_ui_text(uid,"❌ تعذر تحميل قائمة المصادر"))
             return
         kb=[]
-        for source in sources:
+        source_styles = ("primary", "success", "danger")
+        for index, source in enumerate(sources):
             sid=str(source.get("id") or "")
             if not sid: continue
             name=str(source.get("name") or sid)
-            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+            # Give each source its own position-based color; colors repeat after three.
+            style = source_styles[index % len(source_styles)]
+            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}",style=style)])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,"📚 **اختر مصدر أحدث الفصول:**","sources_image",InlineKeyboardMarkup(kb)); return
+        await send_message_with_image(client,cid,translate_ui_text(uid,"📚 اختر مصدر أحدث الفصول:"),"sources_image",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("latest_src_"):
         await callback.answer("⏳")
@@ -2183,8 +2984,8 @@ async def unified_callback(client,callback):
             return
         if not selected:
             await safe_edit_fresh_text(client,msg,cid,"❌ لا توجد مانجا حديثة في هذا المصدر",
-                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")],
-                                      [InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")]]))
+                InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Sources" if get_user_language(uid)=="en" else "⬅️ المصادر",callback_data="latest_manga_list",style="danger")],
+                                      [InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")]]))
             return
         kb=[]
         for i,item in selected:
@@ -2192,15 +2993,15 @@ async def unified_callback(client,callback):
             chapter=item[3] if len(item)>3 else ""
             label=f"📖 {str(title)[:32]}" + (f" — {str(chapter)[:12]}" if chapter else "")
             kb.append([InlineKeyboardButton(label,callback_data=f"latest_{i}")])
-        kb.append([InlineKeyboardButton("⬅️ المصادر",callback_data="latest_manga_list")])
-        kb.append([InlineKeyboardButton("🏠 القائمة الرئيسية",callback_data="latest_home")])
+        kb.append([InlineKeyboardButton("⬅️ Sources" if get_user_language(uid)=="en" else "⬅️ المصادر",callback_data="latest_manga_list",style="danger")])
+        kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,"🔥 **أحدث الفصول في المصدر المحدد:**","results_image",InlineKeyboardMarkup(kb)); return
+        await send_message_with_image(client,cid,translate_ui_text(uid,"🔥 أحدث الفصول في المصدر المحدد:"),"results_image",InlineKeyboardMarkup(kb)); return
 
     if data=="latest_home":
         await callback.answer("🏠")
-        welcome=settings.get("welcome_message","🌟 **مرحباً بك في بوت المانجا**")
+        welcome=settings.get("welcome_message","🌟 مرحباً بك في بوت المانجا")
         # A manga details message is a photo; editing its caption leaves the old cover visible.
         # Delete that media message and send the main menu as a clean text message instead.
         try:
@@ -2210,8 +3011,7 @@ async def unified_callback(client,callback):
         await client.send_message(
             chat_id=cid,
             text=welcome,
-            reply_markup=await build_main_keyboard(uid),
-            parse_mode=ParseMode.MARKDOWN
+            reply_markup=await build_main_keyboard(uid)
         )
         return
 
@@ -2229,19 +3029,19 @@ async def unified_callback(client,callback):
         if page>0: nav.append(InlineKeyboardButton("⬅️",callback_data=f"cat_pg_{page-1}"))
         if page<tp-1: nav.append(InlineKeyboardButton("➡️",callback_data=f"cat_pg_{page+1}"))
         if nav: kb.append(nav)
-        kb.append([InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-        await safe_edit(msg,f"🏷️ **التصنيفات ({page+1}/{tp})**",InlineKeyboardMarkup(kb)); return
+        kb.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,f"🏷️ التصنيفات ({page+1}/{tp})",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_g_"):
         idx=int(data[6:]); genres=await asyncio.to_thread(get_source("mangalik").get_genres)
         if not genres or idx>=len(genres): await callback.answer("⚠️",show_alert=True); return
         slug,name=genres[idx][1],genres[idx][0]; await callback.answer("⏳")
-        await safe_edit(msg,f"⏳ **{name}**")
+        await safe_edit(msg,f"⏳ {name}")
         mangas=await asyncio.to_thread(get_source("mangalik").get_manga_by_genre, slug, 1)
         if not mangas: await safe_edit(msg,"❌",InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌",callback_data="close_list")]])); return
         kb=[[InlineKeyboardButton(f"📖 {item.get('title','Manga')[:40]}",callback_data=f"cat_sel_{idx}_{i}")] for i,item in enumerate(mangas)]
-        kb.append([InlineKeyboardButton("🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
-        await safe_edit(msg,f"🏷️ **{name}** ({len(mangas)})",InlineKeyboardMarkup(kb)); return
+        kb.append([InlineKeyboardButton("🔙 Back" if get_user_language(uid)=="en" else "🔙 رجوع",callback_data=f"cat_pg_{idx//12}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
+        await safe_edit(msg,f"🏷️ {name} ({len(mangas)})",InlineKeyboardMarkup(kb)); return
 
     if data.startswith("cat_sel_"):
         p=data.split("_"); idx=int(p[2]); i=int(p[3])
@@ -2276,8 +3076,8 @@ async def unified_callback(client,callback):
             ident=str(item[2] or manga_url)
             user_data.setdefault(uid,{})["search_results"]=[{"title":item[0],"url":manga_url,"id":ident}]
         if not manga_url:
-            await callback.answer("رابط المانجا غير متوفر",show_alert=True); return
-        await callback.answer("⏳"); await safe_edit(msg,"⏳ **جاري تحميل معلومات المانجا...**")
+            await callback.answer(translate_ui_text(uid,"رابط المانجا غير متوفر"),show_alert=True); return
+        await callback.answer("⏳"); await safe_edit(msg,translate_ui_text(uid,"⏳ جاري تحميل معلومات المانجا..."))
         try:
             api=await asyncio.to_thread(get_source,src)
             info=await asyncio.to_thread(api.get_details,manga_url)
@@ -2291,20 +3091,18 @@ async def unified_callback(client,callback):
             kind=info.get("kind") or ""
             async def pdf(ch,_api=api,_client=client,progress=None):
                 image_urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                if progress:
-                    await progress("extract", len(image_urls))
-                result=await download_images_parallel(image_urls,client=_client)
-                if progress:
-                    await progress("pdf", len(image_urls))
+                result = await download_images_parallel(
+                    image_urls, client=_client, image_progress_callback=progress
+                )
                 return result
             user_data[uid]={"chapters":chs,"title":title,"identifier":ident,"page":0,"source":src,
                 "create_pdf_func":pdf,"manga_url":manga_url,"cover_url":cover,"genres":genres,"kind":kind,
                 "latest_mode":data.startswith("latest_"),"latest_source_id":src}
-            parts=[f"**{title}**"]
-            if kind: parts.append(f"📚 **{kind}**")
+            parts=[f"{title}"]
+            if kind: parts.append(f"📚 {kind}")
             if genres: parts.append("🏷️ " + " | ".join(map(str,genres[:8])))
-            if description: parts.extend(["",description])
-            parts.extend(["",f"📖 **{len(chs)} فصل**"])
+            if description: parts.extend(["",format_manga_bio(description)])
+            parts.extend(["",f"📖 {len(chs)} فصل"])
             if chs:
                 latest=chs[-1]
                 label=latest.get("number") or latest.get("num_str") or latest.get("chapter_number") or ""
@@ -2319,7 +3117,7 @@ async def unified_callback(client,callback):
                     match=re.search(r"(?:chapter|ch\.?|فصل)\s*#?\s*(\d+(?:\.\d+)?)", candidate, re.IGNORECASE)
                     if match and not time_label:
                         label=match.group(1)
-                if label: parts.append(f"📌 آخر فصل: `{label}`")
+                if label: parts.append(f"📌 آخر فصل: {label}")
             cap="\n".join(parts); user_data[uid]["base_caption"]=cap
             markup,_,_=create_chapters_markup(chs,0,ident,src,uid)
             try: await msg.delete()
@@ -2336,26 +3134,26 @@ async def unified_callback(client,callback):
         ident = info.get("manga_url") or info.get("identifier")
         title = info.get('title', 'مانجا')
         if not ident:
-            await callback.answer("⚠️ لا توجد بيانات، افتح المانجا أولاً", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"⚠️ لا توجد بيانات، افتح المانجا أولاً"), show_alert=True)
             return
         source_id = source_from_code(src_short)
         if not source_id:
-            await callback.answer("⚠️ مصدر المانجا غير متاح", show_alert=True)
+            await callback.answer(translate_ui_text(uid,"⚠️ مصدر المانجا غير متاح"), show_alert=True)
             return
         share_code = create_manga_share_code(source_id, ident)
         share_url = f"https://t.me/{BOT_USERNAME}?start=m_{share_code}"
         txt = (
-            f"🔗 **رابط مشاركة المانجا**\n\n"
-            f"📚 **{title}**\n\n"
-            f"`{share_url}`\n\n"
-            f"💡 **انسخ الرابط وشاركه مع أصدقائك**\n"
+            f"🔗 رابط مشاركة المانجا\n\n"
+            f"📚 {title}\n\n"
+            f"{share_url}\n\n"
+            f"💡 انسخ الرابط وشاركه مع أصدقائك\n"
             f"✨ عند فتحه يفتح البوت ويعرض المانجا تلقائياً"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]
+            [InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")]
         ])
-        await msg.reply_text(txt, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-        await callback.answer("🔗 الرابط جاهز — انسخه")
+        await msg.reply_text(translate_ui_text(uid, txt), reply_markup=kb)
+        await callback.answer(translate_ui_text(uid, "🔗 الرابط جاهز — انسخه"))
         return
 
     if data.startswith(("pg_","f_","l_")):
@@ -2371,8 +3169,8 @@ async def unified_callback(client,callback):
         chs=user_data[uid].get('chapters',[]); ident=user_data[uid].get('identifier')
         if not chs: return
         user_data[uid]['page']=pg; m,p2,tot=create_chapters_markup(chs,pg,ident,src,uid)
-        base=user_data[uid].get('base_caption'); txt=(base+f"\n\n📄 **{p2+1}/{tot}**") if base else f"📄 {p2+1}/{tot}"
-        try: await msg.edit_caption(caption=txt,reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        base=user_data[uid].get('base_caption'); txt=(base+f"\n\n📄 {p2+1}/{tot}") if base else f"📄 {p2+1}/{tot}"
+        try: await msg.edit_caption(caption=txt,reply_markup=m)
         except:
             try: await msg.delete()
             except: pass
@@ -2397,17 +3195,16 @@ async def unified_callback(client,callback):
             cover=info.get("cover_url")
             async def pdf(ch,_api=api,_c=client,progress=None):
                 urls=await asyncio.to_thread(_api.get_chapter_images,ch)
-                if progress:
-                    await progress("extract", len(urls))
-                result=await download_images_parallel(urls,client=_c)
-                if progress:
-                    await progress("pdf", len(urls))
+                result = await download_images_parallel(
+                    urls, client=_c, image_progress_callback=progress
+                )
                 return result
             ref=api.BASE
         except Exception as e: await safe_edit(msg,f"❌ {e}"); return
         if not chs: await safe_edit(msg,"❌"); return
         user_data[uid]={'chapters':chs,'title':t,'identifier':ident,'page':0,'source':src,'create_pdf_func':pdf,'manga_url':murl_k,'cover_url':cover}
-        cap=f"**{t}** (محدث) 🔄\n{d}\n📚 {len(chs)} فصل"
+        bio=format_manga_bio(d)
+        cap=f"{t} (محدث) 🔄\n{bio}\n📚 {len(chs)} فصل"
         user_data[uid]['base_caption']=cap
         m,_,_=create_chapters_markup(chs,0,ident,src,uid)
         try: await msg.delete()
@@ -2436,48 +3233,63 @@ async def unified_callback(client,callback):
             disp=re.sub(r"_+", " ", disp).strip() or "?"
             success,rem=try_deduct_chapter(uid,1)
             if not success:
-                await callback.answer("❌ لا رصيد",show_alert=True)
-                kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
-                await msg.reply_text("❌ **لا يوجد رصيد**\n\nادعُ صديقاً 🔗",reply_markup=kb,parse_mode=ParseMode.MARKDOWN); return
+                await callback.answer(translate_ui_text(uid,"❌ لا رصيد"),show_alert=True)
+                kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Share" if get_user_language(uid)=="en" else "🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
+                await msg.reply_text(translate_ui_text(uid, "❌ لا يوجد رصيد\n\nادعُ صديقاً 🔗"),reply_markup=kb); return
             await callback.answer("⏳")
-            lt = f"⏳ **جاري تحميل الفصل {disp}...**"
-            if rem>=0: lt += f"\n📊 المتبقي: `{rem}`"
-            lm=await msg.reply_text(lt)
-            stage_clock = {"started": time.perf_counter()}
-            async def single_progress(stage, image_count):
-                now = time.perf_counter()
-                elapsed = now - stage_clock["started"]
-                if stage == "extract":
-                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
-                              f"🔗 تم استخراج `{image_count}` صورة "
-                              f"خلال `{elapsed:.1f}` ثانية")
-                else:
-                    status = (f"📖 **الفصل 1/1 — {disp}**\n"
-                              f"📦 تم تجهيز PDF من `{image_count}` صورة "
-                              f"خلال `{elapsed:.1f}` ثانية")
-                stage_clock["started"] = now
-                await lm.edit_text(status)
+            lt = f"⏳ جاري تحميل الفصل {disp}...\n🔎 جاري استخراج صور الفصل من المحرك..."
+            if rem>=0: lt += f"\n📊 المتبقي: {rem}"
+            lm=await msg.reply_text(translate_ui_text(uid,lt))
+            image_progress_state = {"last_update": 0}
+
+            async def update_single_image_progress(done, total):
+                # Show progress on the first completed image, then throttle edits to every 5 images.
+                if done < total and image_progress_state["last_update"] and done - image_progress_state["last_update"] < 5:
+                    return
+                image_progress_state["last_update"] = done
+                percent = min(100, int(done * 100 / max(1, total)))
+                filled = min(10, percent // 10)
+                bar = "▰" * filled + "▱" * (10 - filled)
+                try:
+                    await lm.edit_text(
+                        translate_ui_text(
+                            uid,
+                            f"📥 جاري تحميل الفصل {disp}\n\n{bar} {percent}%\n🖼️ الصور المحمّلة: {done}/{total}\n📄 تجهيز PDF..."
+                        )
+                    )
+                except Exception:
+                    pass
+
             try:
-                buf = await pdf_func(target, progress=single_progress)
+                buf = await pdf_func(target, progress=update_single_image_progress)
             except Exception:
                 buf = None
             if not buf:
                 refund_chapter(uid)
-                await lm.edit_text("❌ **فشل التحميل**")
+                await lm.edit_text(translate_ui_text(uid, "❌ فشل التحميل"))
                 return
             increment_download_count(uid)
             upload_started = time.perf_counter()
-            await lm.edit_text("📤 **جاري الرفع...**")
+            await lm.edit_text(
+                translate_ui_text(uid, "📤 يتم إرسال الملف إلى تيليجرام...\n\n⚡ نسبة الإنجاز: 0%\n") + translate_ui_text(uid,f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB"),
+                parse_mode=None,
+            )
             try:
                 title_for_caption=user_data.get(uid,{}).get('title','')
-                caption_text=build_caption("single_caption",title=title_for_caption,chapter=disp)
+                manga_title_quote = html.escape(str(title_for_caption or ''))
+                caption_text=build_caption(
+                    "single_caption",
+                    title=manga_title_quote,
+                    chapter=html.escape(str(disp)),
+                    bot_username=html.escape(str(BOT_USERNAME or "bot")),
+                )
                 safe_title=re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title_for_caption)).strip()[:60] or "manga"
-                await client.send_document(cid,document=buf,file_name=f"{disp} - {safe_title}.pdf", caption=caption_text,parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_direct(cid, document=buf, file_name=f"{disp} - {safe_title}.pdf", caption=caption_text, progress_message=lm)
                 upload_elapsed = time.perf_counter() - upload_started
 
                 await lm.delete()
             except Exception as e:
-                await lm.edit_text(f"❌ {e}")
+                await lm.edit_text(translate_ui_text(uid, f"❌ {e}"), parse_mode=None)
             try:
                 buf.close()
             except Exception:
@@ -2489,7 +3301,7 @@ async def unified_callback(client,callback):
             if locked: unlock_download(uid)
 
     if data.startswith(("fav_add_","fav_remove_","toggle_notify_")):
-        if not is_vip(uid): await callback.answer("VIP فقط 👑",show_alert=True); return
+        if not is_vip(uid): await callback.answer(translate_ui_text(uid,"VIP فقط 👑"),show_alert=True); return
         src_short = data.split("_")[-1] if data.startswith("toggle_notify_") else data.split("_")[2]
         src = source_from_code(src_short)
         ident=user_data.get(uid, {}).get('identifier')
@@ -2503,7 +3315,7 @@ async def unified_callback(client,callback):
             except Exception:
                 lc = "0"
             if add_to_favorites(uid,info.get('title','?'),ident,src,info.get('manga_url',''),info.get('cover_url',''),lc): await callback.answer("✅")
-            else: await callback.answer("⚠️ موجود",show_alert=True)
+            else: await callback.answer(translate_ui_text(uid,"⚠️ موجود"),show_alert=True)
         elif data.startswith("fav_remove_"):
             if remove_from_favorites(uid,ident,src): await callback.answer("✅")
             else: await callback.answer("⚠️",show_alert=True)
@@ -2512,7 +3324,7 @@ async def unified_callback(client,callback):
             await callback.answer("✅" if not cur else "❌")
         info=user_data.get(uid,{})
         m,_,_=create_chapters_markup(info.get('chapters',[]),info.get('page',0),ident,src,uid)
-        try: await msg.edit_caption(caption=msg.caption,reply_markup=m,parse_mode=ParseMode.MARKDOWN)
+        try: await msg.edit_caption(caption=msg.caption,reply_markup=m)
         except: pass
         return
 
@@ -2521,17 +3333,17 @@ async def unified_callback(client,callback):
         if not src: await callback.answer("⚠️"); return
         if uid not in user_data: await callback.answer("⚠️", show_alert=True); return
         ident=user_data[uid].get('identifier'); chs=user_data[uid].get('chapters',[])
-        if not chs: await callback.answer("لا فصول", show_alert=True); return
+        if not chs: await callback.answer(translate_ui_text(uid,"لا فصول"), show_alert=True); return
         user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
         mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
         mmax = PDF_MAX_CHAPTERS
-        await msg.reply_text(f"🧩 **دمج الفصول**\n\n📚 `{len(chs)}` فصل\n🔢 `{mmax}` حد أقصى\n💳 رصيد: `{mr}`\n\n📝 أرسل: `البداية-النهاية`\nمثال: `1-{mmax}`\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+        await msg.reply_text(translate_ui_text(uid,f"🧩 دمج الفصول\n\n📚 {len(chs)} فصل\n🔢 {mmax} حد أقصى\n💳 رصيد: {mr}\n\n📝 أرسل: البداية-النهاية\nمثال: 1-{mmax}\n\n/cancel"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]]))
         await callback.answer("⏳"); return
 
     if data.startswith("src_"):
         src=data[4:]; q=user_data.get(uid,{}).get('search_query')
-        if not q: await callback.answer("⚠️",show_alert=True); await safe_edit(msg,"`/search`"); return
-        await callback.answer("⏳"); await safe_edit(msg,f"🔍 **{q}**")
+        if not q: await callback.answer("⚠️",show_alert=True); await safe_edit(msg,"/search"); return
+        await callback.answer("⏳"); await safe_edit(msg,f"🔍 {q}")
         res=[]
         try:
             api=await asyncio.to_thread(get_source,src)
@@ -2540,47 +3352,93 @@ async def unified_callback(client,callback):
         if not res:
             try: await msg.delete()
             except: pass
-            await client.send_message(cid, f"❌ **لا نتائج أو المصدر غير متاح**\n`{q}`",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),
-                parse_mode=ParseMode.MARKDOWN); return
+            await client.send_message(cid, translate_ui_text(uid,f"❌ لا نتائج أو المصدر غير متاح\n{q}"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 New search" if get_user_language(uid)=="en" else "🔍 بحث جديد",callback_data="main_search")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])); return
         user_data[uid]["search_results"]=res; user_data[uid]["source"]=src
         kb=[]
         for i,item in enumerate(res):
             title=str(item.get("title") or "Manga")
             kb.append([InlineKeyboardButton(f"📖 {title[:45]}",callback_data=f"sel_{src}_{i}")])
-        kb.append([InlineKeyboardButton("🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")])
+        kb.append([InlineKeyboardButton("🔍 New search" if get_user_language(uid)=="en" else "🔍 بحث جديد",callback_data="main_search"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")])
         try: await msg.delete()
         except: pass
-        await send_message_with_image(client,cid,f"✅ **{len(res)} نتيجة**\n`{q}`","results_image",InlineKeyboardMarkup(kb)); return
+        await send_message_with_image(client,cid,translate_ui_text(uid,f"✅ {len(res)} نتيجة\n{q}"),"results_image",InlineKeyboardMarkup(kb)); return
 
     # ============ ADMIN ============
     if is_admin_any(uid):
         if data == "admin_toggle_maintenance":
             current = settings.get("maintenance_mode", False); settings["maintenance_mode"] = not current; save_settings()
             await callback.answer("🔒" if not current else "🔓", show_alert=True)
-            try: await msg.edit_text("🛠️ **لوحة التحكم الرئيسية**", reply_markup=get_admin_panel_kb(), parse_mode=ParseMode.MARKDOWN)
+            try: await msg.edit_text("🛠️ لوحة التحكم الرئيسية", reply_markup=get_admin_panel_kb())
             except: pass
+            return
+        if data=="admin_links_section":
+            app_link = settings.get("app_message_link") or "غير مضاف"
+            video_link = settings.get("tutorial_video_url") or "غير مضاف"
+            await msg.edit_text(
+                f"🔗 إدارة روابط أزرار المستخدمين\n\n📲 رابط تطبيق البوت: {app_link}\n\n🎬 رابط آخر فيديو تعليمي: {video_link}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ إضافة/تعديل رابط التطبيق",callback_data="admin_set_app_link")],
+                    [InlineKeyboardButton("🗑️ حذف رابط التطبيق",callback_data="admin_del_app_link")],
+                    [InlineKeyboardButton("➕ إضافة/تعديل الفيديو التعليمي",callback_data="admin_set_tutorial_link")],
+                    [InlineKeyboardButton("🗑️ حذف رابط الفيديو",callback_data="admin_del_tutorial_link")],
+                    [InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")],
+                ])
+            )
+            await callback.answer("🔗")
+            return
+        if data=="admin_set_app_link":
+            user_data[uid]={"awaiting_app_message_link":True}
+            await msg.delete()
+            await client.send_message(cid,
+                "📲 أرسل رابط منشور تطبيق البوت من تيليجرام\n"
+                "مثال: https://t.me/MangaVirus2/159\n"
+                "سيتم نسخ محتوى المنشور للمستخدم عند ضغط الزر.\n\nللإلغاء أرسل /cancel"
+            )
+            await callback.answer("📲")
+            return
+        if data=="admin_set_tutorial_link":
+            user_data[uid]={"awaiting_tutorial_video_url":True}
+            await msg.delete()
+            await client.send_message(cid,
+                "🎬 أرسل رابط الفيديو التعليمي (YouTube أو Telegram أو أي رابط يبدأ بـ https://).\n"
+                "سيظهر زر «آخر فيديو تعليمي» للمستخدمين بعد حفظ الرابط.\n\nللإلغاء أرسل /cancel"
+            )
+            await callback.answer("🎬")
+            return
+        if data=="admin_del_app_link":
+            settings["app_message_link"]=None
+            save_settings()
+            await msg.edit_text("🗑️ تم حذف رابط تطبيق البوت، واختفى الزر من القائمة الرئيسية.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع",callback_data="admin_links_section")]]))
+            await callback.answer("✅")
+            return
+        if data=="admin_del_tutorial_link":
+            settings["tutorial_video_url"]=None
+            save_settings()
+            await msg.edit_text("🗑️ تم حذف رابط الفيديو التعليمي، واختفى الزر من القائمة الرئيسية.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع",callback_data="admin_links_section")]]))
+            await callback.answer("✅")
             return
         if data=="admin_gift_links":
             links=get_all_gift_links()
-            await msg.edit_text(f"🎁 **إدارة روابط الهدايا** ({len(links)})",
+            await msg.edit_text(f"🎁 إدارة روابط الهدايا ({len(links)})",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("➕ إنشاء رابط", callback_data="admin_gift_link_create")],
                     [InlineKeyboardButton("📋 عرض/إدارة", callback_data="admin_gift_link_list")],
                     [InlineKeyboardButton("🗑️ حذف", callback_data="admin_gift_link_delete_menu")],
-                    [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]),
-                parse_mode=ParseMode.MARKDOWN)
+                    [InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]))
             await callback.answer("🎁"); return
         if data.startswith("admin_gift_manage_"):
             code = data.replace("admin_gift_manage_", ""); link = get_gift_link(code)
             if not link: await callback.answer("⚠️", show_alert=True); return
-            allowed = get_gift_allowed_users(code); allowed_txt = f"`{len(allowed)}` مستخدم" if allowed else "الجميع"
+            allowed = get_gift_allowed_users(code); allowed_txt = f"{len(allowed)} مستخدم" if allowed else "الجميع"
             ch = link.get('channel_id') or "غير محدد"; en = "✅" if link.get('post_enabled') else "❌"
             interval = link.get('post_interval_hours', 2); mode = link.get('post_mode') or 'auto'
             mode_txt = "🤖 تلقائي" if mode == 'auto' else "👤 يدوي"
             rem = max(0, int(link['expires_at'] - time.time())); h_rem = rem // 3600; m_rem = (rem % 3600) // 60
             bot_user = BOT_USERNAME or "bot"; current_url = f"https://t.me/{bot_user}?start=gift_{code}"
-            txt = (f"⚙️ **إدارة الرابط** `{code}`\n\n🔗 `{current_url}`\n\n📖 `{link['single_amount']}`\n🧩 `{link['merge_amount']}`\n👥 `{link['used_count']}/{link['max_users']}`\n⏰ `{h_rem}س {m_rem}د`\n\n🛡️ {allowed_txt}\n📢 `{ch}`\n⏯ {en}\n📣 {mode_txt}\n🔄 كل `{interval}` ساعة")
+            txt = (f"⚙️ إدارة الرابط {code}\n\n🔗 {current_url}\n\n📖 {link['single_amount']}\n🧩 {link['merge_amount']}\n👥 {link['used_count']}/{link['max_users']}\n⏰ {h_rem}س {m_rem}د\n\n🛡️ {allowed_txt}\n📢 {ch}\n⏯ {en}\n📣 {mode_txt}\n🔄 كل {interval} ساعة")
             kb_rows = [
                 [InlineKeyboardButton("📤 مشاركة الرابط", url=f"https://t.me/share/url?url={quote(current_url)}&text={quote('🎁 هدية!')}")],
                 [InlineKeyboardButton("👥 مستخدمين", callback_data=f"admin_gift_users_{code}"), InlineKeyboardButton("📢 قناة", callback_data=f"admin_gift_setchannel_{code}")],
@@ -2594,28 +3452,28 @@ async def unified_callback(client,callback):
             else:
                 kb_rows.append([InlineKeyboardButton("🔄 توليد رابط جديد", callback_data=f"admin_gift_publish_{code}")])
             kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_gift_links")])
-            await msg.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(txt, reply_markup=InlineKeyboardMarkup(kb_rows))
             await callback.answer("⚙️"); return
         if data.startswith("admin_gift_users_set_"):
             code = data.replace("admin_gift_users_set_", ""); user_data[uid] = {"awaiting_gift_allowed_users": code}
-            await msg.delete(); await msg.reply_text("👥 **أرسل المعرّفات** مفصولة بمسافة:\n`123456789 @user1`\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text("👥 أرسل المعرّفات مفصولة بمسافة:\n123456789 @user1\n\n/cancel")
             await callback.answer("👥"); return
         if data.startswith("admin_gift_users_clear_"):
             code = data.replace("admin_gift_users_clear_", ""); clear_gift_allowed_users(code)
-            await msg.edit_text("✅ **مفتوح للجميع**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
+            await msg.edit_text("✅ مفتوح للجميع", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
             await callback.answer("✅"); return
         if data.startswith("admin_gift_users_"):
             code = data.replace("admin_gift_users_", ""); allowed = get_gift_allowed_users(code)
-            if allowed: txt = f"👥 **المستخدمون المسموح لهم** ({len(allowed)})\n\n" + "\n".join(f"• `{u}`" for u in allowed[:30])
-            else: txt = "👥 **مفتوح للجميع**"
+            if allowed: txt = f"👥 المستخدمون المسموح لهم ({len(allowed)})\n\n" + "\n".join(f"• {u}" for u in allowed[:30])
+            else: txt = "👥 مفتوح للجميع"
             await msg.edit_text(txt, reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ إضافة", callback_data=f"admin_gift_users_set_{code}")],
                 [InlineKeyboardButton("🗑️ مسح", callback_data=f"admin_gift_users_clear_{code}")],
-                [InlineKeyboardButton("🔙 رجوع", callback_data=f"admin_gift_manage_{code}")]]), parse_mode=ParseMode.MARKDOWN)
+                [InlineKeyboardButton("🔙 رجوع", callback_data=f"admin_gift_manage_{code}")]]))
             await callback.answer("👥"); return
         if data.startswith("admin_gift_setchannel_"):
             code = data.replace("admin_gift_setchannel_", ""); user_data[uid] = {"awaiting_gift_channel": code}
-            await msg.delete(); await msg.reply_text("📢 **معرّف القناة:**\n`@channel` أو `-100...`\n\n⚠️ البوت أدمن\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text("📢 معرّف القناة:\n@channel أو -100...\n\n⚠️ البوت أدمن\n\n/cancel")
             await callback.answer("📢"); return
         if data.startswith("admin_gift_toggle_"):
             code = data.replace("admin_gift_toggle_", ""); res = toggle_gift_post(code)
@@ -2639,16 +3497,16 @@ async def unified_callback(client,callback):
             await _reopen_admin_page(client, uid, msg, "admin_gift_links"); return
         if data.startswith("admin_gift_interval_"):
             code = data.replace("admin_gift_interval_", ""); user_data[uid] = {"awaiting_gift_post_interval": code}
-            await msg.delete(); await msg.reply_text("⏰ **كل كم ساعة؟** (1-24)\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text("⏰ كل كم ساعة؟ (1-24)\n\n/cancel")
             await callback.answer("⏰"); return
         if data=="admin_gift_link_create":
             user_data[uid]={"gift_link_step":"single"}; await msg.delete()
-            await msg.reply_text("🎁 **إنشاء رابط**\n\n📖 **الفصول المفردة** لكل مستخدم؟\n(0 للتخطي)\n\n/cancel", parse_mode=ParseMode.MARKDOWN)
+            await msg.reply_text("🎁 إنشاء رابط\n\n📖 الفصول المفردة لكل مستخدم؟\n(0 للتخطي)\n\n/cancel")
             await callback.answer("🎁"); return
         if data=="admin_gift_link_list":
             links=get_all_gift_links()
             if not links:
-                await msg.edit_text("🎁 **لا توجد روابط هدايا حالياً**\n\nأنشئ رابطاً جديداً ليظهر هنا.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
+                await msg.edit_text("🎁 لا توجد روابط هدايا حالياً\n\nأنشئ رابطاً جديداً ليظهر هنا.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
                 await callback.answer("📭"); return
             kb=[]
             for l in links:
@@ -2657,63 +3515,63 @@ async def unified_callback(client,callback):
                 mode_icon = "🤖" if (l.get('post_mode') or 'auto') == 'auto' else "👤"
                 kb.append([InlineKeyboardButton(f"{mode_icon} {l['code']} — {l['used_count']}/{l['max_users']} — {exp}", callback_data=f"admin_gift_manage_{l['code']}")])
             kb.append([InlineKeyboardButton("🔙", callback_data="admin_gift_links"), InlineKeyboardButton("❌", callback_data="close_list")])
-            await msg.edit_text("📋 **اختر الرابط الذي تريد إدارته:**", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("📋"); return
+            await msg.edit_text("📋 اختر الرابط الذي تريد إدارته:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("📋"); return
         if data=="admin_gift_link_delete_menu":
             links=get_all_gift_links()
-            if not links: await msg.edit_text("🎁 **لا توجد روابط هدايا لحذفها**\n\nأنشئ رابطاً أولاً قبل استخدام الحذف."); await callback.answer("📭"); return
+            if not links: await msg.edit_text("🎁 لا توجد روابط هدايا لحذفها\n\nأنشئ رابطاً أولاً قبل استخدام الحذف."); await callback.answer("📭"); return
             kb=[[InlineKeyboardButton(f"🗑️ {l['code']}", callback_data=f"admin_gift_link_del_{l['code']}")] for l in links]
             kb.append([InlineKeyboardButton("🔙", callback_data="admin_gift_links")])
-            await msg.edit_text("🗑️ **اختر العنصر الذي تريد حذفه:**", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+            await msg.edit_text("🗑️ اختر العنصر الذي تريد حذفه:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
         if data.startswith("admin_gift_link_del_"):
             code=data.replace("admin_gift_link_del_","")
             if delete_gift_link(code):
-                await msg.edit_text(f"✅ حُذف `{code}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
-            else: await msg.edit_text("⚠️ **تعذّر تنفيذ الطلب**\nراجع البيانات المطلوبة وحاول مجدداً.")
+                await msg.edit_text(f"✅ حُذف {code}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_gift_links")],[InlineKeyboardButton("❌", callback_data="close_list")]]))
+            else: await msg.edit_text("⚠️ تعذّر تنفيذ الطلب\nراجع البيانات المطلوبة وحاول مجدداً.")
             await callback.answer("✅"); return
         if data=="gift_expiry_hours":
             if not user_data.get(uid,{}).get("gift_link_step"): await callback.answer("⚠️", show_alert=True); return
             user_data[uid]["gift_expiry_unit"]="hours"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
-            await msg.reply_text("⏰ **الساعات:**\nمثال: `24`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏰"); return
+            await msg.reply_text("⏰ الساعات:\nمثال: 24\n\n/cancel"); await callback.answer("⏰"); return
         if data=="gift_expiry_minutes":
             if not user_data.get(uid,{}).get("gift_link_step"): await callback.answer("⚠️", show_alert=True); return
             user_data[uid]["gift_expiry_unit"]="minutes"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
-            await msg.reply_text("⏱️ **الدقائق:**\nمثال: `30`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏱️"); return
+            await msg.reply_text("⏱️ الدقائق:\nمثال: 30\n\n/cancel"); await callback.answer("⏱️"); return
         if data=="admin_merge_counters":
-            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{PDF_MAX_CHAPTERS}`",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🧮 إعدادات العدادات والحدود\n\n📖 {settings.get('daily_reward_amount',100)}\n🧩 {settings.get('merge_daily_limit',50)}\n📎 {PDF_MAX_CHAPTERS}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("🧮"); return
         if data=="admin_edit_merge_limit":
-            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_daily_limit',50)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: {settings.get('merge_daily_limit',50)}\n\n/cancel")
             user_data[uid]={"awaiting_merge_limit":True}; await callback.answer("✏️"); return
         if data=="admin_edit_merge_max":
-            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{PDF_MAX_CHAPTERS}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: {PDF_MAX_CHAPTERS}\n\n/cancel")
             user_data[uid]={"awaiting_merge_max":True}; await callback.answer("✏️"); return
         if data=="admin_edit_daily_amount":
-            await msg.delete(); await msg.reply_text(f"✏️ الحالي: `{settings.get('daily_reward_amount',100)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ الحالي: {settings.get('daily_reward_amount',100)}\n\n/cancel")
             user_data[uid]={"awaiting_daily_amount":True}; await callback.answer("✏️"); return
         if data=="admin_merge_gifts":
-            await msg.edit_text("🧩 **هدية دمج الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎯 فرد",callback_data="admin_merge_gift_one"), InlineKeyboardButton("🎁 جميع",callback_data="admin_merge_gift_all")],[InlineKeyboardButton("🔙",callback_data="admin_panel_back"), InlineKeyboardButton("❌",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text("🧩 هدية دمج الفصول", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎯 فرد",callback_data="admin_merge_gift_one"), InlineKeyboardButton("🎁 جميع",callback_data="admin_merge_gift_all")],[InlineKeyboardButton("🔙",callback_data="admin_panel_back"), InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("🧩"); return
         if data=="admin_merge_gift_one":
-            await msg.delete(); await msg.reply_text("🎯 **إرسال هدية دمج إلى عضو**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🎯 إرسال هدية دمج إلى عضو\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_merge_gift_one_id":True}; await callback.answer("🎯"); return
         if data=="admin_merge_gift_all":
-            await msg.delete(); await msg.reply_text("🎁 **هدية دمج لجميع الأعضاء**\nأرسل عدد فصول الدمج التي تريد إضافتها لكل مستخدم.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🎁 هدية دمج لجميع الأعضاء\nأرسل عدد فصول الدمج التي تريد إضافتها لكل مستخدم.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_merge_gift_all":True}; await callback.answer("🎁"); return
         if data=="admin_complaints":
             clist=get_all_complaints()
             if not clist:
-                await msg.edit_text("📭 **صندوق الشكاوى فارغ**\n\nستظهر شكاوى المستخدمين هنا عند وصولها.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                await msg.edit_text("📭 صندوق الشكاوى فارغ\n\nستظهر شكاوى المستخدمين هنا عند وصولها.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
                 await callback.answer("📭"); return
-            txt=f"📬 **صندوق الشكاوى** ({len(clist)})\n\n"
+            txt=f"📬 صندوق الشكاوى ({len(clist)})\n\n"
             for i,c in enumerate(clist[-20:][::-1],1):
                 un=f"@{c['username']}" if c.get('username') else "—"; dt=time.strftime("%Y-%m-%d %H:%M",time.localtime(c.get('ts',0)))
-                txt+=f"{i}. {c.get('first_name','?')} | `{c['uid']}` | {un}\n🕐 {dt}\n💬 {c.get('text','')[:180]}\n\n"
+                txt+=f"{i}. {c.get('first_name','?')} | {c['uid']} | {un}\n🕐 {dt}\n💬 {c.get('text','')[:180]}\n\n"
             if len(txt)>3900: txt=txt[:3900]+"..."
-            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("📬"); return
         if data=="admin_clear_complaints":
-            await msg.edit_text(f"🗑️ **تأكيد حذف الشكاوى**\nهل تريد حذف جميع الشكاوى وعددها `{count_complaints()}`؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_clear_complaints_yes")],[InlineKeyboardButton("❌",callback_data="admin_complaints")]]))
+            await msg.edit_text(f"🗑️ تأكيد حذف الشكاوى\nهل تريد حذف جميع الشكاوى وعددها {count_complaints()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_clear_complaints_yes")],[InlineKeyboardButton("❌",callback_data="admin_complaints")]]))
             await callback.answer("⚠️"); return
         if data=="admin_clear_complaints_yes":
             n=clear_complaints(); await msg.edit_text(f"✅ {n}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
@@ -2721,79 +3579,79 @@ async def unified_callback(client,callback):
         if data=="admin_panel_back":
             try: await msg.delete()
             except: pass
-            await msg.reply_text("🛠️ **لوحة التحكم الرئيسية**",reply_markup=get_admin_panel_kb(),parse_mode=ParseMode.MARKDOWN)
+            await msg.reply_text("🛠️ لوحة التحكم الرئيسية",reply_markup=get_admin_panel_kb())
             await callback.answer("🔙"); return
         if data=="sec_broadcast_stats":
             await msg.edit_text(
-                f"📊 **لوحة الإحصائيات العامة – Manga Virus** 🦠\n\n✨ **نظرة شاملة على نشاط البوت وأرقامه:**\n\n👥 **إجمالي المستخدمين:** `{get_users_count()}`\n📥 **عمليات التحميل:** `{get_download_count()}`\n👑 **أعضاء VIP:** `{len(get_all_vips())}`\n👮 **المشرفون المضافون:** `{len(get_all_added_admins())}`\n🚫 **المحظورون:** `{len(get_all_banned())}`\n🤖 **البوتات المسجلة:** `{len(get_all_bots())}`\n📬 **الشكاوى الواردة:** `{count_complaints()}`\n📖 **الحد اليومي لتحميل الفصول:** `{settings.get('daily_reward_amount',100)}`\n🧩 **حد دمج الفصول اليومي:** `{settings.get('merge_daily_limit',50)}`\n\n━━━━━━━━━━━━━━━━━━\n\n🚀 **Manga Virus في تطوّر مستمر!**\n\nكل رقم يمثل خطوة جديدة في رحلتنا لتوفير أفضل تجربة لعشاق المانجا والمانهوا.\n\n🖤 شكراً لكل من اختار Manga Virus، والقادم أفضل بإذن الله! 🦠",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+                f"📊 لوحة الإحصائيات العامة – Manga Virus 🦠\n\n✨ نظرة شاملة على نشاط البوت وأرقامه:\n\n👥 إجمالي المستخدمين: {get_users_count()}\n📥 عمليات التحميل: {get_download_count()}\n👑 أعضاء VIP: {len(get_all_vips())}\n👮 المشرفون المضافون: {len(get_all_added_admins())}\n🚫 المحظورون: {len(get_all_banned())}\n🤖 البوتات المسجلة: {len(get_all_bots())}\n📬 الشكاوى الواردة: {count_complaints()}\n📖 الحد اليومي لتحميل الفصول: {settings.get('daily_reward_amount',100)}\n🧩 حد دمج الفصول اليومي: {settings.get('merge_daily_limit',50)}\n\n━━━━━━━━━━━━━━━━━━\n\n🚀 Manga Virus في تطوّر مستمر!\n\nكل رقم يمثل خطوة جديدة في رحلتنا لتوفير أفضل تجربة لعشاق المانجا والمانهوا.\n\n🖤 شكراً لكل من اختار Manga Virus، والقادم أفضل بإذن الله! 🦠",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("📊"); return
         if data=="admin_broadcast":
-            await msg.delete(); await msg.reply_text("📢 **إرسال إعلان للمستخدمين**\nأرسل نص الإعلان الذي تريد نشره للجميع.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("📢 إرسال إعلان للمستخدمين\nأرسل نص الإعلان الذي تريد نشره للجميع.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_broadcast':True}; await callback.answer("📢"); return
         if data=="admin_stats":
-            await msg.edit_text(f"📊 **إحصائيات**\n👥 `{get_users_count()}`\n📥 `{get_download_count()}`\n⭐ `{count_total_favorites()}`\n👑 `{len(get_all_vips())}`\n🔄 `{time.strftime('%Y-%m-%d %H:%M:%S')}`",parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"📊 إحصائيات\n👥 {get_users_count()}\n📥 {get_download_count()}\n⭐ {count_total_favorites()}\n👑 {len(get_all_vips())}\n🔄 {time.strftime('%Y-%m-%d %H:%M:%S')}")
             await callback.answer("📊"); return
         if data=="admin_reset_section":
-            await msg.edit_text("♻️ **تصفير الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("♻️ الجميع",callback_data="admin_reset_all_confirm"), InlineKeyboardButton("👤 عضو",callback_data="admin_reset_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text("♻️ تصفير الفصول", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("♻️ الجميع",callback_data="admin_reset_all_confirm"), InlineKeyboardButton("👤 عضو",callback_data="admin_reset_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("♻️"); return
         if data=="admin_reset_all_confirm":
-            await msg.edit_text(f"♻️ **تأكيد تصفير الأرصدة**\nهل تريد تصفير أرصدة جميع المستخدمين وعددهم `{get_users_count()}`؟ لا يمكن التراجع عن هذه العملية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_reset_all_do")],[InlineKeyboardButton("❌",callback_data="admin_reset_section")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"♻️ تأكيد تصفير الأرصدة\nهل تريد تصفير أرصدة جميع المستخدمين وعددهم {get_users_count()}؟ لا يمكن التراجع عن هذه العملية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_reset_all_do")],[InlineKeyboardButton("❌",callback_data="admin_reset_section")]]))
             await callback.answer("⚠️"); return
         if data=="admin_reset_all_do":
             await callback.answer("⏳")
             try:
                 count=reset_all_balances(); await msg.edit_text(f"✅ {count}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
-            except Exception as e: await msg.edit_text(f"⚠️ **تعذّر حذف النسخ الاحتياطية:**\n{e}")
+            except Exception as e: await msg.edit_text(f"⚠️ تعذّر حذف النسخ الاحتياطية:\n{e}")
             return
         if data=="admin_reset_one":
-            await msg.delete(); await msg.reply_text("👤 **تصفير رصيد مستخدم محدد**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("👤 تصفير رصيد مستخدم محدد\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_reset_user":True}; await callback.answer("👤"); return
         if data=="admin_ban_section":
-            await msg.edit_text(f"🚫 **إدارة المحظورين** ({len(get_all_banned())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚫 حظر",callback_data="admin_ban_user"), InlineKeyboardButton("✅ فك",callback_data="admin_unban_user")],[InlineKeyboardButton("📋",callback_data="admin_banned_list"), InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🚫 إدارة المحظورين ({len(get_all_banned())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚫 حظر",callback_data="admin_ban_user"), InlineKeyboardButton("✅ فك",callback_data="admin_unban_user")],[InlineKeyboardButton("📋",callback_data="admin_banned_list"), InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("🚫"); return
         if data=="admin_ban_user":
-            await msg.delete(); await msg.reply_text("🚫 **حظر مستخدم**\nأرسل آيدي المستخدم أو @username الذي تريد حظره.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🚫 حظر مستخدم\nأرسل آيدي المستخدم أو @username الذي تريد حظره.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_ban_user":True}; await callback.answer("🚫"); return
         if data=="admin_unban_user":
-            await msg.delete(); await msg.reply_text("🔓 **رفع الحظر عن مستخدم**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🔓 رفع الحظر عن مستخدم\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_unban_user":True}; await callback.answer("✅"); return
         if data=="admin_banned_list":
             blist=get_all_banned()
             if not blist:
-                await msg.edit_text("🛡️ **قائمة الحظر فارغة**\n\nلا يوجد مستخدمون محظورون حالياً.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                await msg.edit_text("🛡️ قائمة الحظر فارغة\n\nلا يوجد مستخدمون محظورون حالياً.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
                 await callback.answer("📋"); return
-            txt=f"📋 ({len(blist)})\n\n" + "\n".join(f"{i}. `{b}`" for i,b in enumerate(blist,1))
-            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+            txt=f"📋 ({len(blist)})\n\n" + "\n".join(f"{i}. {b}" for i,b in enumerate(blist,1))
+            await msg.edit_text(txt); await callback.answer("📋"); return
         if data=="admin_captions_section":
-            await msg.edit_text(f"📄 **إدارة وصف ملفات الفصول**\n\nالوصف الحالي:\n{settings.get('single_caption','')[:200]}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل الوصف",callback_data="admin_edit_single_caption")],[InlineKeyboardButton("♻️ استعادة الافتراضي",callback_data="admin_reset_captions")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"📄 إدارة وصف ملفات الفصول\n\nالوصف الحالي:\n{settings.get('single_caption','')[:200]}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل الوصف",callback_data="admin_edit_single_caption")],[InlineKeyboardButton("♻️ استعادة الافتراضي",callback_data="admin_reset_captions")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("📄"); return
         if data=="admin_edit_single_caption":
-            await msg.delete(); await msg.reply_text("✏️ **تعديل وصف ملف الفصل**\nاستخدم `{chapter}` لرقم الفصل و`{title}` لاسم المانجا.\nأرسل نص الوصف الجديد.\n\nللإلغاء أرسل /cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text("✏️ تعديل وصف ملف الفصل\nاستخدم {chapter} لرقم الفصل و{title} لاسم المانجا.\nأرسل نص الوصف الجديد.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_single_caption":True}; await callback.answer("✏️"); return
         if data=="admin_reset_captions":
             settings["single_caption"]=NEW_SINGLE_CAPTION; save_settings()
-            await msg.edit_text("♻️ **تمت استعادة وصف الفصل الافتراضي بنجاح.**",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await msg.edit_text("♻️ تمت استعادة وصف الفصل الافتراضي بنجاح.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("✅"); return
         if data=="admin_images_section":
             def st(k): return "✅" if settings.get(k) else "❌"
-            await msg.edit_text(f"🖼️ **إدارة صور البوت**\n\nBDF:{st('bdf_image')} ترحيب:{st('welcome_image')} مفضلة:{st('favorites_image')}\nنتائج:{st('results_image')} مصادر:{st('sources_image')} اشتراك:{st('force_sub_image')}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🖼️ BDF",callback_data="img_menu_bdf"), InlineKeyboardButton("🖼️ ترحيب",callback_data="img_menu_welcome")],[InlineKeyboardButton("🖼️ مفضلة",callback_data="img_menu_favorites")],[InlineKeyboardButton("🖼️ نتائج",callback_data="img_menu_results"), InlineKeyboardButton("🖼️ مصادر",callback_data="img_menu_sources")],[InlineKeyboardButton("🖼️ اشتراك",callback_data="img_menu_sub")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🖼️ إدارة صور البوت\n\nBDF:{st('bdf_image')} ترحيب:{st('welcome_image')} مفضلة:{st('favorites_image')}\nنتائج:{st('results_image')} مصادر:{st('sources_image')} اشتراك:{st('force_sub_image')}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🖼️ BDF",callback_data="img_menu_bdf"), InlineKeyboardButton("🖼️ ترحيب",callback_data="img_menu_welcome")],[InlineKeyboardButton("🖼️ مفضلة",callback_data="img_menu_favorites")],[InlineKeyboardButton("🖼️ نتائج",callback_data="img_menu_results"), InlineKeyboardButton("🖼️ مصادر",callback_data="img_menu_sources")],[InlineKeyboardButton("🖼️ اشتراك",callback_data="img_menu_sub")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("🖼️"); return
         if data.startswith("img_menu_"):
             km={"bdf":("bdf_image","BDF","admin_add_bdf","admin_del_bdf"),"welcome":("welcome_image","ترحيب","admin_set_welcome_image","admin_del_welcome_image"),"favorites":("favorites_image","مفضلة","admin_set_favorites_image","admin_del_favorites_image"),"results":("results_image","نتائج","admin_set_results_image","admin_del_results_image"),"sources":("sources_image","مصادر","admin_set_sources_image","admin_del_sources_image"),"sub":("force_sub_image","اشتراك","admin_set_sub_image","admin_del_sub_image")}
             k=data.replace("img_menu_","")
             if k not in km: await callback.answer("⚠️"); return
             sk,ttl,scb,dcb=km[k]; has="✅" if settings.get(sk) else "❌"
-            await msg.edit_text(f"🖼️ **{ttl}**: {has}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ رفع صورة",callback_data=scb), InlineKeyboardButton("🗑️ حذف الصورة",callback_data=dcb)],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🖼️ {ttl}: {has}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ رفع صورة",callback_data=scb), InlineKeyboardButton("🗑️ حذف الصورة",callback_data=dcb)],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("🖼️"); return
         if data=="admin_messages_section":
-            await msg.edit_text("📝 **إدارة رسائل البوت**\n\nعدّل رسالة الترحيب أو رسالة الاشتراك الإجباري. اختر الرسالة التي تريد تغييرها.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 رسالة الترحيب",callback_data="admin_set_welcome"), InlineKeyboardButton("📢 رسالة الاشتراك",callback_data="admin_set_sub_message")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text("📝 إدارة رسائل البوت\n\nعدّل رسالة الترحيب أو رسالة الاشتراك الإجباري. اختر الرسالة التي تريد تغييرها.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 رسالة الترحيب",callback_data="admin_set_welcome"), InlineKeyboardButton("📢 رسالة الاشتراك",callback_data="admin_set_sub_message")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("📝"); return
         if data=="admin_download_settings":
             parallel = settings.get("allow_parallel_downloads", False); status = "✅" if parallel else "❌"
             btn_text = "🔒 تعطيل" if parallel else "🔓 تفعيل"
-            await msg.edit_text(f"⚙️ **التحميل**\n\nمتوازي: {status}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data="admin_toggle_parallel")],[InlineKeyboardButton("🔙", callback_data="admin_panel_back"), InlineKeyboardButton("❌", callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"⚙️ التحميل\n\nمتوازي: {status}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, callback_data="admin_toggle_parallel")],[InlineKeyboardButton("🔙", callback_data="admin_panel_back"), InlineKeyboardButton("❌", callback_data="close_list")]]))
             await callback.answer("⚙️"); return
         if data=="admin_toggle_parallel":
             settings["allow_parallel_downloads"] = not settings.get("allow_parallel_downloads", False); save_settings()
@@ -2801,139 +3659,139 @@ async def unified_callback(client,callback):
             await _reopen_admin_page(client, uid, msg, "admin_download_settings"); return
         if data=="admin_vip_section":
             sc=settings.get("vip_contact_second")
-            await msg.edit_text(f"👑 **إدارة الـ VIP** ({len(get_all_vips())})\nالزر الثاني: `{sc or 'غير محدد'}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة عضو VIP",callback_data="admin_vip_add"), InlineKeyboardButton("🗑️ إزالة عضو VIP",callback_data="admin_vip_remove")],[InlineKeyboardButton("🎁 VIP مجاني للجميع",callback_data="admin_vip_all_1day")],[InlineKeyboardButton("👥 تعديل زر التواصل",callback_data="admin_set_vip_contact")],[InlineKeyboardButton("📋 قائمة المشتركين",callback_data="admin_vip_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"👑 إدارة الـ VIP ({len(get_all_vips())})\nالزر الثاني: {sc or 'غير محدد'}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة عضو VIP",callback_data="admin_vip_add"), InlineKeyboardButton("🗑️ إزالة عضو VIP",callback_data="admin_vip_remove")],[InlineKeyboardButton("🎁 VIP مجاني للجميع",callback_data="admin_vip_all_1day")],[InlineKeyboardButton("👥 تعديل زر التواصل",callback_data="admin_set_vip_contact")],[InlineKeyboardButton("📋 قائمة المشتركين",callback_data="admin_vip_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("👑"); return
         if data=="admin_set_vip_contact":
-            await msg.edit_text(f"👥 الحالي: `{settings.get('vip_contact_second') or 'غير محدد'}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️",callback_data="admin_del_vip_contact")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"👥 الحالي: {settings.get('vip_contact_second') or 'غير محدد'}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️",callback_data="admin_del_vip_contact")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             user_data[uid]={"awaiting_vip_contact":True}; await callback.answer("👥"); return
         if data=="admin_del_vip_contact":
             settings["vip_contact_second"]=None; save_settings(); user_data.pop(uid,None)
-            await msg.edit_text("👥 **تم حذف جهة التواصل الإضافية الخاصة بـ VIP.**",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await msg.edit_text("👥 تم حذف جهة التواصل الإضافية الخاصة بـ VIP.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("✅"); return
         if data=="admin_vip_all_1day":
-            await msg.edit_text(f"منح VIP ليوم لـ {get_users_count()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_vip_all_1day_yes")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"منح VIP ليوم لـ {get_users_count()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_vip_all_1day_yes")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("⚠️"); return
         if data=="admin_vip_all_1day_yes":
             await callback.answer("⏳")
             success=extend_all_vips(24*3600)
             for u in get_all_user_ids():
                 try:
-                    await client.send_message(u,"🎉 **VIP ليوم** 👑",parse_mode=ParseMode.MARKDOWN); await asyncio.sleep(0.05)
+                    await client.send_message(u,"🎉 VIP ليوم 👑"); await asyncio.sleep(0.05)
                 except: pass
             await msg.edit_text(f"✅ {success}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]])); return
         if data=="admin_vip_add":
-            await msg.edit_text("👑 **اختر مدة اشتراك VIP التي تريد منحها:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 أسبوع",callback_data="vip_add_weekly"), InlineKeyboardButton("📆 شهر",callback_data="vip_add_monthly"), InlineKeyboardButton("🗓️ سنة",callback_data="vip_add_yearly")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            await msg.edit_text("👑 اختر مدة اشتراك VIP التي تريد منحها:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📅 أسبوع",callback_data="vip_add_weekly"), InlineKeyboardButton("📆 شهر",callback_data="vip_add_monthly"), InlineKeyboardButton("🗓️ سنة",callback_data="vip_add_yearly")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("👑"); return
         if data in ("vip_add_weekly","vip_add_monthly","vip_add_yearly"):
             plan=data.replace("vip_add_",""); user_data[uid]={"awaiting_vip_user":plan}
-            await msg.delete(); await msg.reply_text(f"👑 **منح اشتراك VIP: {VIP_PLAN_NAMES[plan]}**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text(f"👑 منح اشتراك VIP: {VIP_PLAN_NAMES[plan]}\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             await callback.answer("👑"); return
         if data=="admin_vip_remove":
-            await msg.delete(); await msg.reply_text("👑 **إزالة اشتراك VIP**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("👑 إزالة اشتراك VIP\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_vip_remove":True}; await callback.answer("🗑️"); return
         if data=="admin_vip_list":
             vips=get_all_vips()
-            if not vips: await msg.edit_text("👑 **لا يوجد أعضاء VIP حالياً.**\n\nيمكنك إضافة مشترك جديد من خيارات إدارة VIP."); await callback.answer("📋"); return
-            txt="👑 **قائمة أعضاء VIP**\n\n🆔 آيدي العضو — الخطة — الأيام المتبقية\n\n"
+            if not vips: await msg.edit_text("👑 لا يوجد أعضاء VIP حالياً.\n\nيمكنك إضافة مشترك جديد من خيارات إدارة VIP."); await callback.answer("📋"); return
+            txt="👑 قائمة أعضاء VIP\n\n🆔 آيدي العضو — الخطة — الأيام المتبقية\n\n"
             for v in vips:
                 info=get_vip_info(v)
-                if info: txt+=f"• `{v}` — {VIP_PLAN_NAMES.get(info['plan'],'?')} — {max(0,int((info['expires']-time.time())//86400))} يوم\n"
-            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+                if info: txt+=f"• {v} — {VIP_PLAN_NAMES.get(info['plan'],'?')} — {max(0,int((info['expires']-time.time())//86400))} يوم\n"
+            await msg.edit_text(txt); await callback.answer("📋"); return
         if data=="admin_rewards_section":
             amt=settings.get("daily_reward_amount",100); iv=settings.get("daily_reward_interval",86400)//3600
-            await msg.edit_text(f"🎁 **إعدادات المكافآت اليومية**\n\n💰 `{amt}`\n⏰ `{iv}` ساعة\n🔗 مفرد: `{settings.get('referral_bonus_single',50)}`\n🔗 دمج: `{settings.get('referral_bonus_merge',20)}`",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰",callback_data="admin_edit_reward_amount"), InlineKeyboardButton("⏰",callback_data="admin_edit_reward_interval")],[InlineKeyboardButton("🔗 مفرد",callback_data="admin_edit_ref_single"), InlineKeyboardButton("🔗 دمج",callback_data="admin_edit_ref_merge")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🎁 إعدادات المكافآت اليومية\n\n💰 {amt}\n⏰ {iv} ساعة\n🔗 مفرد: {settings.get('referral_bonus_single',50)}\n🔗 دمج: {settings.get('referral_bonus_merge',20)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰",callback_data="admin_edit_reward_amount"), InlineKeyboardButton("⏰",callback_data="admin_edit_reward_interval")],[InlineKeyboardButton("🔗 مفرد",callback_data="admin_edit_ref_single"), InlineKeyboardButton("🔗 دمج",callback_data="admin_edit_ref_merge")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("🎁"); return
         if data=="admin_edit_reward_amount":
-            await msg.delete(); await msg.reply_text(f"💰 **تعديل رصيد الفصول اليومي**\nالقيمة الحالية: `{settings.get('daily_reward_amount',100)}`\nأرسل القيمة الجديدة.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text(f"💰 تعديل رصيد الفصول اليومي\nالقيمة الحالية: {settings.get('daily_reward_amount',100)}\nأرسل القيمة الجديدة.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_reward_amount":True}; await callback.answer("💰"); return
         if data=="admin_edit_reward_interval":
-            await msg.delete(); await msg.reply_text(f"⏰ **تعديل مدة تجديد الرصيد**\nالمدة الحالية: `{settings.get('daily_reward_interval',86400)//3600}` ساعة.\nأرسل المدة الجديدة بالساعات.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text(f"⏰ تعديل مدة تجديد الرصيد\nالمدة الحالية: {settings.get('daily_reward_interval',86400)//3600} ساعة.\nأرسل المدة الجديدة بالساعات.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_reward_interval":True}; await callback.answer("⏰"); return
         if data=="admin_edit_ref_single":
-            await msg.delete(); await msg.reply_text(f"🔗 **تعديل مكافأة إحالة التحميل الفردي**\nالقيمة الحالية: `{settings.get('referral_bonus_single',50)}` فصل.\nأرسل المكافأة الجديدة.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text(f"🔗 تعديل مكافأة إحالة التحميل الفردي\nالقيمة الحالية: {settings.get('referral_bonus_single',50)} فصل.\nأرسل المكافأة الجديدة.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_ref_single_amount":True}; await callback.answer("🔗"); return
         if data=="admin_edit_ref_merge":
-            await msg.delete(); await msg.reply_text(f"🧩 **تعديل مكافأة إحالة الدمج**\nالقيمة الحالية: `{settings.get('referral_bonus_merge',20)}` فصل دمج.\nأرسل المكافأة الجديدة.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text(f"🧩 تعديل مكافأة إحالة الدمج\nالقيمة الحالية: {settings.get('referral_bonus_merge',20)} فصل دمج.\nأرسل المكافأة الجديدة.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_ref_merge_amount":True}; await callback.answer("🔗"); return
         if data=="admin_gifts_section":
-            await msg.edit_text("🎉 **قسم هدايا الفصول**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 جميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 فرد",callback_data="admin_gift_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text("🎉 قسم هدايا الفصول", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 جميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 فرد",callback_data="admin_gift_one")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("🎉"); return
         if data=="admin_gift_all":
-            await msg.delete(); await msg.reply_text("🎁 **هدية دمج لجميع الأعضاء**\nأرسل عدد فصول الدمج التي تريد إضافتها لكل مستخدم.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🎁 هدية دمج لجميع الأعضاء\nأرسل عدد فصول الدمج التي تريد إضافتها لكل مستخدم.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_gift_all":True}; await callback.answer("🎁"); return
         if data=="admin_gift_one":
-            await msg.delete(); await msg.reply_text("🎯 **إرسال هدية دمج إلى عضو**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🎯 إرسال هدية دمج إلى عضو\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_gift_one_id":True}; await callback.answer("🎯"); return
         if data=="admin_manage_admins":
-            await msg.edit_text(f"👮‍♂️ **الأدمنز** (رئيسي: {len(ADMINS)} | مضاف: {len(get_all_added_admins())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة أدمن",callback_data="admin_add_new"), InlineKeyboardButton("🗑️ حذف أدمن",callback_data="admin_remove_one")],[InlineKeyboardButton("📋 قائمة الأدمنز",callback_data="admin_list_admins"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"👮‍♂️ الأدمنز (رئيسي: {len(ADMINS)} | مضاف: {len(get_all_added_admins())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة أدمن",callback_data="admin_add_new"), InlineKeyboardButton("🗑️ حذف أدمن",callback_data="admin_remove_one")],[InlineKeyboardButton("📋 قائمة الأدمنز",callback_data="admin_list_admins"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("👮"); return
         if data=="admin_add_new":
-            await msg.delete(); await msg.reply_text("👮 **إضافة أدمن جديد**\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("👮 إضافة أدمن جديد\nأرسل آيدي المستخدم أو @username.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_add_admin":True}; await callback.answer("➕"); return
         if data=="admin_remove_one":
             alist=get_all_added_admins()
-            if not alist: await msg.edit_text("👮 **لا يوجد أدمنز مضافون حالياً.**"); await callback.answer("⚠️"); return
+            if not alist: await msg.edit_text("👮 لا يوجد أدمنز مضافون حالياً."); await callback.answer("⚠️"); return
             kb=[[InlineKeyboardButton(f"🗑️ {a}",callback_data=f"adm_del_{a}")] for a in alist]
             kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
-            await msg.edit_text("🗑️ **اختر العنصر الذي تريد حذفه:**",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+            await msg.edit_text("🗑️ اختر العنصر الذي تريد حذفه:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
         if data.startswith("adm_del_"):
             try:
                 a=int(data[8:])
                 if remove_added_admin(a):
-                    await msg.edit_text(f"👮 **تم حذف الأدمن** `{a}` **من قائمة المشرفين.**")
-                    try: await client.send_message(a,"👮 **تم إلغاء صلاحيات الأدمن الخاصة بك.**\nلم تعد قادراً على استخدام لوحة الإدارة.",parse_mode=ParseMode.MARKDOWN)
+                    await msg.edit_text(f"👮 تم حذف الأدمن {a} من قائمة المشرفين.")
+                    try: await client.send_message(a,"👮 تم إلغاء صلاحيات الأدمن الخاصة بك.\nلم تعد قادراً على استخدام لوحة الإدارة.")
                     except: pass
-                else: await msg.edit_text("⚠️ **تعذّر تنفيذ الطلب**\nراجع البيانات المطلوبة وحاول مجدداً.")
+                else: await msg.edit_text("⚠️ تعذّر تنفيذ الطلب\nراجع البيانات المطلوبة وحاول مجدداً.")
             except: pass
             await callback.answer("✅"); return
         if data=="admin_list_admins":
-            txt="👮‍♂️ **قائمة الأدمنز المسجلين**\n\n"
-            for a in ADMINS + get_all_added_admins(): txt+=f"• `{a}`\n"
-            await msg.edit_text(txt,parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+            txt="👮‍♂️ قائمة الأدمنز المسجلين\n\n"
+            for a in ADMINS + get_all_added_admins(): txt+=f"• {a}\n"
+            await msg.edit_text(txt); await callback.answer("📋"); return
         if data=="admin_backup_section":
             bc=len(get_all_bots()); cnt=len([f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")]) if os.path.exists(BACKUP_DIR) else 0
-            await msg.edit_text(f"💾 **حالة النسخ الاحتياطي**\n\n📦 النسخ المحفوظة: `{cnt}`\n🤖 بوتات النسخ المتاحة: `{bc}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 إنشاء وإرسال ({bc})",callback_data="backup_create_send")],[InlineKeyboardButton("📥 استعادة نسخة",callback_data="backup_restore")],[InlineKeyboardButton("🗑️ حذف كل النسخ",callback_data="backup_delete_all")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"💾 حالة النسخ الاحتياطي\n\n📦 النسخ المحفوظة: {cnt}\n🤖 بوتات النسخ المتاحة: {bc}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 إنشاء وإرسال ({bc})",callback_data="backup_create_send")],[InlineKeyboardButton("📥 استعادة نسخة",callback_data="backup_restore")],[InlineKeyboardButton("🗑️ حذف كل النسخ",callback_data="backup_delete_all")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("💾"); return
         if data=="backup_create_send":
             if not get_all_bots(): await callback.answer("⚠️",show_alert=True); return
-            await callback.answer("⏳"); await msg.edit_text("⏳ **جارٍ تنفيذ العملية**\nيرجى الانتظار حتى يكتمل الطلب.")
+            await callback.answer("⏳"); await msg.edit_text("⏳ جارٍ تنفيذ العملية\nيرجى الانتظار حتى يكتمل الطلب.")
             s,f,_=await send_zip_via_added_bots(manual=True)
-            await msg.edit_text(f"📦 **انتهت عملية إنشاء وإرسال النسخ**\n✅ نجح الإرسال: `{s}`\n❌ فشل الإرسال: `{f}`"); return
+            await msg.edit_text(f"📦 انتهت عملية إنشاء وإرسال النسخ\n✅ نجح الإرسال: {s}\n❌ فشل الإرسال: {f}"); return
         if data=="backup_restore":
-            await msg.delete(); await msg.reply_text("📥 **استعادة نسخة احتياطية**\nأرسل ملف النسخة بصيغة ZIP.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("📥 استعادة نسخة احتياطية\nأرسل ملف النسخة بصيغة ZIP.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_backup_restore":True}; await callback.answer("📥"); return
         if data=="backup_delete_all":
             try:
                 fs=[f for f in os.listdir(BACKUP_DIR) if f.endswith(".zip")]
                 for f in fs: os.remove(os.path.join(BACKUP_DIR,f))
-                await msg.edit_text(f"🗑️ **اكتمل حذف النسخ الاحتياطية**\nتم حذف `{len(fs)}` ملف ZIP.")
+                await msg.edit_text(f"🗑️ اكتمل حذف النسخ الاحتياطية\nتم حذف {len(fs)} ملف ZIP.")
             except Exception as e: await msg.edit_text(f"❌ {e}")
             await callback.answer("✅"); return
         if data=="admin_bots_section":
-            await msg.edit_text(f"🤖 **إدارة بوتات النسخ** ({len(get_all_bots())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة بوت",callback_data="bots_add_token"), InlineKeyboardButton("🗑️ حذف بوت",callback_data="bots_remove")],[InlineKeyboardButton("📋 قائمة البوتات",callback_data="bots_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"🤖 إدارة بوتات النسخ ({len(get_all_bots())})", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة بوت",callback_data="bots_add_token"), InlineKeyboardButton("🗑️ حذف بوت",callback_data="bots_remove")],[InlineKeyboardButton("📋 قائمة البوتات",callback_data="bots_list"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("🤖"); return
         if data=="bots_add_token":
-            await msg.delete(); await msg.reply_text("➕ `اسم | توكن | آيدي`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text("➕ اسم | توكن | آيدي\n\n/cancel")
             user_data[uid]={"awaiting_bot_token":True}; await callback.answer("➕"); return
         if data=="bots_remove":
             bots=get_all_bots()
-            if not bots: await msg.edit_text("🤖 **لا توجد بوتات نسخ مسجلة حالياً.**\n\nيمكنك إضافة بوت جديد من زر الإضافة."); await callback.answer("⚠️"); return
+            if not bots: await msg.edit_text("🤖 لا توجد بوتات نسخ مسجلة حالياً.\n\nيمكنك إضافة بوت جديد من زر الإضافة."); await callback.answer("⚠️"); return
             kb=[[InlineKeyboardButton(f"🗑️ {info.get('name','?')}",callback_data=f"bot_del_{bid}")] for bid,info in bots.items()]
             kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
-            await msg.edit_text("🗑️ **اختر العنصر الذي تريد حذفه:**",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+            await msg.edit_text("🗑️ اختر العنصر الذي تريد حذفه:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
         if data.startswith("bot_del_"):
             bid=data[8:]; ok,info=remove_bot_token(bid)
-            await msg.edit_text("🤖 **تم حذف البوت من قائمة النسخ.**" if ok else "⚠️ **تعذّر حذف البوت.**\nقد يكون غير موجود في القائمة."); await callback.answer("✅" if ok else "⚠️"); return
+            await msg.edit_text("🤖 تم حذف البوت من قائمة النسخ." if ok else "⚠️ تعذّر حذف البوت.\nقد يكون غير موجود في القائمة."); await callback.answer("✅" if ok else "⚠️"); return
         if data=="bots_list":
             bots=get_all_bots()
-            if not bots: await msg.edit_text("🤖 **لا توجد بوتات نسخ مسجلة حالياً.**\n\nيمكنك إضافة بوت جديد من زر الإضافة."); await callback.answer("📋"); return
-            txt=f"🤖 **قائمة بوتات النسخ المسجلة**\n\n"
-            for bid,info in bots.items(): txt+=f"🤖 **{info.get('name','?')}**\n🆔 `{bid}`\n📬 `{info.get('target_id','—')}`\n\n"
-            await msg.edit_text(txt[:4000],parse_mode=ParseMode.MARKDOWN); await callback.answer("📋"); return
+            if not bots: await msg.edit_text("🤖 لا توجد بوتات نسخ مسجلة حالياً.\n\nيمكنك إضافة بوت جديد من زر الإضافة."); await callback.answer("📋"); return
+            txt=f"🤖 قائمة بوتات النسخ المسجلة\n\n"
+            for bid,info in bots.items(): txt+=f"🤖 {info.get('name','?')}\n🆔 {bid}\n📬 {info.get('target_id','—')}\n\n"
+            await msg.edit_text(txt[:4000]); await callback.answer("📋"); return
         if data=="admin_forcesub_section":
-            chs=settings.get("force_sub_channels",[]); ch_list="\n".join(f"• `{ch}`" for ch in chs[:5]) or "_لا قنوات_"
-            await msg.edit_text(f"📢 **الاشتراك الإجباري** ({len(chs)})\n\n{ch_list}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة قناة",callback_data="admin_add_sub_channel"), InlineKeyboardButton("🗑️ حذف قناة",callback_data="admin_del_sub_channel")],[InlineKeyboardButton("✏️ تعديل أسماء الأزرار",callback_data="admin_edit_sub_btns")],[InlineKeyboardButton("📝 نص رسالة الاشتراك",callback_data="admin_set_sub_message"), InlineKeyboardButton("🖼️ صورة الاشتراك",callback_data="admin_set_sub_image")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
+            chs=settings.get("force_sub_channels",[]); ch_list="\n".join(f"• {ch}" for ch in chs[:5]) or "_لا قنوات_"
+            await msg.edit_text(f"📢 الاشتراك الإجباري ({len(chs)})\n\n{ch_list}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ إضافة قناة",callback_data="admin_add_sub_channel"), InlineKeyboardButton("🗑️ حذف قناة",callback_data="admin_del_sub_channel")],[InlineKeyboardButton("✏️ تعديل أسماء الأزرار",callback_data="admin_edit_sub_btns")],[InlineKeyboardButton("📝 نص رسالة الاشتراك",callback_data="admin_set_sub_message"), InlineKeyboardButton("🖼️ صورة الاشتراك",callback_data="admin_set_sub_image")],[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]))
             await callback.answer("📢"); return
         if data=="admin_edit_sub_btns":
             chs=settings.get("force_sub_channels",[])
@@ -2944,66 +3802,66 @@ async def unified_callback(client,callback):
                 name = settings.get("force_sub_buttons", {}).get(ch, f"اشترك في {ch}")
                 kb.append([InlineKeyboardButton(name, callback_data=f"edit_sub_btn_{c_ch}")])
             kb.append([InlineKeyboardButton("🔙",callback_data="admin_forcesub_section")])
-            await msg.edit_text("🧭 **اختر القناة التي تريد تعديل اسم زرها:**", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("✏️"); return
+            await msg.edit_text("🧭 اختر القناة التي تريد تعديل اسم زرها:", reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("✏️"); return
         if data.startswith("edit_sub_btn_"):
             c_ch = data.replace("edit_sub_btn_", ""); ch = f"@{c_ch}"
             user_data[uid] = {"awaiting_sub_btn_name": ch}; await msg.delete()
-            await msg.reply_text(f"🔘 **تعديل اسم زر قناة الاشتراك**\nالقناة: `{ch}`\nأرسل الاسم الجديد الذي سيظهر على الزر.\n\nللإلغاء أرسل /cancel"); await callback.answer("✏️"); return
+            await msg.reply_text(f"🔘 تعديل اسم زر قناة الاشتراك\nالقناة: {ch}\nأرسل الاسم الجديد الذي سيظهر على الزر.\n\nللإلغاء أرسل /cancel"); await callback.answer("✏️"); return
         if data=="admin_add_sub_channel":
-            await msg.delete(); await msg.reply_text("📢 **أرسل معرف القناة**\nمثال: `@my_channel`\nتأكد أن البوت مشرف في القناة.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("📢 أرسل معرف القناة\nمثال: @my_channel\nتأكد أن البوت مشرف في القناة.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_sub_channel_add":True}; await callback.answer("➕"); return
         if data=="admin_del_sub_channel":
             chs=settings.get("force_sub_channels",[])
-            if not chs: await msg.edit_text("📢 **لا توجد قنوات اشتراك إجباري**\n\nأضف قناة أولاً حتى تتمكن من إدارتها."); await callback.answer("⚠️"); return
+            if not chs: await msg.edit_text("📢 لا توجد قنوات اشتراك إجباري\n\nأضف قناة أولاً حتى تتمكن من إدارتها."); await callback.answer("⚠️"); return
             kb=[[InlineKeyboardButton(f"🗑️ {ch}",callback_data=f"del_sub_{ch}")] for ch in chs]
             kb.append([InlineKeyboardButton("❌",callback_data="close_list")])
-            await msg.edit_text("🗑️ **اختر العنصر الذي تريد حذفه:**",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
+            await msg.edit_text("🗑️ اختر العنصر الذي تريد حذفه:",reply_markup=InlineKeyboardMarkup(kb)); await callback.answer("🗑️"); return
         if data.startswith("del_sub_"):
             ch=data[8:]; chs=settings.get("force_sub_channels",[])
             if ch in chs:
                 chs.remove(ch); settings["force_sub_channels"]=chs
                 b=settings.get("force_sub_buttons",{}); b.pop(ch,None); settings["force_sub_buttons"]=b; save_settings()
-                await msg.edit_text(f"✅ `{ch}`")
-            else: await msg.edit_text("⚠️ **تعذّر تنفيذ الطلب**\nراجع البيانات المطلوبة وحاول مجدداً.")
+                await msg.edit_text(f"✅ {ch}")
+            else: await msg.edit_text("⚠️ تعذّر تنفيذ الطلب\nراجع البيانات المطلوبة وحاول مجدداً.")
             await callback.answer("✅"); return
         if data=="admin_set_sub_message":
-            await msg.delete(); await msg.reply_text("📝 **إرسال نص الرسالة الجديدة**\nأرسل النص الذي تريد حفظه.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("📝 إرسال نص الرسالة الجديدة\nأرسل النص الذي تريد حفظه.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_sub_message':True}; await callback.answer("📝"); return
         if data=="admin_set_sub_image":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_sub_image':True}; await callback.answer("🖼️"); return
         if data=="admin_add_bdf":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_bdf':True}; await callback.answer("🖼️"); return
         if data=="admin_del_bdf":
-            settings["bdf_image"]=None; save_settings(); await msg.edit_text("🖼️ **تم حذف صورة BDF بنجاح.**"); await callback.answer("✅"); return
+            settings["bdf_image"]=None; save_settings(); await msg.edit_text("🖼️ تم حذف صورة BDF بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_welcome_image":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_welcome_image':True}; await callback.answer("🖼️"); return
         if data=="admin_del_welcome_image":
-            settings["welcome_image"]=None; save_settings(); await msg.edit_text("👋 **تم حذف صورة الترحيب بنجاح.**"); await callback.answer("✅"); return
+            settings["welcome_image"]=None; save_settings(); await msg.edit_text("👋 تم حذف صورة الترحيب بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_favorites_image":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_favorites_image':True}; await callback.answer("🖼️"); return
         if data=="admin_del_favorites_image":
-            settings["favorites_image"]=None; save_settings(); await msg.edit_text("⭐ **تم حذف صورة المفضلة بنجاح.**"); await callback.answer("✅"); return
+            settings["favorites_image"]=None; save_settings(); await msg.edit_text("⭐ تم حذف صورة المفضلة بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_results_image":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_results_image':True}; await callback.answer("🖼️"); return
         if data=="admin_del_results_image":
-            settings["results_image"]=None; save_settings(); await msg.edit_text("🔍 **تم حذف صورة النتائج بنجاح.**"); await callback.answer("✅"); return
+            settings["results_image"]=None; save_settings(); await msg.edit_text("🔍 تم حذف صورة النتائج بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_sources_image":
-            await msg.delete(); await msg.reply_text("🖼️ **إرسال صورة الآن**\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("🖼️ إرسال صورة الآن\nأرسل الصورة كصورة داخل تيليجرام حتى يتم حفظها في إعدادات البوت.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_sources_image':True}; await callback.answer("🖼️"); return
         if data=="admin_del_sources_image":
-            settings["sources_image"]=None; save_settings(); await msg.edit_text("📚 **تم حذف صورة المصادر بنجاح.**"); await callback.answer("✅"); return
+            settings["sources_image"]=None; save_settings(); await msg.edit_text("📚 تم حذف صورة المصادر بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_welcome":
-            await msg.delete(); await msg.reply_text("📝 **إرسال نص الرسالة الجديدة**\nأرسل النص الذي تريد حفظه.\n\nللإلغاء أرسل /cancel")
+            await msg.delete(); await msg.reply_text("📝 إرسال نص الرسالة الجديدة\nأرسل النص الذي تريد حفظه.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_welcome':True}; await callback.answer("📝"); return
         if data=="admin_del_welcome":
-            settings["welcome_message"]=DEFAULTS["welcome_message"]; save_settings(); await msg.edit_text("👋 **تمت استعادة رسالة الترحيب الافتراضية.**"); await callback.answer("✅"); return
+            settings["welcome_message"]=DEFAULTS["welcome_message"]; save_settings(); await msg.edit_text("👋 تمت استعادة رسالة الترحيب الافتراضية."); await callback.answer("✅"); return
         if data=="admin_cleanup":
-            r=cleanup_empty_favorites(); await msg.edit_text(f"🧹 **اكتمل تنظيف قاعدة المفضلات**\nتمت إزالة `{r}` من السجلات الفارغة."); await callback.answer("✅"); return
+            r=cleanup_empty_favorites(); await msg.edit_text(f"🧹 اكتمل تنظيف قاعدة المفضلات\nتمت إزالة {r} من السجلات الفارغة."); await callback.answer("✅"); return
 
     await callback.answer("⚠️", show_alert=True)
 
@@ -3013,18 +3871,27 @@ async def handle_all_text(client,message):
     uid=message.from_user.id
     if settings.get("maintenance_mode", False) and not is_admin_any(uid): return
 
+    if user_data.get(uid, {}).pop("awaiting_search_query", False):
+        query = (message.text or "").strip()
+        if not query:
+            user_data.setdefault(uid, {})["awaiting_search_query"] = True
+            await message.reply_text(translate_ui_text(uid, "⚠️ أرسل اسم مانجا صحيحاً للبحث."))
+            return
+        await search_cmd(client, message, query_override=query)
+        return
+
     if user_data.get(uid,{}).get("awaiting_complaint"):
         text=message.text.strip()
-        if not text or len(text)<3: await message.reply_text("⚠️ **نص الشكوى قصير جداً**\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة."); return
+        if not text or len(text)<3: await message.reply_text(translate_ui_text(uid,"⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.")); return
         add_complaint(uid,message.from_user.username or "",message.from_user.first_name or "",text)
-        user_data.pop(uid,None); await message.reply_text("✅ **تم الإرسال**")
-        try: await client.send_message(OWNER_ID,f"📬 `{uid}`\n💬 {text}",parse_mode=ParseMode.MARKDOWN)
+        user_data.pop(uid,None); await message.reply_text(translate_ui_text(uid,"✅ تم الإرسال"))
+        try: await client.send_message(OWNER_ID,f"📬 {uid}\n💬 {text}")
         except: pass
         return
 
     if user_data.get(uid, {}).get('awaiting_merge_range'):
         m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*$', message.text.strip())
-        if not m: await message.reply_text("🔢 **صيغة نطاق الفصول غير صحيحة.**\nأرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: `1-10`."); return
+        if not m: await message.reply_text(translate_ui_text(uid,"🔢 صيغة نطاق الفصول غير صحيحة.\nأرسل رقم البداية ثم شرطة ثم رقم النهاية، مثال: 1-10.")); return
         start_num, end_num = float(m.group(1)), float(m.group(2))
         if start_num > end_num: start_num, end_num = end_num, start_num
         info = user_data[uid]['awaiting_merge_range']; src, ident, chs = info['src'], info['ident'], info['chapters']
@@ -3037,27 +3904,27 @@ async def handle_all_text(client,message):
                 if m2: num = float(m2.group(1))
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
-        if not selected: await message.reply_text("📚 **لم يتم العثور على فصول ضمن هذا النطاق.**\nتحقق من أرقام الفصول وأرسل نطاقاً آخر."); return
+        if not selected: await message.reply_text(translate_ui_text(uid,"📚 لم يتم العثور على فصول ضمن هذا النطاق.\nتحقق من أرقام الفصول وأرسل نطاقاً آخر.")); return
         count = len(selected); mmax = PDF_MAX_CHAPTERS
-        if count > mmax: await message.reply_text(f"📄 **عدد الفصول يتجاوز الحد المسموح.**\nطلبت `{count}` فصلاً، والحد الأقصى لهذا الملف `{mmax}` فصول."); return
+        if count > mmax: await message.reply_text(translate_ui_text(uid,f"📄 عدد الفصول يتجاوز الحد المسموح.\nطلبت {count} فصلاً، والحد الأقصى لهذا الملف {mmax} فصول.")); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
-            if remaining < count: await message.reply_text(f"💳 **رصيد الدمج غير كافٍ.**\nالمطلوب: `{count}` فصل.\nالمتاح: `{int(remaining)}` فصل.\nيمكنك تجديد الرصيد أو ترقية حسابك إلى VIP."); return
+            if remaining < count: await message.reply_text(translate_ui_text(uid,f"💳 رصيد الدمج غير كافٍ.\nالمطلوب: {count} فصل.\nالمتاح: {int(remaining)} فصل.\nيمكنك تجديد الرصيد أو ترقية حسابك إلى VIP.")); return
         if not settings.get("allow_parallel_downloads", False):
-            if is_downloading(uid) or not try_lock_download(uid): await message.reply_text("⏳ **يوجد تحميل آخر قيد التنفيذ.**\nانتظر حتى يكتمل ثم حاول مجدداً."); return
+            if is_downloading(uid) or not try_lock_download(uid): await message.reply_text(translate_ui_text(uid,"⏳ يوجد تحميل آخر قيد التنفيذ.\nانتظر حتى يكتمل ثم حاول مجدداً.")); return
         locked = not settings.get("allow_parallel_downloads", False)
         try:
             success, rem = try_deduct_merge(uid, count)
-            if not success: await message.reply_text("❌ **تعذّر بدء تحميل الفصل.**\nلم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل."); return
+            if not success: await message.reply_text(translate_ui_text(uid,"❌ تعذّر بدء تحميل الفصل.\nلم يتم خصم الرصيد؛ حاول مرة أخرى بعد قليل.")); return
             user_data[uid].pop('awaiting_merge_range', None)
             title = user_data[uid].get('title', 'مانجا')
-            lm = await message.reply_text(f"🧩 **بدأ تجهيز ملف دمج الفصول**\n📚 النطاق: `{start_num:g} → {end_num:g}`\n🔢 عدد الفصول: `{count}`\n⏳ يرجى الانتظار...")
+            lm = await message.reply_text(translate_ui_text(uid,f"🧩 بدأ تجهيز ملف دمج الفصول\n📚 النطاق: {start_num:g} → {end_num:g}\n🔢 عدد الفصول: {count}\n⏳ يرجى الانتظار..."))
             chapter_groups = []
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
 
             # Extract chapter image lists concurrently, while showing completed chapter counts.
-            extract_sem = asyncio.Semaphore(4)
+            extract_sem = asyncio.Semaphore(6)
             progress_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
@@ -3073,17 +3940,14 @@ async def handle_all_text(client,message):
                     if urls:
                         progress["ok"] += 1
                         progress["images"] += len(urls)
-                    await lm.edit_text(
-                        f"🧩 **استخراج الفصول**\n"
-                        f"📚 المكتمل: `{progress['done']}/{count}`\n"
-                        f"✅ الناجح: `{progress['ok']}`\n"
-                        f"🖼️ الصور المستخرجة: `{progress['images']}`"
-                    )
+                    if progress["done"] == count or progress["done"] % 3 == 0:
+                        await lm.edit_text(
+                            translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: {progress['done']}/{count}\n✅ الناجح: {progress['ok']}\n🖼️ الصور المستخرجة: {progress['images']}")
+                        )
                 return index, urls or None
 
             await lm.edit_text(
-                f"🧩 **استخراج الفصول**\n📚 المكتمل: `0/{count}`\n"
-                f"✅ الناجح: `0`\n🖼️ الصور المستخرجة: `0`"
+                translate_ui_text(uid, f"🧩 استخراج الفصول\n📚 المكتمل: 0/{count}\n✅ الناجح: 0\n🖼️ الصور المستخرجة: 0")
             )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
@@ -3096,17 +3960,53 @@ async def handle_all_text(client,message):
 
             if not chapter_groups:
                 refund_merge(uid,count)
-                await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
+                await lm.edit_text(translate_ui_text(uid,"❌ لم يستخرج المحرك صور الفصول"))
                 return
-            await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n📥 جارٍ تنزيل `{total_images}` صورة بالتوازي وتجهيز ملف PDF...")
-            # One shared HTTP session; all chapter image requests run concurrently.
-            buf = await download_images_parallel(chapter_groups,client=client)
-            if not buf: refund_merge(uid, count); await lm.edit_text("❌ **فشل تجهيز ملف دمج الفصول.**\nتمت إعادة الرصيد إلى حسابك."); return
-            increment_download_count(uid); await lm.edit_text("📤 **اكتمل تجهيز الملف.**\nجارٍ رفع ملف PDF إلى تيليجرام...")
+            async def update_merge_download_progress(current, total, completed):
+                percent = min(100, int(completed * 100 / max(1, total)))
+                filled = min(10, percent // 10)
+                bar = "▰" * filled + "▱" * (10 - filled)
+                if completed >= total:
+                    status = "✅ اكتمل تنزيل جميع الفصول"
+                else:
+                    status = f"⬇️ جاري تنزيل صور الفصل {current} من {total}"
+                try:
+                    await lm.edit_text(
+                        translate_ui_text(
+                            uid,
+                            f"🧩 تجهيز ملف الفصول المدمجة\n{status}\n\n{bar} {percent}%\n📚 الفصول المكتملة: {completed}/{total}"
+                        )
+                    )
+                except Exception:
+                    pass
+
+            # Download chapters sequentially; images within each chapter stay parallel.
+            buf = await download_images_parallel(
+                chapter_groups, client=client, concurrency=8,
+                progress_callback=update_merge_download_progress,
+            )
+            if not buf:
+                refund_merge(uid, count)
+                await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
+                return
+            await lm.edit_text(
+                translate_ui_text(uid,"📤 يتم إرسال الملف إلى تيليجرام...\n\n") +
+                translate_ui_text(uid,"⚡ نسبة الإنجاز: 0%\n") +
+                translate_ui_text(uid,f"📦 الحجم المرسل: 0.0 MB من {buf.getbuffer().nbytes / (1024 * 1024):.1f} MB")
+            )
             safe_title = re.sub(r"_+", " ", re.sub(r'[\\/:*?"<>|]', '', title)).strip()[:50] or "manga"
             try:
-                await client.send_document(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
-                    caption=f"🧩 **ملف مدمج**\n\n📚 `{title}`\n📖 `{start_num:g}` → `{end_num:g}`\n📄 `{total_images}`", parse_mode=ParseMode.MARKDOWN)
+                await send_pdf_direct(chat_id=message.chat.id, document=buf, file_name=f"Merge {start_num:g}-{end_num:g} - {safe_title}.pdf",
+                    caption=f"🧩 ملف مدمج\n\n📚 <blockquote>{html.escape(str(title or ''))}</blockquote>\n📖 {start_num:g} → {end_num:g}\n📄 {total_images}", progress_message=lm)
+                increment_download_count(uid)
+            except Exception as upload_error:
+                refund_merge(uid, count)
+                print(f"[MTProto upload] {type(upload_error).__name__}: {upload_error}", flush=True)
+                await lm.edit_text(
+                    "❌ تعذّر رفع ملف PDF إلى تيليجرام.\\n"
+                    "تم إرجاع رصيد الدمج إلى حسابك؛ حاول مرة أخرى لاحقاً."
+                )
+                return
             finally:
                 try: buf.close()
                 except Exception: pass
@@ -3123,19 +4023,19 @@ async def handle_all_text(client,message):
         try:
             val = int(message.text.strip())
             if val < 0: raise ValueError
-        except: await message.reply_text("🔢 **المدخل غير صحيح**\nأرسل رقماً صحيحاً فقط، ثم حاول مجدداً."); return
+        except: await message.reply_text("🔢 المدخل غير صحيح\nأرسل رقماً صحيحاً فقط، ثم حاول مجدداً."); return
         if gs == "single":
             user_data[uid]["gift_link_single"] = val; user_data[uid]["gift_link_step"] = "merge"
-            await message.reply_text(f"✅ فردي: `{val}`\n\n🧩 **المدمجة**؟\n(0 للتخطي)\n\n/cancel", parse_mode=ParseMode.MARKDOWN); return
+            await message.reply_text(f"✅ فردي: {val}\n\n🧩 المدمجة؟\n(0 للتخطي)\n\n/cancel"); return
         if gs == "merge":
             user_data[uid]["gift_link_merge"] = val; user_data[uid]["gift_link_step"] = "max"
-            await message.reply_text(f"✅ دمج: `{val}`\n\n👥 **الحد الأقصى**؟\n(>0)\n\n/cancel", parse_mode=ParseMode.MARKDOWN); return
+            await message.reply_text(f"✅ دمج: {val}\n\n👥 الحد الأقصى؟\n(>0)\n\n/cancel"); return
         if gs == "max":
-            if val <= 0: await message.reply_text("👥 **عدد المستخدمين يجب أن يكون أكبر من صفر.** أرسل رقماً موجباً."); return
+            if val <= 0: await message.reply_text("👥 عدد المستخدمين يجب أن يكون أكبر من صفر. أرسل رقماً موجباً."); return
             user_data[uid]["gift_link_max"] = val; user_data[uid]["gift_link_step"] = "expiry"
-            await message.reply_text(f"✅ `{val}`\n\n⏰ الوحدة:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏰ ساعة", callback_data="gift_expiry_hours"), InlineKeyboardButton("⏱️ دقيقة", callback_data="gift_expiry_minutes")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+            await message.reply_text(f"✅ {val}\n\n⏰ الوحدة:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏰ ساعة", callback_data="gift_expiry_hours"), InlineKeyboardButton("⏱️ دقيقة", callback_data="gift_expiry_minutes")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]])); return
         if gs == "expiry_value":
-            if val <= 0: await message.reply_text("⏳ **مدة صلاحية الرابط يجب أن تكون أكبر من صفر.** أرسل قيمة موجبة."); return
+            if val <= 0: await message.reply_text("⏳ مدة صلاحية الرابط يجب أن تكون أكبر من صفر. أرسل قيمة موجبة."); return
             unit = user_data[uid].get("gift_expiry_unit", "hours"); seconds = val * 3600 if unit == "hours" else val * 60
             expires_at = time.time() + seconds
             single = user_data[uid]["gift_link_single"]; merge = user_data[uid]["gift_link_merge"]; max_users = user_data[uid]["gift_link_max"]
@@ -3143,8 +4043,8 @@ async def handle_all_text(client,message):
             bot = BOT_USERNAME or "bot"; link = f"https://t.me/{bot}?start=gift_{code}"
             unit_name = "ساعة" if unit == "hours" else "دقيقة"
             await message.reply_text(
-                f"✅ **تم إنشاء الرابط**\n\n🔗 `{link}`\n\n📖 `{single}`\n🧩 `{merge}`\n👥 `{max_users}`\n⏰ `{val}` {unit_name}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 هدية!')}")],[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
+                f"✅ تم إنشاء الرابط\n\n🔗 {link}\n\n📖 {single}\n🧩 {merge}\n👥 {max_users}\n⏰ {val} {unit_name}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 مشاركة", url=f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 هدية!')}")],[InlineKeyboardButton("⚙️ إدارة", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌ إغلاق", callback_data="close_list")]]))
             user_data.pop(uid, None); return
 
     if user_data.get(uid, {}).get("awaiting_gift_allowed_users"):
@@ -3152,38 +4052,67 @@ async def handle_all_text(client,message):
         for tok in re.split(r'[\s,]+', message.text.strip()):
             if not tok: continue
             try:
-                if tok.startswith("@"): u = await client.get_users(tok); ids.append(u.id)
-                else: ids.append(int(tok))
+                if tok.startswith("@"): continue
+                user_id = int(tok)
+                if user_id > 0: ids.append(user_id)
             except: pass
-        if not ids: await message.reply_text("⚠️ **لم أتعرف على أي مستخدم.**\nأرسل آيديات رقمية أو أسماء مستخدمين صحيحة مثل @username."); return
+        if not ids: await message.reply_text("⚠️ لم أتعرف على أي مستخدم.\nأرسل آيديات تيليجرام الرقمية فقط، مفصولة بمسافة أو فاصلة."); return
         set_gift_allowed_users(code, ids); user_data.pop(uid, None)
-        await message.reply_text(f"✅ `{len(ids)}` مستخدم", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+        await message.reply_text(f"✅ {len(ids)} مستخدم", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
     if user_data.get(uid, {}).get("awaiting_gift_channel"):
         code = user_data[uid]["awaiting_gift_channel"]; ch = message.text.strip()
-        if not (ch.startswith("@") or ch.startswith("-100")): await message.reply_text("📢 **معرّف القناة غير صحيح.**\nأرسل @username أو آيدي القناة الذي يبدأ بـ -100."); return
+        if not (ch.startswith("@") or ch.startswith("-100")): await message.reply_text("📢 معرّف القناة غير صحيح.\nأرسل @username أو آيدي القناة الذي يبدأ بـ -100."); return
         try:
             await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.id)
         except Exception as e: await message.reply_text(f"❌ {e}"); return
         set_gift_channel(code, ch); user_data.pop(uid, None)
-        await message.reply_text(f"✅ `{ch}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+        await message.reply_text(f"✅ {ch}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
     if user_data.get(uid, {}).get("awaiting_gift_post_interval"):
         code = user_data[uid]["awaiting_gift_post_interval"]
         try:
             h = int(message.text.strip())
             if h < 1 or h > 24: raise ValueError
-        except: await message.reply_text("⏰ **الفترة غير صحيحة.** أرسل عدداً من 1 إلى 24 ساعة."); return
+        except: await message.reply_text("⏰ الفترة غير صحيحة. أرسل عدداً من 1 إلى 24 ساعة."); return
         set_gift_interval(code, h); user_data.pop(uid, None)
-        await message.reply_text(f"✅ كل `{h}` ساعة", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN); return
+        await message.reply_text(f"✅ كل {h} ساعة", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
 
     if not is_admin_any(uid): return
+
+    if user_data.get(uid,{}).get("awaiting_app_message_link"):
+        link = message.text.strip()
+        if not _parse_telegram_post_link(link):
+            await message.reply_text(
+                "⚠️ الرابط غير صحيح. أرسل رابط منشور تيليجرام مثل:\n"
+                "https://t.me/MangaVirus2/159 أو https://t.me/c/123456789/159"
+            )
+            return
+        settings["app_message_link"] = link
+        save_settings()
+        user_data.pop(uid, None)
+        await message.reply_text(
+            "✅ تم حفظ رابط تطبيق البوت. سيظهر زر «📲 تطبيق بوت» في القائمة الرئيسية."
+        )
+        return
+    if user_data.get(uid,{}).get("awaiting_tutorial_video_url"):
+        link = message.text.strip()
+        if not re.match(r"^https?://\S+$", link, re.IGNORECASE):
+            await message.reply_text("⚠️ أرسل رابطاً صحيحاً يبدأ بـ https:// أو http://.")
+            return
+        settings["tutorial_video_url"] = link
+        save_settings()
+        user_data.pop(uid, None)
+        await message.reply_text(
+            "✅ تم حفظ رابط الفيديو التعليمي. سيظهر زر «🎬 آخر فيديو تعليمي» في القائمة الرئيسية."
+        )
+        return
 
     if user_data.get(uid,{}).get("awaiting_merge_limit"):
         try:
             v=int(message.text.strip())
-            if v<2: await message.reply_text("🧩 **حد الدمج يجب أن يكون 2 على الأقل.** أرسل قيمة أكبر أو تساوي 2."); return
+            if v<2: await message.reply_text("🧩 حد الدمج يجب أن يكون 2 على الأقل. أرسل قيمة أكبر أو تساوي 2."); return
             settings["merge_daily_limit"]=v; save_settings(); user_data.pop(uid,None)
-            await message.reply_text(f"✅ `{v}`")
-        except: await message.reply_text("🔢 **قيمة حد الدمج غير صالحة.** أرسل رقماً صحيحاً لا يقل عن 2.")
+            await message.reply_text(f"✅ {v}")
+        except: await message.reply_text("🔢 قيمة حد الدمج غير صالحة. أرسل رقماً صحيحاً لا يقل عن 2.")
         return
     if user_data.get(uid,{}).get("awaiting_merge_max"):
         try:
@@ -3191,186 +4120,186 @@ async def handle_all_text(client,message):
             if v<2 or v>PDF_MAX_CHAPTERS:
                 await message.reply_text("⚠️ الحد المسموح من 2 إلى 10"); return
             settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
-            await message.reply_text(f"✅ الحد لكل ملف: `{v}`")
-        except: await message.reply_text("🔢 **قيمة حد الفصول في الملف غير صالحة.** أرسل رقماً ضمن الحد المسموح.")
+            await message.reply_text(f"✅ الحد لكل ملف: {v}")
+        except: await message.reply_text("🔢 قيمة حد الفصول في الملف غير صالحة. أرسل رقماً ضمن الحد المسموح.")
         return
     if user_data.get(uid,{}).get("awaiting_daily_amount"):
         try:
             v=int(message.text.strip())
             if v<=0: raise ValueError
             settings["daily_reward_amount"]=v; save_settings(); user_data.pop(uid,None)
-            await message.reply_text(f"✅ `{v}`")
-        except: await message.reply_text("🔢 **عدد الفصول اليومي غير صالح.** أرسل رقماً أكبر من صفر.")
+            await message.reply_text(f"✅ {v}")
+        except: await message.reply_text("🔢 عدد الفصول اليومي غير صالح. أرسل رقماً أكبر من صفر.")
         return
     if user_data.get(uid,{}).get("awaiting_ref_single_amount"):
-        try: settings["referral_bonus_single"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🔗 **تم تحديث مكافأة الإحالة للفصول الفردية بنجاح.**")
-        except: await message.reply_text("🔢 **قيمة مكافأة الإحالة الفردية غير صحيحة.** أرسل رقماً صحيحاً.")
+        try: settings["referral_bonus_single"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🔗 تم تحديث مكافأة الإحالة للفصول الفردية بنجاح.")
+        except: await message.reply_text("🔢 قيمة مكافأة الإحالة الفردية غير صحيحة. أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_ref_merge_amount"):
-        try: settings["referral_bonus_merge"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🧩 **تم تحديث مكافأة الإحالة للفصول المدمجة بنجاح.**")
-        except: await message.reply_text("🔢 **قيمة مكافأة الإحالة للدمج غير صحيحة.** أرسل رقماً صحيحاً.")
+        try: settings["referral_bonus_merge"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("🧩 تم تحديث مكافأة الإحالة للفصول المدمجة بنجاح.")
+        except: await message.reply_text("🔢 قيمة مكافأة الإحالة للدمج غير صحيحة. أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_id"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد فصول الدمج التي تريد إضافتها له:"); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        user_data[uid]={"awaiting_merge_gift_one_amount":tid}; await message.reply_text(f"👤 تم تحديد المستخدم {tid}\n🎁 أرسل عدد فصول الدمج التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_merge_gift_one_amount"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("🔢 **عدد فصول الدمج غير صالح.** أرسل رقماً صحيحاً."); return
+        except: await message.reply_text("🔢 عدد فصول الدمج غير صالح. أرسل رقماً صحيحاً."); return
         tid=user_data[uid]["awaiting_merge_gift_one_amount"]; add_merge_bonus(tid,a)
-        await message.reply_text(f"🧩 **تمت إضافة {a} من فصول الدمج إلى المستخدم** `{tid}`.")
-        try: await client.send_message(tid,f"🧩 +{a} دمج",parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text(f"🧩 تمت إضافة {a} من فصول الدمج إلى المستخدم {tid}.")
+        try: await client.send_message(tid,f"🧩 +{a} دمج")
         except: pass
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_merge_gift_all"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("🔢 **عدد الهدية غير صالح.** أرسل رقماً صحيحاً."); return
-        await message.reply_text(f"🎁 **جارٍ توزيع {a} من فصول الدمج على جميع المستخدمين...**\nيرجى الانتظار حتى تظهر نتيجة الإرسال.")
+        except: await message.reply_text("🔢 عدد الهدية غير صالح. أرسل رقماً صحيحاً."); return
+        await message.reply_text(f"🎁 جارٍ توزيع {a} من فصول الدمج على جميع المستخدمين...\nيرجى الانتظار حتى تظهر نتيجة الإرسال.")
         s=f=0
         for u in get_all_user_ids():
             try:
                 add_merge_bonus(u,a)
-                try: await client.send_message(u,f"🧩 +{a} دمج",parse_mode=ParseMode.MARKDOWN); s+=1
+                try: await client.send_message(u,f"🧩 +{a} دمج"); s+=1
                 except: f+=1
                 await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"🎉 **اكتمل توزيع هدية الدمج**\n✅ وصل إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
+        user_data.pop(uid,None); await message.reply_text(f"🎉 اكتمل توزيع هدية الدمج\n✅ وصل إلى: {s} مستخدم\n❌ تعذّر الإرسال إلى: {f} مستخدم"); return
     if user_data.get(uid,{}).get("awaiting_vip_contact"):
         t=message.text.strip()
-        if t.startswith("@") and len(t)>=4: settings["vip_contact_second"]=t; save_settings(); user_data.pop(uid,None); await message.reply_text(f"✅ `{t}`"); return
-        await message.reply_text("👤 **اسم المستخدم غير صحيح.** أرسل معرفاً يبدأ بـ @ مثل @username."); return
+        if t.startswith("@") and len(t)>=4: settings["vip_contact_second"]=t; save_settings(); user_data.pop(uid,None); await message.reply_text(f"✅ {t}"); return
+        await message.reply_text("👤 اسم المستخدم غير صحيح. أرسل معرفاً يبدأ بـ @ مثل @username."); return
     if user_data.get(uid,{}).get('awaiting_broadcast'):
-        t=message.text; await message.reply_text("📢 **بدأ إرسال الإعلان إلى المستخدمين.**\nسأعرض لك عدد الرسائل الناجحة والفاشلة بعد الانتهاء.")
+        t=message.text; await message.reply_text("📢 بدأ إرسال الإعلان إلى المستخدمين.\nسأعرض لك عدد الرسائل الناجحة والفاشلة بعد الانتهاء.")
         s=f=0
         for u in get_all_user_ids():
-            try: await client.send_message(u,f"📢 **إعلان**\n\n{t}",parse_mode=ParseMode.MARKDOWN); s+=1; await asyncio.sleep(0.05)
+            try: await client.send_message(u,f"📢 إعلان\n\n{t}"); s+=1; await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"📢 **اكتمل إرسال الإعلان**\n✅ تم الإرسال إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
+        user_data.pop(uid,None); await message.reply_text(f"📢 اكتمل إرسال الإعلان\n✅ تم الإرسال إلى: {s} مستخدم\n❌ تعذّر الإرسال إلى: {f} مستخدم"); return
     for k in ['awaiting_bdf','awaiting_welcome_image','awaiting_favorites_image','awaiting_results_image','awaiting_sources_image','awaiting_sub_image']:
-        if user_data.get(uid,{}).get(k): await message.reply_text("🖼️ **مطلوب إرسال صورة**\nأرسل الصورة كصورة داخل تيليجرام، وليس كنص.\n\nللإلغاء أرسل /cancel"); return
+        if user_data.get(uid,{}).get(k): await message.reply_text("🖼️ مطلوب إرسال صورة\nأرسل الصورة كصورة داخل تيليجرام، وليس كنص.\n\nللإلغاء أرسل /cancel"); return
     if user_data.get(uid,{}).get('awaiting_welcome'):
-        settings["welcome_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("👋 **تم حفظ رسالة الترحيب الجديدة بنجاح.**"); return
+        settings["welcome_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("👋 تم حفظ رسالة الترحيب الجديدة بنجاح."); return
     if user_data.get(uid,{}).get('awaiting_sub_channel_add'):
         ch=message.text.strip(); ch=ch[1:] if ch.startswith("@") else ch; c2="@"+ch
         chs=settings.get("force_sub_channels",[])
         if c2 not in chs: chs.append(c2); settings["force_sub_channels"]=chs; save_settings()
-        user_data.pop(uid,None); await message.reply_text(f"📢 **تمت إضافة قناة الاشتراك الإجباري** `{c2}` بنجاح."); return
+        user_data.pop(uid,None); await message.reply_text(f"📢 تمت إضافة قناة الاشتراك الإجباري {c2} بنجاح."); return
     if user_data.get(uid,{}).get("awaiting_sub_btn_name"):
         ch=user_data[uid]["awaiting_sub_btn_name"]; b=settings.get("force_sub_buttons",{}); b[ch]=message.text.strip()
-        settings["force_sub_buttons"]=b; save_settings(); user_data.pop(uid,None); await message.reply_text("🔘 **تم تحديث اسم زر الاشتراك بنجاح.**"); return
+        settings["force_sub_buttons"]=b; save_settings(); user_data.pop(uid,None); await message.reply_text("🔘 تم تحديث اسم زر الاشتراك بنجاح."); return
     if user_data.get(uid,{}).get('awaiting_sub_message'):
-        settings["force_sub_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("📢 **تم حفظ رسالة الاشتراك الإجباري بنجاح.**"); return
+        settings["force_sub_message"]=message.text; save_settings(); user_data.pop(uid,None); await message.reply_text("📢 تم حفظ رسالة الاشتراك الإجباري بنجاح."); return
     if user_data.get(uid,{}).get("awaiting_single_caption"):
         txt=message.text
         if "{chapter}" not in txt and "{title}" not in txt: await message.reply_text("⚠️ {chapter}/{title}"); return
-        settings["single_caption"]=make_quote(txt); save_settings(); user_data.pop(uid,None); await message.reply_text("📄 **تم حفظ وصف ملف الفصل الجديد.**"); return
+        settings["single_caption"]=make_quote(txt); save_settings(); user_data.pop(uid,None); await message.reply_text("📄 تم حفظ وصف ملف الفصل الجديد."); return
     if user_data.get(uid,{}).get("awaiting_reward_amount"):
-        try: settings["daily_reward_amount"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("💰 **تم تحديث مكافأة الفصول اليومية بنجاح.**")
-        except: await message.reply_text("🔢 **قيمة المكافأة اليومية غير صحيحة.** أرسل رقماً صحيحاً.")
+        try: settings["daily_reward_amount"]=int(message.text.strip()); save_settings(); user_data.pop(uid,None); await message.reply_text("💰 تم تحديث مكافأة الفصول اليومية بنجاح.")
+        except: await message.reply_text("🔢 قيمة المكافأة اليومية غير صحيحة. أرسل رقماً صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_reward_interval"):
         try:
             h=int(message.text.strip()); settings["daily_reward_interval"]=h*3600; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ {h} ساعة")
-        except: await message.reply_text("⏰ **مدة التجديد غير صحيحة.** أرسل عدد ساعات صحيحاً.")
+        except: await message.reply_text("⏰ مدة التجديد غير صحيحة. أرسل عدد ساعات صحيحاً.")
         return
     if user_data.get(uid,{}).get("awaiting_gift_all"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("🔢 **عدد الفصول المجانية غير صالح.** أرسل رقماً صحيحاً."); return
-        await message.reply_text(f"🎁 **جارٍ توزيع {a} من الفصول المجانية على المستخدمين...**\nيرجى الانتظار حتى يكتمل التوزيع.")
+        except: await message.reply_text("🔢 عدد الفصول المجانية غير صالح. أرسل رقماً صحيحاً."); return
+        await message.reply_text(f"🎁 جارٍ توزيع {a} من الفصول المجانية على المستخدمين...\nيرجى الانتظار حتى يكتمل التوزيع.")
         s=f=0
         for u in get_all_user_ids():
             try:
                 add_bonus(u,a)
-                try: await client.send_message(u,f"🎁 +{a}",parse_mode=ParseMode.MARKDOWN); s+=1
+                try: await client.send_message(u,f"🎁 +{a}"); s+=1
                 except: f+=1
                 await asyncio.sleep(0.05)
             except: f+=1
-        user_data.pop(uid,None); await message.reply_text(f"🎁 **اكتمل توزيع الفصول المجانية**\n✅ وصل إلى: `{s}` مستخدم\n❌ تعذّر الإرسال إلى: `{f}` مستخدم"); return
+        user_data.pop(uid,None); await message.reply_text(f"🎁 اكتمل توزيع الفصول المجانية\n✅ وصل إلى: {s} مستخدم\n❌ تعذّر الإرسال إلى: {f} مستخدم"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_id"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"👤 **تم تحديد المستخدم** `{tid}`\n🎁 أرسل عدد الفصول المجانية التي تريد إضافتها له:"); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        user_data[uid]={"awaiting_gift_one_amount":tid}; await message.reply_text(f"👤 تم تحديد المستخدم {tid}\n🎁 أرسل عدد الفصول المجانية التي تريد إضافتها له:"); return
     if user_data.get(uid,{}).get("awaiting_gift_one_amount"):
         try: a=int(message.text.strip())
-        except: await message.reply_text("🔢 **عدد الفصول المجانية غير صالح.** أرسل رقماً صحيحاً."); return
+        except: await message.reply_text("🔢 عدد الفصول المجانية غير صالح. أرسل رقماً صحيحاً."); return
         tid=user_data[uid]["awaiting_gift_one_amount"]; add_bonus(tid,a)
-        await message.reply_text(f"🎁 **تمت إضافة {a} من الفصول المجانية إلى المستخدم** `{tid}`.")
-        try: await client.send_message(tid,f"🎁 +{a}",parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text(f"🎁 تمت إضافة {a} من الفصول المجانية إلى المستخدم {tid}.")
+        try: await client.send_message(tid,f"🎁 +{a}")
         except: pass
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_reset_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        reset_user_balance(tid); await message.reply_text(f"♻️ **تم تصفير رصيد المستخدم** `{tid}` بنجاح."); user_data.pop(uid,None); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        reset_user_balance(tid); await message.reply_text(f"♻️ تم تصفير رصيد المستخدم {tid} بنجاح."); user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_ban_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("🛡️ **لا يمكن حظر أدمن أو مالك البوت.**"); user_data.pop(uid,None); return
-        if ban_user(tid): await message.reply_text(f"🚫 **تم حظر المستخدم** `{tid}` بنجاح.")
-        else: await message.reply_text("⚠️ **لم يتم حظر المستخدم.** ربما هو محظور مسبقاً أو آيديه غير صحيح.")
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        if tid in OWNER_IDS or tid in ADMINS: await message.reply_text("🛡️ لا يمكن حظر أدمن أو مالك البوت."); user_data.pop(uid,None); return
+        if ban_user(tid): await message.reply_text(f"🚫 تم حظر المستخدم {tid} بنجاح.")
+        else: await message.reply_text("⚠️ لم يتم حظر المستخدم. ربما هو محظور مسبقاً أو آيديه غير صحيح.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_unban_user"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        if unban_user(tid): await message.reply_text(f"🔓 **تم رفع الحظر عن المستخدم** `{tid}` بنجاح.")
-        else: await message.reply_text("⚠️ **لم يتم رفع الحظر.** تأكد من أن المستخدم موجود في قائمة المحظورين.")
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        if unban_user(tid): await message.reply_text(f"🔓 تم رفع الحظر عن المستخدم {tid} بنجاح.")
+        else: await message.reply_text("⚠️ لم يتم رفع الحظر. تأكد من أن المستخدم موجود في قائمة المحظورين.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_add_admin"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
         ok,m=add_added_admin(tid)
         if ok:
-            await message.reply_text(f"👮 **تمت إضافة المستخدم** `{tid}` **كمشرف بنجاح.**")
-            try: await client.send_message(tid,"👮 **تمت إضافتك إلى فريق إدارة البوت.**\nيمكنك استخدام /admin لعرض لوحة الأدمن المتاحة لك.",parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(f"👮 تمت إضافة المستخدم {tid} كمشرف بنجاح.")
+            try: await client.send_message(tid,"👮 تمت إضافتك إلى فريق إدارة البوت.\nيمكنك استخدام /admin لعرض لوحة الأدمن المتاحة لك.")
             except: pass
-        else: await message.reply_text(f"⚠️ **تعذرت إضافة الأدمن:** {m}")
+        else: await message.reply_text(f"⚠️ تعذرت إضافة الأدمن: {m}")
         user_data.pop(uid,None); return
     plan=user_data.get(uid,{}).get("awaiting_vip_user")
     if plan:
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
         if add_vip(tid,plan):
             info=get_vip_info(tid); dy=max(0,int((info["expires"]-time.time())//86400))
-            await message.reply_text(f"👑 **تم تفعيل VIP للمستخدم** `{tid}`\n📅 الخطة: {VIP_PLAN_NAMES[plan]}\n⏳ المدة المتبقية: `{dy}` يوم")
-            try: await client.send_message(tid,f"🎉 **تم تفعيل اشتراك VIP لك!**\n👑 الخطة: {VIP_PLAN_NAMES[plan]}",parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(f"👑 تم تفعيل VIP للمستخدم {tid}\n📅 الخطة: {VIP_PLAN_NAMES[plan]}\n⏳ المدة المتبقية: {dy} يوم")
+            try: await client.send_message(tid,f"🎉 تم تفعيل اشتراك VIP لك!\n👑 الخطة: {VIP_PLAN_NAMES[plan]}")
             except: pass
-        else: await message.reply_text("⚠️ **تعذّر تفعيل VIP.** تحقق من آيدي المستخدم وحالة اشتراكه.")
+        else: await message.reply_text("⚠️ تعذّر تفعيل VIP. تحقق من آيدي المستخدم وحالة اشتراكه.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_vip_remove"):
         t=message.text.strip(); tid=None
-        try: tid=(await client.get_users(t)).id if t.startswith("@") else int(t)
-        except: await message.reply_text("👤 **لم أتمكن من العثور على المستخدم.** أرسل آيدياً صحيحاً أو @username."); return
-        if remove_vip(tid): await message.reply_text(f"👑 **تم إلغاء اشتراك VIP للمستخدم** `{tid}`.")
-        else: await message.reply_text("⚠️ **لم يتم إلغاء VIP.** قد لا يكون المستخدم مشتركاً حالياً.")
+        try: tid=int(t)
+        except: await message.reply_text("👤 لم أتمكن من العثور على المستخدم. أرسل آيدي تيليجرام الرقمي فقط."); return
+        if remove_vip(tid): await message.reply_text(f"👑 تم إلغاء اشتراك VIP للمستخدم {tid}.")
+        else: await message.reply_text("⚠️ لم يتم إلغاء VIP. قد لا يكون المستخدم مشتركاً حالياً.")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_bot_token"):
         parts=[p.strip() for p in message.text.strip().split("|")]
-        if len(parts)!=3: await message.reply_text("🤖 **صيغة إضافة البوت غير صحيحة.** أرسل البيانات بهذا الترتيب:\n`اسم البوت | التوكن | آيدي الهدف`"); return
+        if len(parts)!=3: await message.reply_text("🤖 صيغة إضافة البوت غير صحيحة. أرسل البيانات بهذا الترتيب:\nاسم البوت | التوكن | آيدي الهدف"); return
         bn,tk,tid_s=parts
         try: target_id=int(tid_s)
-        except: await message.reply_text("🆔 **آيدي الهدف غير صحيح.** أرسل آيدياً رقمياً."); return
-        await message.reply_text("🔎 **جارٍ التحقق من توكن البوت عبر تيليجرام...**\nيرجى الانتظار.")
+        except: await message.reply_text("🆔 آيدي الهدف غير صحيح. أرسل آيدياً رقمياً."); return
+        await message.reply_text("🔎 جارٍ التحقق من توكن البوت عبر تيليجرام...\nيرجى الانتظار.")
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get(f"https://api.telegram.org/bot{tk}/getMe",timeout=10) as r:
                     d=await r.json()
-                    if not d.get("ok"): await message.reply_text("🤖 **التوكن غير صالح أو لم يقبله تيليجرام.**"); user_data.pop(uid,None); return
+                    if not d.get("ok"): await message.reply_text("🤖 التوكن غير صالح أو لم يقبله تيليجرام."); user_data.pop(uid,None); return
                     ru=d["result"].get("username","?")
-        except: await message.reply_text("🌐 **تعذّر الاتصال بواجهة تيليجرام للتحقق من التوكن.** حاول مرة أخرى."); user_data.pop(uid,None); return
+        except: await message.reply_text("🌐 تعذّر الاتصال بواجهة تيليجرام للتحقق من التوكن. حاول مرة أخرى."); user_data.pop(uid,None); return
         ok,m,bid=add_bot_token(tk,bn,uid,target_id=target_id)
         if ok: await message.reply_text(f"✅ @{ru}")
         else: await message.reply_text(f"⚠️ {m}")
         user_data.pop(uid,None); return
     if user_data.get(uid,{}).get("awaiting_backup_restore"):
-        await message.reply_text("📦 **الملف غير صالح**\nأرسل نسخة احتياطية بصيغة ZIP."); return
+        await message.reply_text("📦 الملف غير صالح\nأرسل نسخة احتياطية بصيغة ZIP."); return
 
 @app.on_message(filters.photo & filters.private)
 async def handle_images(client,message):
@@ -3381,7 +4310,7 @@ async def handle_images(client,message):
              'awaiting_sources_image':('sources_image','مصادر'),'awaiting_sub_image':('force_sub_image','اشتراك')}
     for key,(field,label) in mapping.items():
         if user_data.get(uid,{}).get(key):
-            settings[field]=message.photo.file_id; save_settings(); user_data.pop(uid,None)
+            settings[field]=message.photo[-1].file_id; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ {label}"); return
 
 @app.on_message(filters.document & filters.private)
@@ -3390,9 +4319,9 @@ async def handle_documents(client,message):
     if not is_admin_any(uid): return
     fn = message.document.file_name or ""
     if not fn.lower().endswith(".zip"):
-        if user_data.get(uid,{}).get("awaiting_backup_restore"): await message.reply_text("📦 **صيغة الملف غير مدعومة**\nيجب أن تكون النسخة الاحتياطية بامتداد ZIP.")
+        if user_data.get(uid,{}).get("awaiting_backup_restore"): await message.reply_text("📦 صيغة الملف غير مدعومة\nيجب أن تكون النسخة الاحتياطية بامتداد ZIP.")
         return
-    await message.reply_text("📥 **بدأ تنزيل النسخة الاحتياطية.**\nيرجى الانتظار حتى يكتمل الفحص والاستعادة.")
+    await message.reply_text("📥 بدأ تنزيل النسخة الاحتياطية.\nيرجى الانتظار حتى يكتمل الفحص والاستعادة.")
     try:
         tp = await message.download(); ok, r, err = restore_from_zip(tp)
         try: os.remove(tp)
@@ -3456,7 +4385,7 @@ async def check_new_chapters():
 
 async def check_vip_expiry():
     for u in get_expired_vips():
-        try: await app.send_message(int(u),"⚠️ **انتهى VIP**",parse_mode=ParseMode.MARKDOWN)
+        try: await app.send_message(int(u),"⚠️ انتهى VIP")
         except: pass
         remove_vip(u)
 
@@ -3507,8 +4436,25 @@ if __name__ == "__main__":
                 asyncio.create_task(latest_manga_refresh_task(), name="latest_manga_refresh_task"),
             ]
 
-            print("✅ البوت يعمل. لإيقافه اضغط Ctrl+C", flush=True)
-            await stop_event.wait()
+            print("✅ البوت يعمل عبر aiogram 3. لإيقافه اضغط Ctrl+C", flush=True)
+            polling_task = asyncio.create_task(
+                app.dispatcher.start_polling(app.bot, handle_signals=False),
+                name="telegram_polling",
+            )
+            stop_task = asyncio.create_task(stop_event.wait(), name="shutdown_signal")
+            try:
+                done, _ = await asyncio.wait(
+                    (polling_task, stop_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # Surface polling failures instead of leaving the process hanging.
+                if polling_task in done:
+                    await polling_task
+            finally:
+                for task in (polling_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(polling_task, stop_task, return_exceptions=True)
 
         finally:
             # Remove custom signal handlers before closing the event loop.
@@ -3530,6 +4476,10 @@ if __name__ == "__main__":
                     await app.stop()
                 except Exception:
                     pass
+            try:
+                await close_mtproto_uploader()
+            except Exception:
+                pass
 
     try:
         app.run(_bootstrap())
