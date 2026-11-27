@@ -1969,7 +1969,7 @@ async def publish_gift_now(client, admin_uid, code):
         pass
         _execute("DELETE FROM gift_links WHERE code=?", (new_code,))
         return False, f'فشل النشر: {e}', None
-    _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.id, time.time() + interval * 3600, new_code))
+    _execute("UPDATE gift_links SET channel_message_id=?, next_post_at=? WHERE code=?", (m.message_id, time.time() + interval * 3600, new_code))
     return True, None, new_code
 
 async def _process_gift_claim(client, cid, uid, code):
@@ -4120,7 +4120,7 @@ async def handle_all_text(client,message):
         code = user_data[uid]["awaiting_gift_channel"]; ch = message.text.strip()
         if not (ch.startswith("@") or ch.startswith("-100")): await message.reply_text("📢 معرّف القناة غير صحيح.\nأرسل @username أو آيدي القناة الذي يبدأ بـ -100."); return
         try:
-            await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.id)
+            await client.get_chat(ch); test = await client.send_message(ch, "✅"); await client.delete_messages(ch, test.message_id)
         except Exception as e: await message.reply_text(f"❌ {e}"); return
         set_gift_channel(code, ch); user_data.pop(uid, None)
         await message.reply_text(f"✅ {ch}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️", callback_data=f"admin_gift_manage_{code}")],[InlineKeyboardButton("❌", callback_data="close_list")]])); return
