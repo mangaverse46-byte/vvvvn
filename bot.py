@@ -3842,7 +3842,7 @@ async def handle_all_text(client,message):
             api = await asyncio.to_thread(get_source,src)
 
             # Extract chapter image lists concurrently, while showing completed chapter counts.
-            extract_sem = asyncio.Semaphore(6)
+            extract_sem = asyncio.Semaphore(16)
             progress_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
