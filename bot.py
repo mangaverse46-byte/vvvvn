@@ -3381,7 +3381,14 @@ async def unified_callback(client,callback):
         try:
             api=await asyncio.to_thread(get_source,src)
             res=await asyncio.to_thread(api.search,q)
-        except Exception as e:  pass
+        except Exception as e:
+            error_text = str(e).replace("\\n", " ")[:220]
+            await client.send_message(
+                cid,
+                translate_ui_text(uid, f"❌ تعذر تنفيذ البحث في هذا المصدر.\\nالسبب: {error_text}"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 بحث جديد", callback_data="main_search")]])
+            )
+            return
         if not res:
             try: await msg.delete()
             except: pass
@@ -3598,7 +3605,8 @@ async def unified_callback(client,callback):
             await callback.answer("🔙"); return
         if data=="sec_broadcast_stats":
             await msg.edit_text(
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+                "📊 الإحصائيات والبث\nاختر الإجراء:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊 الإحصائيات",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("📊"); return
         if data=="admin_broadcast":
             await msg.delete(); await msg.reply_text("📢 إرسال إعلان للمستخدمين\nأرسل نص الإعلان الذي تريد نشره للجميع.\n\nللإلغاء أرسل /cancel")
