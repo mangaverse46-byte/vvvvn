@@ -456,7 +456,7 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None):
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=8):
     """Download original image bytes and assemble the PDF with img2pdf."""
     import aiohttp
 
@@ -467,16 +467,16 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not image_urls:
         return None
 
-    timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=40)
+    timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
     connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
-    semaphore = asyncio.Semaphore(16)
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
     downloaded = [None] * len(image_urls)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
         async def fetch(position, url):
             async with semaphore:
-                for attempt in range(3):
+                for attempt in range(4):
                     try:
                         async with session.get(url, allow_redirects=True) as response:
                             if response.status == 200:
@@ -490,16 +490,16 @@ async def create_pdf_from_images(urls, client=None, headers=None):
                                     delay = min(20.0, max(0.5, float(retry)))
                                 except (TypeError, ValueError):
                                     delay = min(8.0, 0.5 * (2 ** attempt))
-                                if attempt < 2:
+                                if attempt < 3:
                                     await asyncio.sleep(delay)
                                     continue
                             else:
                                 return
                     except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                        if attempt == 2:
+                        if attempt == 3:
                             return
                     if attempt < 2:
-                        await asyncio.sleep(0.2 * (attempt + 1))
+                        await asyncio.sleep(0.25 * (attempt + 1))
 
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
@@ -525,8 +525,8 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         print(f"[PDF creation] {type(exc).__name__}: {exc}", flush=True)
         return None
 
-async def download_images_parallel(urls, client=None, headers=None):
-    return await create_pdf_from_images(urls, client=client, headers=headers)
+async def download_images_parallel(urls, client=None, headers=None, concurrency=8):
+    return await create_pdf_from_images(urls, client=client, headers=headers, concurrency=concurrency)
 
 def get_source(source_id):
     """Return the API-backed adapter for one enabled manga source."""
@@ -3912,7 +3912,7 @@ async def handle_all_text(client,message):
             merge_bar_task = asyncio.create_task(merge_loading_bar())
             try:
                 # One shared HTTP session; all chapter image requests run concurrently.
-                buf = await download_images_parallel(chapter_groups,client=client)
+                buf = await download_images_parallel(chapter_groups,client=client,concurrency=16)
             finally:
                 merge_timer_stop.set()
                 await merge_bar_task
