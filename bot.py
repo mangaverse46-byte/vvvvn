@@ -809,25 +809,57 @@ async def _reopen_admin_page(client, uid, msg, cb_data):
     except Exception as e:  pass
 
 # ============ SQLite ============
-DB_PATH = "bot.db"; _local = threading.local(); _write_lock = threading.Lock()
+DB_PATH = "bot.db"
+_local = threading.local()
+_write_lock = threading.RLock()
+_db_init_lock = threading.Lock()
+
 def _conn():
+    """اتصال SQLite مستقل لكل thread، دون تغيير journal_mode عند كل اتصال."""
     if not hasattr(_local, "conn"):
-        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
-        c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=NORMAL")
-        c.execute("PRAGMA busy_timeout=30000"); c.row_factory = sqlite3.Row
+        c = sqlite3.connect(
+            DB_PATH,
+            check_same_thread=False,
+            timeout=60,
+            isolation_level="DEFERRED",
+        )
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=60000")
+        c.execute("PRAGMA synchronous=NORMAL")
         _local.conn = c
     return _local.conn
+
+def _enable_wal(c):
+    """تفعيل WAL مرة واحدة عند تهيئة قاعدة البيانات."""
+    for attempt in range(6):
+        try:
+            mode = c.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt == 5:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
 def _execute(sql, params=()):
-    for attempt in range(3):
+    """تنفيذ الكتابة بقفل موحد وإعادة محاولة تدريجية عند SQLITE_BUSY/LOCKED."""
+    for attempt in range(6):
         try:
             with _write_lock:
-                c = _conn(); cur = c.execute(sql, params); c.commit(); return cur
+                c = _conn()
+                cur = c.execute(sql, params)
+                c.commit()
+                return cur
         except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < 2: time.sleep(0.5)
-            else: raise
+            if "locked" not in str(e).lower() or attempt == 5:
+                raise
+            time.sleep(0.25 * (attempt + 1))
 
 def _init_db():
-    c = _conn()
+    with _db_init_lock:
+        c = _conn()
+        _enable_wal(c)
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS user_languages (uid INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'ar');
@@ -1462,10 +1494,11 @@ def get_user_joined(uid):
 def increment_user_downloads(uid):
     try: u = int(uid)
     except: return
-    with _write_lock:
-        c = _conn()
-        c.execute("INSERT OR IGNORE INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time()))
-        c.execute("UPDATE users SET downloads = downloads + 1 WHERE uid=?", (u,)); c.commit()
+    _execute(
+        """INSERT INTO users (uid, joined, downloads) VALUES (?,?,1)
+           ON CONFLICT(uid) DO UPDATE SET downloads = downloads + 1""",
+        (u, time.time()),
+    )
 def increment_download_count(uid=None):
     _execute("UPDATE download_stats SET total_downloads = total_downloads + 1 WHERE id = 1")
     if uid is not None: increment_user_downloads(uid)
