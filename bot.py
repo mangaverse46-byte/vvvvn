@@ -3045,9 +3045,9 @@ async def handle_all_text(client,message):
                             snapshot = dict(progress)
                         try:
                             await lm.edit_text(
-                                f"🧩 **استخراج الفصول**\\n"
-                                f"📚 المكتمل: `{snapshot['done']}/{count}`\\n"
-                                f"✅ الناجح: `{snapshot['ok']}`\\n"
+                                f"🧩 **استخراج الفصول**\n"
+                                f"📚 المكتمل: `{snapshot['done']}/{count}`\n"
+                                f"✅ الناجح: `{snapshot['ok']}`\n"
                                 f"🖼️ الصور المستخرجة: `{snapshot['images']}`"
                             )
                         except Exception:
@@ -3055,8 +3055,8 @@ async def handle_all_text(client,message):
                 return index, urls or None
 
             await lm.edit_text(
-                f"🧩 **استخراج الفصول**\\n📚 المكتمل: `0/{count}`\\n"
-                f"✅ الناجح: `0`\\n🖼️ الصور المستخرجة: `0`"
+                f"🧩 **استخراج الفصول**\n📚 المكتمل: `0/{count}`\n"
+                f"✅ الناجح: `0`\n🖼️ الصور المستخرجة: `0`"
             )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
@@ -3067,8 +3067,8 @@ async def handle_all_text(client,message):
             if failed_chapters:
                 refund_merge(uid, count)
                 await lm.edit_text(
-                    f"❌ **تعذر استخراج {len(failed_chapters)} من {count} فصول.**\\n"
-                    "لم يتم إنشاء ملف ناقص، وتمت إعادة رصيد الدمج كاملاً.\\n"
+                    f"❌ **تعذر استخراج {len(failed_chapters)} من {count} فصول.**\n"
+                    "لم يتم إنشاء ملف ناقص، وتمت إعادة رصيد الدمج كاملاً.\n"
                     "حاول مرة أخرى بعد قليل."
                 )
                 return
