@@ -809,25 +809,57 @@ async def _reopen_admin_page(client, uid, msg, cb_data):
     except Exception as e:  pass
 
 # ============ SQLite ============
-DB_PATH = "bot.db"; _local = threading.local(); _write_lock = threading.Lock()
+DB_PATH = "bot.db"
+_local = threading.local()
+_write_lock = threading.RLock()
+_db_init_lock = threading.Lock()
+
 def _conn():
+    """اتصال SQLite مستقل لكل thread، دون تغيير journal_mode عند كل اتصال."""
     if not hasattr(_local, "conn"):
-        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
-        c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=NORMAL")
-        c.execute("PRAGMA busy_timeout=30000"); c.row_factory = sqlite3.Row
+        c = sqlite3.connect(
+            DB_PATH,
+            check_same_thread=False,
+            timeout=60,
+            isolation_level="DEFERRED",
+        )
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=60000")
+        c.execute("PRAGMA synchronous=NORMAL")
         _local.conn = c
     return _local.conn
+
+def _enable_wal(c):
+    """تفعيل WAL مرة واحدة عند تهيئة قاعدة البيانات."""
+    for attempt in range(6):
+        try:
+            mode = c.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() != "wal":
+                c.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt == 5:
+                raise
+            time.sleep(0.25 * (attempt + 1))
+
 def _execute(sql, params=()):
-    for attempt in range(3):
+    """تنفيذ الكتابة بقفل موحد وإعادة محاولة تدريجية عند SQLITE_BUSY/LOCKED."""
+    for attempt in range(6):
         try:
             with _write_lock:
-                c = _conn(); cur = c.execute(sql, params); c.commit(); return cur
+                c = _conn()
+                cur = c.execute(sql, params)
+                c.commit()
+                return cur
         except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < 2: time.sleep(0.5)
-            else: raise
+            if "locked" not in str(e).lower() or attempt == 5:
+                raise
+            time.sleep(0.25 * (attempt + 1))
 
 def _init_db():
-    c = _conn()
+    with _db_init_lock:
+        c = _conn()
+        _enable_wal(c)
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS user_languages (uid INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'ar');
@@ -841,7 +873,6 @@ def _init_db():
     CREATE TABLE IF NOT EXISTS bots (bid TEXT PRIMARY KEY, token TEXT NOT NULL, name TEXT NOT NULL, target_id INTEGER, added REAL NOT NULL, added_by INTEGER, last_sent REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS admins (uid INTEGER PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS banned (uid INTEGER PRIMARY KEY);
-    CREATE TABLE IF NOT EXISTS complaints (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, username TEXT, first_name TEXT, text TEXT NOT NULL, ts REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS download_stats (id INTEGER PRIMARY KEY CHECK (id = 1), total_downloads INTEGER NOT NULL DEFAULT 0);
     INSERT OR IGNORE INTO download_stats (id, total_downloads) VALUES (1, 0);
     """)
@@ -858,6 +889,8 @@ def _init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS gift_claims (
         code TEXT NOT NULL, uid INTEGER NOT NULL, claimed_at REAL NOT NULL,
         PRIMARY KEY (code, uid))""")
+    # Complaints are delivered directly to the owner and are never stored.
+    c.execute("DROP TABLE IF EXISTS complaints")
     c.commit()
     gift_cols = [r["name"] for r in c.execute("PRAGMA table_info(gift_links)").fetchall()]
     for col, ddl in [("allowed_users","TEXT DEFAULT NULL"),("channel_id","TEXT DEFAULT NULL"),
@@ -868,7 +901,7 @@ def _init_db():
     c.commit()
 _init_db()
 
-REQUIRED_TABLES = {'users','settings','favorites','daily_usage','vip_users','referrals','bots','admins','banned','complaints','download_stats','fav_settings','gift_links','gift_claims'}
+REQUIRED_TABLES = {'users','settings','favorites','daily_usage','vip_users','referrals','bots','admins','banned','download_stats','fav_settings','gift_links','gift_claims'}
 def _validate_db_file(path):
     if not os.path.exists(path): return False, "الملف غير موجود"
     if os.path.getsize(path) < 4096: return False, "الملف تالف"
@@ -1462,10 +1495,11 @@ def get_user_joined(uid):
 def increment_user_downloads(uid):
     try: u = int(uid)
     except: return
-    with _write_lock:
-        c = _conn()
-        c.execute("INSERT OR IGNORE INTO users (uid, joined, downloads) VALUES (?,?,0)", (u, time.time()))
-        c.execute("UPDATE users SET downloads = downloads + 1 WHERE uid=?", (u,)); c.commit()
+    _execute(
+        """INSERT INTO users (uid, joined, downloads) VALUES (?,?,1)
+           ON CONFLICT(uid) DO UPDATE SET downloads = downloads + 1""",
+        (u, time.time()),
+    )
 def increment_download_count(uid=None):
     _execute("UPDATE download_stats SET total_downloads = total_downloads + 1 WHERE id = 1")
     if uid is not None: increment_user_downloads(uid)
@@ -1780,19 +1814,6 @@ def unban_user(uid):
     with _write_lock:
         c = _conn(); cur = c.execute("DELETE FROM banned WHERE uid=?", (u,)); c.commit(); return cur.rowcount > 0
 def get_all_banned(): return [r["uid"] for r in _conn().execute("SELECT uid FROM banned").fetchall()]
-
-# ============ Complaints ============
-def add_complaint(uid, username, first_name, text):
-    try: u = int(uid)
-    except: return
-    _execute("INSERT INTO complaints (uid, username, first_name, text, ts) VALUES (?,?,?,?,?)", (u, username or "", first_name or "", text, time.time()))
-def get_all_complaints():
-    return [{"uid": r["uid"], "username": r["username"], "first_name": r["first_name"], "text": r["text"], "ts": r["ts"]} for r in _conn().execute("SELECT * FROM complaints ORDER BY id").fetchall()]
-def count_complaints(): return _conn().execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
-def clear_complaints():
-    with _write_lock:
-        c = _conn(); n = c.execute("SELECT COUNT(*) FROM complaints").fetchone()[0]
-        c.execute("DELETE FROM complaints"); c.commit(); return n
 
 # ============ Backup ============
 def backup_to(target_path):
@@ -2661,7 +2682,6 @@ def get_admin_panel_kb():
     status = "🔓 إيقاف الصيانة" if settings.get("maintenance_mode") else "🔒 وضع الصيانة"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات والبث",callback_data="sec_broadcast_stats")],
-        [InlineKeyboardButton("📬 صندوق الشكاوى",callback_data="admin_complaints")],
         [InlineKeyboardButton("🖼️ الصور",callback_data="admin_images_section"), InlineKeyboardButton("📝 الرسائل",callback_data="admin_messages_section")],
         [InlineKeyboardButton("📄 الأوصاف",callback_data="admin_captions_section"), InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section")],
         [InlineKeyboardButton("💾 النسخ",callback_data="admin_backup_section"), InlineKeyboardButton("🤖 البوتات",callback_data="admin_bots_section")],
@@ -2809,7 +2829,6 @@ async def admin_panel(client,message):
         kb=InlineKeyboardMarkup([
             [InlineKeyboardButton("👑 VIP",callback_data="admin_vip_section"), InlineKeyboardButton("🎁 المكافآت",callback_data="admin_rewards_section")],
             [InlineKeyboardButton("🎁 هدية للجميع",callback_data="admin_gift_all"), InlineKeyboardButton("🎯 لفرد",callback_data="admin_gift_one")],
-            [InlineKeyboardButton("📬 الشكاوى",callback_data="admin_complaints")],
             [InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]])
         await message.reply_text("🛠️ لوحة الأدمن",reply_markup=kb); return
     await message.reply_text("🛠️ لوحة التحكم\n\n👇 اختر:", reply_markup=get_admin_panel_kb())
@@ -2876,6 +2895,20 @@ async def unified_callback(client,callback):
         try: await msg.delete()
         except: pass
         await callback.answer("✅"); return
+
+    if data.startswith("complaint_reply_"):
+        if not is_admin_any(uid):
+            await callback.answer("⛔ غير مصرح", show_alert=True); return
+        try:
+            target_uid = int(data.rsplit("_", 1)[1])
+        except (TypeError, ValueError):
+            await callback.answer("⚠️ مستخدم غير صالح", show_alert=True); return
+        user_data[uid] = {"awaiting_complaint_reply": target_uid}
+        await msg.reply_text(
+            f"✍️ اكتب ردك للمستخدم {target_uid}.\nسيتم إرساله إليه مباشرة.\n\nللإلغاء أرسل /cancel"
+        )
+        await callback.answer("✍️ اكتب الرد")
+        return
 
     if data=="complaint_start":
         await callback.answer("📩"); user_data[uid]={"awaiting_complaint":True}
@@ -3558,24 +3591,6 @@ async def unified_callback(client,callback):
         if data=="admin_merge_gift_all":
             await msg.delete(); await msg.reply_text("🎁 هدية دمج لجميع الأعضاء\nأرسل عدد فصول الدمج التي تريد إضافتها لكل مستخدم.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={"awaiting_merge_gift_all":True}; await callback.answer("🎁"); return
-        if data=="admin_complaints":
-            clist=get_all_complaints()
-            if not clist:
-                await msg.edit_text("📭 صندوق الشكاوى فارغ\n\nستظهر شكاوى المستخدمين هنا عند وصولها.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
-                await callback.answer("📭"); return
-            txt=f"📬 صندوق الشكاوى ({len(clist)})\n\n"
-            for i,c in enumerate(clist[-20:][::-1],1):
-                un=f"@{c['username']}" if c.get('username') else "—"; dt=time.strftime("%Y-%m-%d %H:%M",time.localtime(c.get('ts',0)))
-                txt+=f"{i}. {c.get('first_name','?')} | {c['uid']} | {un}\n🕐 {dt}\n💬 {c.get('text','')[:180]}\n\n"
-            if len(txt)>3900: txt=txt[:3900]+"..."
-            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
-            await callback.answer("📬"); return
-        if data=="admin_clear_complaints":
-            await msg.edit_text(f"🗑️ تأكيد حذف الشكاوى\nهل تريد حذف جميع الشكاوى وعددها {count_complaints()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_clear_complaints_yes")],[InlineKeyboardButton("❌",callback_data="admin_complaints")]]))
-            await callback.answer("⚠️"); return
-        if data=="admin_clear_complaints_yes":
-            n=clear_complaints(); await msg.edit_text(f"✅ {n}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌",callback_data="close_list")]]))
-            await callback.answer("✅"); return
         if data=="admin_panel_back":
             try: await msg.delete()
             except: pass
@@ -3583,7 +3598,6 @@ async def unified_callback(client,callback):
             await callback.answer("🔙"); return
         if data=="sec_broadcast_stats":
             await msg.edit_text(
-                f"📊 لوحة الإحصائيات العامة – Manga Virus 🦠\n\n✨ نظرة شاملة على نشاط البوت وأرقامه:\n\n👥 إجمالي المستخدمين: {get_users_count()}\n📥 عمليات التحميل: {get_download_count()}\n👑 أعضاء VIP: {len(get_all_vips())}\n👮 المشرفون المضافون: {len(get_all_added_admins())}\n🚫 المحظورون: {len(get_all_banned())}\n🤖 البوتات المسجلة: {len(get_all_bots())}\n📬 الشكاوى الواردة: {count_complaints()}\n📖 الحد اليومي لتحميل الفصول: {settings.get('daily_reward_amount',100)}\n🧩 حد دمج الفصول اليومي: {settings.get('merge_daily_limit',50)}\n\n━━━━━━━━━━━━━━━━━━\n\n🚀 Manga Virus في تطوّر مستمر!\n\nكل رقم يمثل خطوة جديدة في رحلتنا لتوفير أفضل تجربة لعشاق المانجا والمانهوا.\n\n🖤 شكراً لكل من اختار Manga Virus، والقادم أفضل بإذن الله! 🦠",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 إعلان",callback_data="admin_broadcast"), InlineKeyboardButton("📊",callback_data="admin_stats")],[InlineKeyboardButton("🧹 تنظيف",callback_data="admin_cleanup")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
             await callback.answer("📊"); return
         if data=="admin_broadcast":
@@ -3880,13 +3894,56 @@ async def handle_all_text(client,message):
         await search_cmd(client, message, query_override=query)
         return
 
+    reply_target = user_data.get(uid, {}).get("awaiting_complaint_reply")
+    if reply_target is not None:
+        reply_text = (message.text or "").strip()
+        if not reply_text:
+            await message.reply_text("⚠️ أرسل نص الرد.")
+            return
+        try:
+            await client.send_message(
+                chat_id=int(reply_target),
+                text=f"📩 رد من إدارة Manga Virus:\n\n{reply_text}",
+                parse_mode=None
+            )
+        except Exception as e:
+            await message.reply_text(f"❌ تعذر إرسال الرد إلى المستخدم {reply_target}.\nالسبب: {str(e)[:250]}\n\nيمكنك المحاولة مجدداً أو إرسال /cancel للإلغاء.")
+            return
+        user_data.pop(uid, None)
+        await message.reply_text(f"✅ تم إرسال ردك إلى المستخدم {reply_target}.")
+        return
+
     if user_data.get(uid,{}).get("awaiting_complaint"):
-        text=message.text.strip()
-        if not text or len(text)<3: await message.reply_text(translate_ui_text(uid,"⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة.")); return
-        add_complaint(uid,message.from_user.username or "",message.from_user.first_name or "",text)
-        user_data.pop(uid,None); await message.reply_text(translate_ui_text(uid,"✅ تم الإرسال"))
-        try: await client.send_message(OWNER_ID,f"📬 {uid}\n💬 {text}")
-        except: pass
+        text = (message.text or "").strip()
+        if len(text) < 3:
+            await message.reply_text(translate_ui_text(uid, "⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة."))
+            return
+        user_data.pop(uid, None)
+        first_name = message.from_user.first_name or "بدون اسم"
+        username = f"@{message.from_user.username}" if message.from_user.username else "بدون يوزر"
+        complaint_text = (
+            f"📩 شكوى جديدة | Manga Virus\n\n"
+            f"👤 {first_name} ({username})\n"
+            f"🆔 {uid}\n\n"
+            f"💬 {text}"
+        )
+        reply_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("↩️ رد على الشكوى", callback_data=f"complaint_reply_{uid}")
+        ]])
+        admin_ids = list(dict.fromkeys([OWNER_ID] + get_all_added_admins()))
+        delivered = 0
+        for admin_id in admin_ids:
+            try:
+                await client.send_message(
+                    int(admin_id), complaint_text, reply_markup=reply_kb, parse_mode=None
+                )
+                delivered += 1
+            except Exception as exc:
+                print(f"Complaint delivery failed for admin {admin_id}, user {uid}: {exc}", flush=True)
+        if delivered:
+            await message.reply_text(translate_ui_text(uid, "✅ تم الإرسال"))
+        else:
+            await message.reply_text("❌ تعذر إرسال الشكوى للإدارة حالياً. حاول مرة أخرى لاحقاً.")
         return
 
     if user_data.get(uid, {}).get('awaiting_merge_range'):
