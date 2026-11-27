@@ -3979,14 +3979,11 @@ async def handle_all_text(client,message):
                 except Exception:
                     pass
 
-            try:
-                # Download chapters sequentially; images within each chapter stay parallel.
-                buf = await download_images_parallel(
-                    chapter_groups, client=client, concurrency=48,
-                    progress_callback=update_merge_download_progress,
-                )
-            finally:
-                pass
+            # Download chapters sequentially; images within each chapter stay parallel.
+            buf = await download_images_parallel(
+                chapter_groups, client=client, concurrency=48,
+                progress_callback=update_merge_download_progress,
+            )
             if not buf:
                 refund_merge(uid, count)
                 await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
