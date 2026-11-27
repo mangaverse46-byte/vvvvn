@@ -3013,9 +3013,12 @@ async def handle_all_text(client,message):
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
 
-            # Extract chapter image lists concurrently, while showing completed chapter counts.
-            extract_sem = asyncio.Semaphore(4)
+            # Extract chapter image lists with a bounded pool. Keep Telegram
+            # progress edits out of the extraction lock so UI network calls do
+            # not serialize otherwise-parallel source requests.
+            extract_sem = asyncio.Semaphore(6)
             progress_lock = asyncio.Lock()
+            progress_edit_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
             async def extract_chapter(index, chapter):
@@ -3023,36 +3026,60 @@ async def handle_all_text(client,message):
                 async with extract_sem:
                     try:
                         urls = await asyncio.to_thread(api.get_chapter_images, chapter)
-                    except Exception as exc:
-                        pass
+                    except Exception:
+                        urls = None
+
                 async with progress_lock:
                     progress["done"] += 1
                     if urls:
                         progress["ok"] += 1
                         progress["images"] += len(urls)
-                    await lm.edit_text(
-                        f"🧩 **استخراج الفصول**\n"
-                        f"📚 المكتمل: `{progress['done']}/{count}`\n"
-                        f"✅ الناجح: `{progress['ok']}`\n"
-                        f"🖼️ الصور المستخرجة: `{progress['images']}`"
-                    )
+                    done = progress["done"]
+                    should_update = done == count or done % 2 == 0
+
+                # Update every two completed chapters and at the end.
+                # Read the newest counters inside the edit lock to avoid stale UI.
+                if should_update:
+                    async with progress_edit_lock:
+                        async with progress_lock:
+                            snapshot = dict(progress)
+                        try:
+                            await lm.edit_text(
+                                f"🧩 **استخراج الفصول**\\n"
+                                f"📚 المكتمل: `{snapshot['done']}/{count}`\\n"
+                                f"✅ الناجح: `{snapshot['ok']}`\\n"
+                                f"🖼️ الصور المستخرجة: `{snapshot['images']}`"
+                            )
+                        except Exception:
+                            pass
                 return index, urls or None
 
             await lm.edit_text(
-                f"🧩 **استخراج الفصول**\n📚 المكتمل: `0/{count}`\n"
-                f"✅ الناجح: `0`\n🖼️ الصور المستخرجة: `0`"
+                f"🧩 **استخراج الفصول**\\n📚 المكتمل: `0/{count}`\\n"
+                f"✅ الناجح: `0`\\n🖼️ الصور المستخرجة: `0`"
             )
             extracted = await asyncio.gather(
                 *(extract_chapter(i, ch) for i, ch in enumerate(selected))
             )
+
+            # Never silently create a PDF that omits one of the selected chapters.
+            failed_chapters = [index for index, urls in extracted if not urls]
+            if failed_chapters:
+                refund_merge(uid, count)
+                await lm.edit_text(
+                    f"❌ **تعذر استخراج {len(failed_chapters)} من {count} فصول.**\\n"
+                    "لم يتم إنشاء ملف ناقص، وتمت إعادة رصيد الدمج كاملاً.\\n"
+                    "حاول مرة أخرى بعد قليل."
+                )
+                return
+
             # Rebuild groups in the original selected-chapter order.
             for _, urls in sorted(extracted, key=lambda item: item[0]):
-                if urls:
-                    chapter_groups.append(urls)
-                    total_images += len(urls)
+                chapter_groups.append(urls)
+                total_images += len(urls)
 
             if not chapter_groups:
-                refund_merge(uid,count)
+                refund_merge(uid, count)
                 await lm.edit_text("❌ لم يستخرج المحرك صور الفصول")
                 return
             await lm.edit_text(f"🖼️ **تم استخراج الصور بنجاح.**\n☁️ جارٍ إرسال روابط `{total_images}` صورة إلى محرك Picture Pile لإنشاء PDF...")
