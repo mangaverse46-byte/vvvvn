@@ -466,32 +466,25 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
     else:
         chapter_groups = [list(urls or [])]
 
-    indexed_urls = [
-        (chapter_index, image_index, url)
-        for chapter_index, group in enumerate(chapter_groups)
-        for image_index, url in enumerate(group)
-        if url
-    ]
-    if not indexed_urls:
+    if not any(group for group in chapter_groups):
         return None
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
 
-    # Keep a single reusable HTTP session, but avoid opening an unlimited
-    # number of simultaneous sockets (which can slow CDNs and cause timeouts).
-    # 48 active downloads is a conservative starting point for chapter images.
+    # Download one chapter at a time. Images within the current chapter
+    # still download concurrently, while chapter order remains deterministic.
     connector = aiohttp.TCPConnector(
         limit=64, limit_per_host=48, ttl_dns_cache=600,
         keepalive_timeout=60, enable_cleanup_closed=True,
     )
     download_sem = asyncio.Semaphore(max(1, int(concurrency)))
-    downloaded = [None] * len(indexed_urls)
+    downloaded = []
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
-        async def fetch(position, url):
+        async def fetch(position, url, chapter_downloaded):
             async with download_sem:
                 for attempt in range(4):
                     try:
@@ -499,7 +492,7 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
                             if response.status == 200:
                                 data = await response.read()
                                 if data and len(data) > 100:
-                                    downloaded[position] = data
+                                    chapter_downloaded[position] = data
                                     return
                             elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
                                 retry = response.headers.get("Retry-After", "2")
@@ -519,9 +512,19 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
                     if attempt < 3:
                         await asyncio.sleep(0.25 * (attempt + 1))
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
-        )
+        for chapter_index, chapter_urls in enumerate(chapter_groups, start=1):
+            chapter_urls = [url for url in chapter_urls if url]
+            if not chapter_urls:
+                continue
+            chapter_downloaded = [None] * len(chapter_urls)
+            await asyncio.gather(
+                *(fetch(position, url, chapter_downloaded)
+                  for position, url in enumerate(chapter_urls))
+            )
+            # Append this chapter's pages in their original order before
+            # starting downloads for the next chapter.
+            downloaded.extend(chapter_downloaded)
+            chapter_downloaded.clear()
 
     # Manga engine image URLs are expected to be JPEG. img2pdf also supports
     # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
