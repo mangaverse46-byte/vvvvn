@@ -3564,12 +3564,24 @@ async def unified_callback(client,callback):
                 await msg.edit_text("📭 صندوق الشكاوى فارغ\n\nستظهر شكاوى المستخدمين هنا عند وصولها.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
                 await callback.answer("📭"); return
             txt=f"📬 صندوق الشكاوى ({len(clist)})\n\n"
+            complaint_kb=[]
             for i,c in enumerate(clist[-20:][::-1],1):
                 un=f"@{c['username']}" if c.get('username') else "—"; dt=time.strftime("%Y-%m-%d %H:%M",time.localtime(c.get('ts',0)))
                 txt+=f"{i}. {c.get('first_name','?')} | {c['uid']} | {un}\n🕐 {dt}\n💬 {c.get('text','')[:180]}\n\n"
+                complaint_kb.append([InlineKeyboardButton(f"↩️ رد على {c['uid']}",callback_data=f"admin_complaint_reply_{c['uid']}")])
             if len(txt)>3900: txt=txt[:3900]+"..."
-            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]]))
+            complaint_kb.extend([[InlineKeyboardButton("🗑️ مسح",callback_data="admin_clear_complaints")],[InlineKeyboardButton("🔄",callback_data="admin_complaints"), InlineKeyboardButton("🔙",callback_data="admin_panel_back")],[InlineKeyboardButton("❌",callback_data="close_list")]])
+            await msg.edit_text(txt,reply_markup=InlineKeyboardMarkup(complaint_kb))
             await callback.answer("📬"); return
+        if data.startswith("admin_complaint_reply_"):
+            try:
+                target_uid=int(data.rsplit("_",1)[1])
+            except (TypeError,ValueError):
+                await callback.answer("⚠️ مستخدم غير صالح",show_alert=True); return
+            user_data[uid]={"awaiting_complaint_reply":target_uid}
+            await msg.reply_text(f"✍️ اكتب ردك للمستخدم {target_uid}.\nسيتم إرسال الرد إليه مباشرة.\n\nللإلغاء أرسل /cancel")
+            await callback.answer("✍️ اكتب الرد")
+            return
         if data=="admin_clear_complaints":
             await msg.edit_text(f"🗑️ تأكيد حذف الشكاوى\nهل تريد حذف جميع الشكاوى وعددها {count_complaints()}؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅",callback_data="admin_clear_complaints_yes")],[InlineKeyboardButton("❌",callback_data="admin_complaints")]]))
             await callback.answer("⚠️"); return
@@ -3878,6 +3890,25 @@ async def handle_all_text(client,message):
             await message.reply_text(translate_ui_text(uid, "⚠️ أرسل اسم مانجا صحيحاً للبحث."))
             return
         await search_cmd(client, message, query_override=query)
+        return
+
+    reply_target = user_data.get(uid, {}).get("awaiting_complaint_reply")
+    if reply_target is not None:
+        reply_text = (message.text or "").strip()
+        if not reply_text:
+            await message.reply_text("⚠️ أرسل نص الرد.")
+            return
+        try:
+            await client.send_message(
+                chat_id=int(reply_target),
+                text=f"📩 رد من إدارة Manga Virus:\n\n{reply_text}",
+                parse_mode=None
+            )
+        except Exception as e:
+            await message.reply_text(f"❌ تعذر إرسال الرد إلى المستخدم {reply_target}.\nالسبب: {str(e)[:250]}\n\nيمكنك المحاولة مجدداً أو إرسال /cancel للإلغاء.")
+            return
+        user_data.pop(uid, None)
+        await message.reply_text(f"✅ تم إرسال ردك إلى المستخدم {reply_target}.")
         return
 
     if user_data.get(uid,{}).get("awaiting_complaint"):
