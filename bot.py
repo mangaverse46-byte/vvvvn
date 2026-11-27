@@ -409,7 +409,7 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download images concurrently and assemble them with img2pdf only."""
+    """Fetch chapter images with bounded workers, then assemble an ordered PDF."""
     import aiohttp
     import img2pdf
 
@@ -433,58 +433,106 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         "Accept": "image/jpeg,image/*;q=0.9,*/*;q=0.8",
     }
 
-    # Tunable parallel image retrieval with a pooled HTTP connection session.
+    # A fixed worker pool avoids creating thousands of waiting tasks for very
+    # large chapters. Global and per-host limits are independently configurable.
     try:
         download_concurrency = max(
-            16, min(96, int(os.getenv("IMAGE_DOWNLOAD_CONCURRENCY", "64")))
+            16, min(128, int(os.getenv("IMAGE_DOWNLOAD_CONCURRENCY", "96")))
         )
     except (TypeError, ValueError):
-        download_concurrency = 48
+        download_concurrency = 64
+    try:
+        per_host_concurrency = max(
+            8, min(download_concurrency, int(os.getenv(
+                "IMAGE_DOWNLOAD_PER_HOST", str(min(64, download_concurrency))
+            )))
+        )
+    except (TypeError, ValueError):
+        per_host_concurrency = min(48, download_concurrency)
 
     connector = aiohttp.TCPConnector(
-        limit=download_concurrency * 2,
-        limit_per_host=download_concurrency,
-        ttl_dns_cache=600,
-        keepalive_timeout=60,
+        limit=download_concurrency,
+        limit_per_host=per_host_concurrency,
+        ttl_dns_cache=900,
+        keepalive_timeout=75,
         enable_cleanup_closed=True,
     )
-    download_sem = asyncio.Semaphore(download_concurrency)
     downloaded = [None] * len(indexed_urls)
+    host_semaphores = {}
 
     async with aiohttp.ClientSession(
         timeout=timeout, connector=connector, headers=request_headers
     ) as session:
-        async def fetch(position, url):
-            async with download_sem:
-                for attempt in range(4):
-                    try:
-                        async with session.get(url, allow_redirects=True) as response:
-                            if response.status == 200:
-                                data = await response.read()
-                                if data and len(data) > 100:
-                                    downloaded[position] = data
-                                    return
-                            elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
-                                retry = response.headers.get("Retry-After", "2")
-                                try:
-                                    delay = min(20.0, max(0.5, float(retry)))
-                                except (TypeError, ValueError):
-                                    delay = min(8.0, 0.5 * (2 ** attempt))
-                                if attempt < 3:
-                                    await asyncio.sleep(delay)
-                                    continue
-                            else:
-                                # Permanent HTTP errors should not be retried.
-                                return
-                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-                        if attempt == 3:
-                            return
-                    if attempt < 3:
-                        await asyncio.sleep(0.25 * (attempt + 1))
+        queue = asyncio.Queue()
+        for position, (_, _, url) in enumerate(indexed_urls):
+            queue.put_nowait((position, url))
 
-        await asyncio.gather(
-            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
-        )
+        async def worker():
+            while True:
+                item = await queue.get()
+                try:
+                    if item is None:
+                        return
+                    position, url = item
+                    host = urllib.parse.urlsplit(str(url)).netloc.lower() or "_unknown"
+                    host_sem = host_semaphores.get(host)
+                    if host_sem is None:
+                        host_sem = host_semaphores[host] = asyncio.Semaphore(
+                            per_host_concurrency
+                        )
+
+                    for attempt in range(4):
+                        retry_delay = None
+                        try:
+                            async with host_sem:
+                                async with session.get(
+                                    url, allow_redirects=True
+                                ) as response:
+                                    if response.status == 200:
+                                        blob = await response.read()
+                                        if blob and len(blob) > 100:
+                                            downloaded[position] = blob
+                                            break
+                                    elif response.status in (
+                                        408, 425, 429, 500, 502, 503, 504
+                                    ):
+                                        retry = response.headers.get("Retry-After")
+                                        try:
+                                            retry_delay = min(
+                                                20.0, max(0.5, float(retry))
+                                            ) if retry else min(
+                                                8.0, 0.5 * (2 ** attempt)
+                                            )
+                                        except (TypeError, ValueError):
+                                            retry_delay = min(
+                                                8.0, 0.5 * (2 ** attempt)
+                                            )
+                                    else:
+                                        # Skip this URL but keep the worker alive for the queue.
+                                        break
+                        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                            retry_delay = min(8.0, 0.35 * (2 ** attempt))
+
+                        # Release the host slot before waiting for a retry.
+                        if attempt < 3:
+                            await asyncio.sleep(
+                                (retry_delay or 0.25) + (0.05 * (position % 7))
+                            )
+                except Exception:
+                    # One malformed URL or unexpected response must not kill a worker.
+                    pass
+                finally:
+                    queue.task_done()
+
+        worker_count = min(download_concurrency, len(indexed_urls))
+        workers = [
+            asyncio.create_task(worker(), name=f"image-download-{i}")
+            for i in range(worker_count)
+        ]
+        await queue.join()
+        for _ in workers:
+            queue.put_nowait(None)
+        await asyncio.gather(*workers)
 
     # Manga engine image URLs are expected to be JPEG. img2pdf also supports
     # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
@@ -500,17 +548,13 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         )
         if supported:
             candidates.append((position, blob))
-        else:
-            pass
 
     if not candidates:
         return None
 
-    # Preserve original page order. Engine URLs are processed JPEGs, so avoid
-    # decoding every image twice on the normal all-valid path.
+    # List order is the original chapter/page order, regardless of completion.
     page_blobs = [blob for _, blob in candidates]
 
-    # Use the cached BDF cover as the first page when it is a supported image.
     cover_blob = await _get_cached_bdf_cover(client)
     if cover_blob and (
         cover_blob.startswith(b"\xff\xd8\xff")
@@ -532,7 +576,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         )
 
     def _validate_and_build_pdf(blobs):
-        # Slow fallback only: isolate a corrupt page if bulk conversion fails.
         valid_blobs = []
         for blob in blobs:
             try:
@@ -544,16 +587,11 @@ async def create_pdf_from_images(urls, client=None, headers=None):
             raise RuntimeError("No valid images for PDF")
         return _build_pdf(valid_blobs)
 
-    if not page_blobs:
-        return None
-
     try:
-        # Run CPU-heavy PDF assembly off the bot's event loop.
         result = await asyncio.to_thread(_build_pdf, page_blobs)
     except Exception:
         result = await asyncio.to_thread(_validate_and_build_pdf, page_blobs)
 
-    # PDF is built: release the source image byte buffers immediately.
     page_blobs.clear()
     candidates.clear()
     downloaded.clear()
@@ -564,7 +602,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     buf.name = "manga.pdf"
     buf.seek(0)
     return buf
-
 async def download_images_parallel(urls, client=None, headers=None):
     return await create_pdf_from_images(urls, client=client, headers=headers)
 
@@ -767,6 +804,13 @@ def save_settings():
             c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v, ensure_ascii=False)))
         c.commit()
 settings = load_settings()
+
+def get_pdf_max_chapters():
+    try:
+        return max(2, int(settings.get("merge_max_per_file", PDF_MAX_CHAPTERS)))
+    except (TypeError, ValueError):
+        return PDF_MAX_CHAPTERS
+
 for k, v in DEFAULTS.items():
     if k not in settings: settings[k] = v
 save_settings()
@@ -2169,7 +2213,7 @@ async def unified_callback(client,callback):
         await msg.reply_text(
             f"❓ **مساعدة**\n\n🔍 `/search الاسم`\n📚 4 مصادر\n\n"
             f"📖 فردي: `{settings.get('daily_reward_amount',100)}`\n🧩 دمج: `{settings.get('merge_daily_limit',50)}`\n"
-            f"📎 حد الملف: `{PDF_MAX_CHAPTERS}`\n"
+            f"📎 حد الملف: `{get_pdf_max_chapters()}`\n"
             f"🔗 إحالة: فردي +{settings.get('referral_bonus_single',50)} / دمج +{settings.get('referral_bonus_merge',20)}\n"
             f"👑 VIP: بلا حدود",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN); return
@@ -2600,7 +2644,7 @@ async def unified_callback(client,callback):
         if not chs: await callback.answer("لا فصول", show_alert=True); return
         user_data[uid]['awaiting_merge_range'] = {'src': src, 'ident': ident, 'chapters': chs}
         mr = '♾️ VIP' if is_vip(uid) else str(int(get_merge_remaining(uid)))
-        mmax = PDF_MAX_CHAPTERS
+        mmax = get_pdf_max_chapters()
         await msg.reply_text(f"🧩 **دمج الفصول**\n\n📚 `{len(chs)}` فصل\n🔢 `{mmax}` حد أقصى\n💳 رصيد: `{mr}`\n\n📝 أرسل: `البداية-النهاية`\nمثال: `1-{mmax}`\n\n/cancel", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]), parse_mode=ParseMode.MARKDOWN)
         await callback.answer("⏳"); return
 
@@ -2755,14 +2799,14 @@ async def unified_callback(client,callback):
             user_data[uid]["gift_expiry_unit"]="minutes"; user_data[uid]["gift_link_step"]="expiry_value"; await msg.delete()
             await msg.reply_text("⏱️ **الدقائق:**\nمثال: `30`\n\n/cancel", parse_mode=ParseMode.MARKDOWN); await callback.answer("⏱️"); return
         if data=="admin_merge_counters":
-            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{PDF_MAX_CHAPTERS}`",
+            await msg.edit_text(f"🧮 **إعدادات العدادات والحدود**\n\n📖 `{settings.get('daily_reward_amount',100)}`\n🧩 `{settings.get('merge_daily_limit',50)}`\n📎 `{get_pdf_max_chapters()}`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✏️ تعديل حد الدمج",callback_data="admin_edit_merge_limit")],[InlineKeyboardButton("✏️ تعديل حد الملف",callback_data="admin_edit_merge_max")],[InlineKeyboardButton("✏️ تعديل حد الفردي",callback_data="admin_edit_daily_amount")],[InlineKeyboardButton("🔙 رجوع",callback_data="admin_panel_back"), InlineKeyboardButton("❌ إغلاق",callback_data="close_list")]]),parse_mode=ParseMode.MARKDOWN)
             await callback.answer("🧮"); return
         if data=="admin_edit_merge_limit":
             await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{settings.get('merge_daily_limit',50)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_limit":True}; await callback.answer("✏️"); return
         if data=="admin_edit_merge_max":
-            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{PDF_MAX_CHAPTERS}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
+            await msg.delete(); await msg.reply_text(f"✏️ min 2\nالحالي: `{get_pdf_max_chapters()}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
             user_data[uid]={"awaiting_merge_max":True}; await callback.answer("✏️"); return
         if data=="admin_edit_daily_amount":
             await msg.delete(); await msg.reply_text(f"✏️ الحالي: `{settings.get('daily_reward_amount',100)}`\n\n/cancel",parse_mode=ParseMode.MARKDOWN)
@@ -3114,7 +3158,7 @@ async def handle_all_text(client,message):
             except: pass
             if num is not None and start_num <= num <= end_num: selected.append(ch)
         if not selected: await message.reply_text("📚 **لم يتم العثور على فصول ضمن هذا النطاق.**\nتحقق من أرقام الفصول وأرسل نطاقاً آخر."); return
-        count = len(selected); mmax = PDF_MAX_CHAPTERS
+        count = len(selected); mmax = get_pdf_max_chapters()
         if count > mmax: await message.reply_text(f"📄 **عدد الفصول يتجاوز الحد المسموح.**\nطلبت `{count}` فصلاً، والحد الأقصى لهذا الملف `{mmax}` فصول."); return
         if not is_vip(uid):
             remaining = get_merge_remaining(uid)
@@ -3264,8 +3308,8 @@ async def handle_all_text(client,message):
     if user_data.get(uid,{}).get("awaiting_merge_max"):
         try:
             v=int(message.text.strip())
-            if v<2 or v>PDF_MAX_CHAPTERS:
-                await message.reply_text("⚠️ الحد المسموح من 2 إلى 10"); return
+            if v<2:
+                await message.reply_text("⚠️ حد الملف يجب أن يكون 2 فصلاً على الأقل."); return
             settings["merge_max_per_file"]=v; save_settings(); user_data.pop(uid,None)
             await message.reply_text(f"✅ الحد لكل ملف: `{v}`")
         except: await message.reply_text("🔢 **قيمة حد الفصول في الملف غير صالحة.** أرسل رقماً ضمن الحد المسموح.")
