@@ -457,8 +457,8 @@ async def _get_cached_bdf_cover(client):
         return None
 
 async def create_pdf_from_images(urls, client=None, headers=None):
-    """Download original image bytes with curl_cffi and assemble the PDF with img2pdf."""
-    from curl_cffi.requests import AsyncSession
+    """Download original image bytes and assemble the PDF with img2pdf."""
+    import aiohttp
 
     if urls and isinstance(urls[0], (list, tuple)):
         image_urls = [url for group in urls for url in group if url]
@@ -467,40 +467,35 @@ async def create_pdf_from_images(urls, client=None, headers=None):
     if not image_urls:
         return None
 
+    timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
+    connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
     semaphore = asyncio.Semaphore(8)
     downloaded = [None] * len(image_urls)
 
-    # One browser-impersonating session per chapter; keep the existing concurrency.
-    async with AsyncSession(
-        headers=request_headers,
-        timeout=90,
-        max_clients=8,
-        impersonate="chrome",
-        allow_redirects=True,
-    ) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
         async def fetch(position, url):
             async with semaphore:
                 for attempt in range(4):
                     try:
-                        response = await session.get(url, allow_redirects=True, timeout=90)
-                        if response.status_code == 200:
-                            data = response.content
-                            if data:
-                                downloaded[position] = data
+                        async with session.get(url, allow_redirects=True) as response:
+                            if response.status == 200:
+                                data = await response.read()
+                                if data:
+                                    downloaded[position] = data
+                                    return
+                            elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
+                                retry = response.headers.get("Retry-After", "2")
+                                try:
+                                    delay = min(20.0, max(0.5, float(retry)))
+                                except (TypeError, ValueError):
+                                    delay = min(8.0, 0.5 * (2 ** attempt))
+                                if attempt < 3:
+                                    await asyncio.sleep(delay)
+                                    continue
+                            else:
                                 return
-                        elif response.status_code == 429 or response.status_code in (408, 425, 500, 502, 503, 504):
-                            retry = response.headers.get("Retry-After", "2")
-                            try:
-                                delay = min(20.0, max(0.5, float(retry)))
-                            except (TypeError, ValueError):
-                                delay = min(8.0, 0.5 * (2 ** attempt))
-                            if attempt < 3:
-                                await asyncio.sleep(delay)
-                                continue
-                        else:
-                            return
-                    except Exception:
+                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                         if attempt == 3:
                             return
                     if attempt < 3:
@@ -509,42 +504,6 @@ async def create_pdf_from_images(urls, client=None, headers=None):
         await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
 
     # Keep original image bytes and their original order; no conversion or compression.
-    if not any(downloaded):
-        return None
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="mangavirus_pdf_") as temp_dir:
-            image_paths = []
-            for index, (url, blob) in enumerate(zip(image_urls, downloaded)):
-                if not blob:
-                    continue
-                suffix = os.path.splitext(urllib.parse.urlsplit(url).path)[1].lower()
-                if suffix not in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif"):
-                    suffix = ".img"
-                image_path = os.path.join(temp_dir, f"{index:06d}{suffix}")
-                with open(image_path, "wb") as image_file:
-                    image_file.write(blob)
-                image_paths.append(image_path)
-
-            import img2pdf
-            result = img2pdf.convert(image_paths)
-
-        # MangaBDF reader marker: harmless PDF comment for app recognition.
-        marker = b"\\n%MANGA_VIRUS_ORIGINAL_V1\\n"
-        eof = result.rfind(b"%%EOF")
-        if eof >= 0:
-            result = result[:eof] + marker + result[eof:]
-        else:
-            result += marker
-    except Exception as exc:
-        raise RuntimeError(f"فشل إنشاء PDF بواسطة img2pdf: {exc}") from exc
-
-    downloaded.clear()
-    buf = BytesIO(result)
-    result = None
-    buf.name = "manga.pdf"
-    buf.seek(0)
-    return buf
 
 async def download_images_parallel(urls, client=None, headers=None):
     return await create_pdf_from_images(urls, client=client, headers=headers)
