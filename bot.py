@@ -456,7 +456,7 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48):
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48, progress_callback=None):
     """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
     import img2pdf
@@ -516,6 +516,10 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
             chapter_urls = [url for url in chapter_urls if url]
             if not chapter_urls:
                 continue
+            if progress_callback:
+                result = progress_callback(chapter_index, len(chapter_groups), chapter_index - 1)
+                if asyncio.iscoroutine(result):
+                    await result
             chapter_downloaded = [None] * len(chapter_urls)
             await asyncio.gather(
                 *(fetch(position, url, chapter_downloaded)
@@ -525,6 +529,10 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
             # starting downloads for the next chapter.
             downloaded.extend(chapter_downloaded)
             chapter_downloaded.clear()
+            if progress_callback:
+                result = progress_callback(chapter_index, len(chapter_groups), chapter_index)
+                if asyncio.iscoroutine(result):
+                    await result
 
     # Manga engine image URLs are expected to be JPEG. img2pdf also supports
     # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
@@ -595,8 +603,11 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48
     buf.seek(0)
     return buf
 
-async def download_images_parallel(urls, client=None, headers=None, concurrency=48):
-    return await create_pdf_from_images(urls, client=client, headers=headers, concurrency=concurrency)
+async def download_images_parallel(urls, client=None, headers=None, concurrency=48, progress_callback=None):
+    return await create_pdf_from_images(
+        urls, client=client, headers=headers, concurrency=concurrency,
+        progress_callback=progress_callback,
+    )
 
 def get_source(source_id):
     """Return the API-backed adapter for one enabled manga source."""
@@ -3950,42 +3961,32 @@ async def handle_all_text(client,message):
                 refund_merge(uid,count)
                 await lm.edit_text(translate_ui_text(uid,"❌ لم يستخرج المحرك صور الفصول"))
                 return
-            merge_timer_stop = asyncio.Event()
-            merge_bar_frames = [
-                "▰▱▱▱▱▱▱▱▱▱",
-                "▰▰▱▱▱▱▱▱▱▱",
-                "▰▰▰▱▱▱▱▱▱",
-                "▰▰▰▰▱▱▱▱▱▱",
-                "▰▰▰▰▰▱▱▱▱▱",
-                "▰▰▰▰▰▰▱▱▱▱",
-                "▰▰▰▰▰▰▰▱▱▱",
-                "▰▰▰▰▰▰▰▰▱▱",
-                "▰▰▰▰▰▰▰▰▰▱",
-                "▰▰▰▰▰▰▰▰▰▰",
-            ]
-
-            async def merge_loading_bar():
-                frame = 0
-                while not merge_timer_stop.is_set():
-                    try:
-                        await lm.edit_text(
-                            translate_ui_text(uid, f"🧩 جاري تجهيز ملف الفصول المدمجة...\n\n{merge_bar_frames[frame % len(merge_bar_frames)]}")
+            async def update_merge_download_progress(current, total, completed):
+                percent = min(100, int(completed * 100 / max(1, total)))
+                filled = min(10, percent // 10)
+                bar = "▰" * filled + "▱" * (10 - filled)
+                if completed >= total:
+                    status = "✅ اكتمل تنزيل جميع الفصول"
+                else:
+                    status = f"⬇️ جاري تنزيل صور الفصل {current} من {total}"
+                try:
+                    await lm.edit_text(
+                        translate_ui_text(
+                            uid,
+                            f"🧩 تجهيز ملف الفصول المدمجة\n{status}\n\n{bar} {percent}%\n📚 الفصول المكتملة: {completed}/{total}"
                         )
-                    except Exception:
-                        pass
-                    frame += 1
-                    try:
-                        await asyncio.wait_for(merge_timer_stop.wait(), timeout=2.5)
-                    except asyncio.TimeoutError:
-                        pass
+                    )
+                except Exception:
+                    pass
 
-            merge_bar_task = asyncio.create_task(merge_loading_bar())
             try:
-                # One shared HTTP session; all chapter image requests run concurrently.
-                buf = await download_images_parallel(chapter_groups,client=client,concurrency=48)
+                # Download chapters sequentially; images within each chapter stay parallel.
+                buf = await download_images_parallel(
+                    chapter_groups, client=client, concurrency=48,
+                    progress_callback=update_merge_download_progress,
+                )
             finally:
-                merge_timer_stop.set()
-                await merge_bar_task
+                pass
             if not buf:
                 refund_merge(uid, count)
                 await lm.edit_text(translate_ui_text(uid,"❌ فشل تجهيز ملف دمج الفصول.\nتمت إعادة الرصيد إلى حسابك."))
