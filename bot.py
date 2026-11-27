@@ -456,7 +456,7 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None, concurrency=8, progress_callback=None, image_progress_callback=None):
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=4, progress_callback=None, image_progress_callback=None):
     """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
     import img2pdf
@@ -622,7 +622,7 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=8,
     buf.seek(0)
     return buf
 
-async def download_images_parallel(urls, client=None, headers=None, concurrency=8, progress_callback=None, image_progress_callback=None):
+async def download_images_parallel(urls, client=None, headers=None, concurrency=4, progress_callback=None, image_progress_callback=None):
     return await create_pdf_from_images(
         urls, client=client, headers=headers, concurrency=concurrency,
         progress_callback=progress_callback,
@@ -3981,7 +3981,7 @@ async def handle_all_text(client,message):
 
             # Download chapters sequentially; images within each chapter stay parallel.
             buf = await download_images_parallel(
-                chapter_groups, client=client, concurrency=48,
+                chapter_groups, client=client, concurrency=8,
                 progress_callback=update_merge_download_progress,
             )
             if not buf:
