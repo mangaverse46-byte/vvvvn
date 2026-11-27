@@ -456,32 +456,49 @@ async def _get_cached_bdf_cover(client):
     except Exception:
         return None
 
-async def create_pdf_from_images(urls, client=None, headers=None, concurrency=8):
-    """Download original image bytes and assemble the PDF with img2pdf."""
+async def create_pdf_from_images(urls, client=None, headers=None, concurrency=48):
+    """Download images concurrently and assemble them with img2pdf only."""
     import aiohttp
+    import img2pdf
 
     if urls and isinstance(urls[0], (list, tuple)):
-        image_urls = [url for group in urls for url in group if url]
+        chapter_groups = [list(group) for group in urls if group]
     else:
-        image_urls = [url for url in (urls or []) if url]
-    if not image_urls:
+        chapter_groups = [list(urls or [])]
+
+    indexed_urls = [
+        (chapter_index, image_index, url)
+        for chapter_index, group in enumerate(chapter_groups)
+        for image_index, url in enumerate(group)
+        if url
+    ]
+    if not indexed_urls:
         return None
 
     timeout = aiohttp.ClientTimeout(total=90, connect=15, sock_read=60)
     request_headers = headers or {"User-Agent": "Mozilla/5.0 MangaVirus"}
-    connector = aiohttp.TCPConnector(limit=64, limit_per_host=48, ttl_dns_cache=600, keepalive_timeout=60, enable_cleanup_closed=True)
-    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
-    downloaded = [None] * len(image_urls)
 
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=request_headers) as session:
+    # Keep a single reusable HTTP session, but avoid opening an unlimited
+    # number of simultaneous sockets (which can slow CDNs and cause timeouts).
+    # 48 active downloads is a conservative starting point for chapter images.
+    connector = aiohttp.TCPConnector(
+        limit=64, limit_per_host=48, ttl_dns_cache=600,
+        keepalive_timeout=60, enable_cleanup_closed=True,
+    )
+    download_sem = asyncio.Semaphore(max(1, int(concurrency)))
+    downloaded = [None] * len(indexed_urls)
+
+    async with aiohttp.ClientSession(
+        timeout=timeout, connector=connector, headers=request_headers
+    ) as session:
         async def fetch(position, url):
-            async with semaphore:
+            async with download_sem:
                 for attempt in range(4):
                     try:
                         async with session.get(url, allow_redirects=True) as response:
                             if response.status == 200:
                                 data = await response.read()
-                                if data:
+                                if data and len(data) > 100:
                                     downloaded[position] = data
                                     return
                             elif response.status == 429 or response.status in (408, 425, 500, 502, 503, 504):
@@ -494,38 +511,88 @@ async def create_pdf_from_images(urls, client=None, headers=None, concurrency=8)
                                     await asyncio.sleep(delay)
                                     continue
                             else:
+                                # Permanent HTTP errors should not be retried.
                                 return
                     except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                         if attempt == 3:
                             return
-                    if attempt < 2:
+                    if attempt < 3:
                         await asyncio.sleep(0.25 * (attempt + 1))
 
-        await asyncio.gather(*(fetch(position, url) for position, url in enumerate(image_urls)))
+        await asyncio.gather(
+            *(fetch(position, url) for position, (_, _, url) in enumerate(indexed_urls))
+        )
 
-    # Preserve page order and original image bytes; omit only pages that failed to download.
-    valid_images = [io.BytesIO(data) for data in downloaded if data]
-    if not valid_images:
-        print(f"[Image download] 0/{len(image_urls)} images downloaded", flush=True)
+    # Manga engine image URLs are expected to be JPEG. img2pdf also supports
+    # PNG, JPEG2000 and selected TIFF/CCITT inputs. No image re-encoding.
+    candidates = []
+    for position, blob in enumerate(downloaded):
+        if not blob:
+            continue
+        supported = (
+            blob.startswith(b"\xff\xd8\xff")
+            or blob.startswith(b"\x89PNG\r\n\x1a\n")
+            or blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+            or blob.startswith((b"II*\x00", b"MM\x00*"))
+        )
+        if supported:
+            candidates.append((position, blob))
+        else:
+            pass
+
+    if not candidates:
         return None
 
-    failed = len(image_urls) - len(valid_images)
-    if failed:
-        print(f"[Image download] {len(valid_images)}/{len(image_urls)} images downloaded; {failed} failed", flush=True)
+    # Validate each candidate separately; a corrupt page will not cancel the chapter.
+    valid = []
+    for position, blob in candidates:
+        try:
+            img2pdf.convert(BytesIO(blob))
+            valid.append(blob)
+        except Exception as exc:
+            pass
 
-    try:
-        import img2pdf
-        pdf_data = await asyncio.to_thread(img2pdf.convert, *valid_images)
-        if not pdf_data:
-            return None
-        result = io.BytesIO(pdf_data)
-        result.seek(0)
-        return result
-    except Exception as exc:
-        print(f"[PDF creation] {type(exc).__name__}: {exc}", flush=True)
+    # Use the server-cached BDF cover as the first PDF page.
+    cover_blob = await _get_cached_bdf_cover(client)
+    if cover_blob:
+        try:
+            if (
+                cover_blob.startswith(b"\xff\xd8\xff")
+                or cover_blob.startswith(b"\x89PNG\r\n\x1a\n")
+                or cover_blob.startswith((b"\x00\x00\x00\x0cjP  ", b"\xffO\xffQ"))
+                or cover_blob.startswith((b"II*\x00", b"MM\x00*"))
+            ):
+                img2pdf.convert(BytesIO(cover_blob))
+                valid.insert(0, cover_blob)
+        except Exception:
+            pass
+
+    if not valid:
         return None
 
-async def download_images_parallel(urls, client=None, headers=None, concurrency=8):
+    result = img2pdf.convert(
+        *(BytesIO(blob) for blob in valid),
+        title="Manga Virus",
+        author="Manga Virus Bot",
+        creator="Manga Virus",
+        producer="Manga Virus PDF Engine",
+        subject="MANGA_VIRUS_ORIGINAL_V1",
+        keywords=["MANGA_VIRUS_ORIGINAL_V1", "Manga Virus"],
+    )
+
+    # PDF is built: release the source image byte buffers immediately.
+    valid.clear()
+    candidates.clear()
+    downloaded.clear()
+    cover_blob = None
+
+    buf = BytesIO(result)
+    result = None
+    buf.name = "manga.pdf"
+    buf.seek(0)
+    return buf
+
+async def download_images_parallel(urls, client=None, headers=None, concurrency=48):
     return await create_pdf_from_images(urls, client=client, headers=headers, concurrency=concurrency)
 
 def get_source(source_id):
