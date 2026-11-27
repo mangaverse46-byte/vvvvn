@@ -3841,16 +3841,18 @@ async def handle_all_text(client,message):
             total_images = 0
             api = await asyncio.to_thread(get_source,src)
 
-            # Extract all selected chapter image lists concurrently, while showing completed chapter counts.
+            # Extract chapter image lists concurrently, while showing completed chapter counts.
+            extract_sem = asyncio.Semaphore(6)
             progress_lock = asyncio.Lock()
             progress = {"done": 0, "ok": 0, "images": 0}
 
             async def extract_chapter(index, chapter):
                 urls = None
-                try:
-                    urls = await asyncio.to_thread(api.get_chapter_images, chapter)
-                except Exception as exc:
-                    pass
+                async with extract_sem:
+                    try:
+                        urls = await asyncio.to_thread(api.get_chapter_images, chapter)
+                    except Exception as exc:
+                        pass
                 async with progress_lock:
                     progress["done"] += 1
                     if urls:
@@ -3910,7 +3912,7 @@ async def handle_all_text(client,message):
             merge_bar_task = asyncio.create_task(merge_loading_bar())
             try:
                 # One shared HTTP session; all chapter image requests run concurrently.
-                buf = await download_images_parallel(chapter_groups,client=client,concurrency=30)
+                buf = await download_images_parallel(chapter_groups,client=client,concurrency=16)
             finally:
                 merge_timer_stop.set()
                 await merge_bar_task
