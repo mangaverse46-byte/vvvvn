@@ -3237,13 +3237,14 @@ async def unified_callback(client,callback):
                 kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Share" if get_user_language(uid)=="en" else "🔗 مشاركة",callback_data="share_referral"), InlineKeyboardButton("👑 VIP",callback_data="vip_upgrade")],[InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق",callback_data="close_list")]])
                 await msg.reply_text(translate_ui_text(uid, "❌ لا يوجد رصيد\n\nادعُ صديقاً 🔗"),reply_markup=kb); return
             await callback.answer("⏳")
-            lt = f"⏳ جاري تحميل الفصل {disp}..."
+            lt = f"⏳ جاري تحميل الفصل {disp}...\n🔎 جاري استخراج صور الفصل من المحرك..."
             if rem>=0: lt += f"\n📊 المتبقي: {rem}"
             lm=await msg.reply_text(translate_ui_text(uid,lt))
             image_progress_state = {"last_update": 0}
 
             async def update_single_image_progress(done, total):
-                if done < total and done - image_progress_state["last_update"] < 5:
+                # Show progress on the first completed image, then throttle edits to every 5 images.
+                if done < total and image_progress_state["last_update"] and done - image_progress_state["last_update"] < 5:
                     return
                 image_progress_state["last_update"] = done
                 percent = min(100, int(done * 100 / max(1, total)))
