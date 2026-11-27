@@ -3919,7 +3919,6 @@ async def handle_all_text(client,message):
             await message.reply_text(translate_ui_text(uid, "⚠️ نص الشكوى قصير جداً\nاكتب تفاصيل أكثر (3 أحرف على الأقل) حتى نتمكن من فهم المشكلة."))
             return
         user_data.pop(uid, None)
-        await message.reply_text(translate_ui_text(uid, "✅ تم الإرسال"))
         first_name = message.from_user.first_name or "بدون اسم"
         username = f"@{message.from_user.username}" if message.from_user.username else "بدون يوزر"
         complaint_text = (
@@ -3931,12 +3930,20 @@ async def handle_all_text(client,message):
         reply_kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("↩️ رد على الشكوى", callback_data=f"complaint_reply_{uid}")
         ]])
-        try:
-            await client.send_message(
-                OWNER_ID, complaint_text, reply_markup=reply_kb, parse_mode=None
-            )
-        except Exception as exc:
-            print(f"Complaint delivery failed for {uid}: {exc}", flush=True)
+        admin_ids = list(dict.fromkeys([OWNER_ID] + get_all_added_admins()))
+        delivered = 0
+        for admin_id in admin_ids:
+            try:
+                await client.send_message(
+                    int(admin_id), complaint_text, reply_markup=reply_kb, parse_mode=None
+                )
+                delivered += 1
+            except Exception as exc:
+                print(f"Complaint delivery failed for admin {admin_id}, user {uid}: {exc}", flush=True)
+        if delivered:
+            await message.reply_text(translate_ui_text(uid, "✅ تم الإرسال"))
+        else:
+            await message.reply_text("❌ تعذر إرسال الشكوى للإدارة حالياً. حاول مرة أخرى لاحقاً.")
         return
 
     if user_data.get(uid, {}).get('awaiting_merge_range'):
