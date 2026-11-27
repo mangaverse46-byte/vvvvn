@@ -787,7 +787,7 @@ DEFAULTS = {
     "force_sub_channels":[],"force_sub_message":"⚠️ يجب الاشتراك في القنوات أولاً\n\nاشترك ثم اضغط تحقق ✅",
     "force_sub_image":None,"force_sub_buttons":{},
     "daily_reward_amount":100,"daily_reward_interval":86400,"merge_daily_limit":50,"merge_max_per_file":10,
-    "single_caption":"<blockquote>[ Ch {chapter} ] {title}\n@{bot_username}</blockquote>",
+    "single_caption":"[ Ch {chapter} ] {title}\n@{bot_username}",
     "vip_contact_second":None,"allow_parallel_downloads":False,
     "referral_bonus_single":50,"referral_bonus_merge":20,"maintenance_mode": False,
     "button_colors":{"success":"success","danger":"danger","primary":"primary"},
@@ -1902,16 +1902,17 @@ def clean_manga_title(title,identifier):
     return t.strip() or identifier.replace("-"," ").title()
 def make_quote(text):
     if not text: return text
-    # Captions are sent with Telegram HTML parse mode; remove Markdown bold
-    # markers and wrap the complete custom caption in a real blockquote.
+    # Normalize old/custom captions, then put the quote on its own lines.
     clean = str(text).replace("**", "").strip()
-    clean = re.sub(r"(?m)^\s*>\s?", "", clean)
-    return f"<blockquote>{clean}</blockquote>"
+    clean = re.sub(r"(?is)^\s*<blockquote(?:\s+[^>]*)?>\s*|\s*</blockquote>\s*$", "", clean)
+    clean = re.sub(r"(?m)^\s*>\s?", "", clean).strip()
+    return f"<blockquote>\n{clean}\n</blockquote>"
 def build_caption(template_key,**kwargs):
     try:
         template=settings.get(template_key,"")
         kwargs.update({"date":time.strftime("%Y-%m-%d"),"time":time.strftime("%H:%M")})
-        return template.format(**kwargs)
+        result = template.format(**kwargs)
+        return make_quote(result) if template_key == "single_caption" else result
     except Exception as e: return ""
 def _chapter_tracking_value(chapter):
     if not isinstance(chapter, dict):
