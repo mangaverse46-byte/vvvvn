@@ -116,7 +116,7 @@ _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 _API_RESPONSE_CACHE = {}
 _API_CACHE_LOCK = threading.RLock()
 _API_CACHE_TTL = {
-    "sources": 3600, "latest": 300, "search": 90,
+    "sources": 30, "latest": 300, "search": 90,
     "genres": 3600, "genre-manga": 300, "details": 1800,
 }
 _API_CACHE_MAX_ITEMS = 1500
@@ -214,18 +214,20 @@ def source_code(source_id):
     source_id = str(source_id)
     if source_id in _SOURCE_CODES:
         return _SOURCE_CODES[source_id]
-    used = set(_SOURCE_CODES.values())
-    alphabet = "bcdfghjknopqrstuvwxyz0123456789"
-    for code in alphabet:
-        if code not in used:
-            _SOURCE_CODES[source_id] = code
-            return code
-    # Callback payloads stay short even if the registry grows unusually large.
-    return str(abs(hash(source_id)) % 10)
+    # Stable short IDs let any API-registered source use chapter/navigation
+    # callbacks without adding its ID to this bot's source-code table.
+    code = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
+    _SOURCE_CODES[source_id] = code
+    return code
 
 def source_from_code(code):
-    for source_id in get_source_ids():
-        if source_code(source_id) == str(code):
+    token = str(code)
+    source_ids = get_source_ids()
+    # Accept old messages that still carry the complete source ID.
+    if token in source_ids:
+        return token
+    for source_id in source_ids:
+        if source_code(source_id) == token:
             return source_id
     return None
 
@@ -2147,7 +2149,7 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
         kb.append([InlineKeyboardButton("🔗 Share manga" if en else "🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
     if latest_mode:
         latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
-        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{source_code(latest_source)}")])
         kb.append([InlineKeyboardButton("🏠 Main menu" if en else "🏠 القائمة الرئيسية", callback_data="latest_home")])
     kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     return InlineKeyboardMarkup(kb), page, total
@@ -2792,7 +2794,7 @@ async def search_cmd(client,message,query_override=None):
         return
     user_data.setdefault(uid, {})["search_query"] = query
     try:
-        sources = await asyncio.to_thread(get_sources)
+        sources = await asyncio.to_thread(get_sources, True)
     except Exception as e:
         await message.reply_text(translate_ui_text(uid, f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}")); return
     rows = []
@@ -2801,7 +2803,7 @@ async def search_cmd(client,message,query_override=None):
         sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
         # Cycle through Telegram's three supported button colors so adjacent sources differ.
         style = source_styles[index % len(source_styles)]
-        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}", style=style)])
+        rows.append([InlineKeyboardButton(label, callback_data=f"src_{source_code(sid)}", style=style)])
     rows.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text(translate_ui_text(uid, "❌ لا توجد مصادر مفعلة داخل المحرك.")); return
@@ -2969,7 +2971,7 @@ async def unified_callback(client,callback):
     if data=="latest_manga_list":
         await callback.answer("📚")
         try:
-            sources = await asyncio.to_thread(get_sources)
+            sources = await asyncio.to_thread(get_sources, True)
         except Exception as e:
             sources = []
         if not sources:
@@ -2983,7 +2985,7 @@ async def unified_callback(client,callback):
             name=str(source.get("name") or sid)
             # Give each source its own position-based color; colors repeat after three.
             style = source_styles[index % len(source_styles)]
-            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}",style=style)])
+            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{source_code(sid)}",style=style)])
         kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
@@ -2991,7 +2993,7 @@ async def unified_callback(client,callback):
 
     if data.startswith("latest_src_"):
         await callback.answer("⏳")
-        src=data[len("latest_src_"):]
+        src=source_from_code(data[len("latest_src_"):])
         global latest_manga_cache
         try:
             if not latest_manga_cache:
@@ -3374,7 +3376,7 @@ async def unified_callback(client,callback):
         await callback.answer("⏳"); return
 
     if data.startswith("src_"):
-        src=data[4:]; q=user_data.get(uid,{}).get('search_query')
+        src=source_from_code(data[4:]); q=user_data.get(uid,{}).get('search_query')
         if not q: await callback.answer("⚠️",show_alert=True); await safe_edit(msg,"/search"); return
         await callback.answer("⏳"); await safe_edit(msg,f"🔍 {q}")
         res=[]
