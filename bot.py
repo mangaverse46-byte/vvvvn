@@ -2149,7 +2149,7 @@ def create_chapters_markup(chs,page=0,ident=None,src="mangalik",uid=None):
         kb.append([InlineKeyboardButton("🔗 Share manga" if en else "🔗 مشاركة المانجا", callback_data=f"share_manga_{src_short}")])
     if latest_mode:
         latest_source = str(user_data.get(uid, {}).get("latest_source_id") or src)
-        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{latest_source}")])
+        kb.append([InlineKeyboardButton("⬅️ Latest chapter sources" if en else "⬅️ مصادر أحدث الفصول", callback_data=f"latest_src_{source_code(latest_source)}")])
         kb.append([InlineKeyboardButton("🏠 Main menu" if en else "🏠 القائمة الرئيسية", callback_data="latest_home")])
     kb.append([InlineKeyboardButton("🔄 Refresh" if en else "🔄 تحديث", callback_data=f"rf_{src_short}"), InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     return InlineKeyboardMarkup(kb), page, total
