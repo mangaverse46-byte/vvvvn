@@ -3879,6 +3879,8 @@ async def unified_callback(client,callback):
             user_data[uid]={'awaiting_sources_image':True}; await callback.answer("🖼️"); return
         if data=="admin_del_sources_image":
             settings["sources_image"]=None; save_settings(); await msg.edit_text("📚 تم حذف صورة المصادر بنجاح."); await callback.answer("✅"); return
+        if data=="admin_del_sub_image":
+            settings["force_sub_image"]=None; save_settings(); await msg.edit_text("📢 تم حذف صورة الاشتراك الإجباري بنجاح."); await callback.answer("✅"); return
         if data=="admin_set_welcome":
             await msg.delete(); await msg.reply_text("📝 إرسال نص الرسالة الجديدة\nأرسل النص الذي تريد حفظه.\n\nللإلغاء أرسل /cancel")
             user_data[uid]={'awaiting_welcome':True}; await callback.answer("📝"); return
