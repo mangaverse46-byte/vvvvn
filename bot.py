@@ -221,8 +221,13 @@ def source_code(source_id):
     return code
 
 def source_from_code(code):
-    for source_id in get_source_ids():
-        if source_code(source_id) == str(code):
+    token = str(code)
+    source_ids = get_source_ids()
+    # Accept old messages that still carry the complete source ID.
+    if token in source_ids:
+        return token
+    for source_id in source_ids:
+        if source_code(source_id) == token:
             return source_id
     return None
 
@@ -2798,7 +2803,7 @@ async def search_cmd(client,message,query_override=None):
         sid = str(source["id"]); label = f"📚 {source.get('name') or sid}"[:60]
         # Cycle through Telegram's three supported button colors so adjacent sources differ.
         style = source_styles[index % len(source_styles)]
-        rows.append([InlineKeyboardButton(label, callback_data=f"src_{sid}", style=style)])
+        rows.append([InlineKeyboardButton(label, callback_data=f"src_{source_code(sid)}", style=style)])
     rows.append([InlineKeyboardButton("❌ Close" if get_user_language(uid)=="en" else "❌ إغلاق", callback_data="close_list")])
     if not sources:
         await message.reply_text(translate_ui_text(uid, "❌ لا توجد مصادر مفعلة داخل المحرك.")); return
@@ -2980,7 +2985,7 @@ async def unified_callback(client,callback):
             name=str(source.get("name") or sid)
             # Give each source its own position-based color; colors repeat after three.
             style = source_styles[index % len(source_styles)]
-            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{sid}",style=style)])
+            kb.append([InlineKeyboardButton("📚 " + name[:45],callback_data=f"latest_src_{source_code(sid)}",style=style)])
         kb.append([InlineKeyboardButton("🏠 Main menu" if get_user_language(uid)=="en" else "🏠 القائمة الرئيسية",callback_data="latest_home")])
         try: await msg.delete()
         except: pass
@@ -2988,7 +2993,7 @@ async def unified_callback(client,callback):
 
     if data.startswith("latest_src_"):
         await callback.answer("⏳")
-        src=data[len("latest_src_"):]
+        src=source_from_code(data[len("latest_src_"):])
         global latest_manga_cache
         try:
             if not latest_manga_cache:
@@ -3371,7 +3376,7 @@ async def unified_callback(client,callback):
         await callback.answer("⏳"); return
 
     if data.startswith("src_"):
-        src=data[4:]; q=user_data.get(uid,{}).get('search_query')
+        src=source_from_code(data[4:]); q=user_data.get(uid,{}).get('search_query')
         if not q: await callback.answer("⚠️",show_alert=True); await safe_edit(msg,"/search"); return
         await callback.answer("⏳"); await safe_edit(msg,f"🔍 {q}")
         res=[]
