@@ -2971,7 +2971,7 @@ async def unified_callback(client,callback):
     if data=="latest_manga_list":
         await callback.answer("📚")
         try:
-            sources = await asyncio.to_thread(get_sources)
+            sources = await asyncio.to_thread(get_sources, True)
         except Exception as e:
             sources = []
         if not sources:
