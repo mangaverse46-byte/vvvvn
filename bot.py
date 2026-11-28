@@ -116,7 +116,7 @@ _SOURCE_CODES = {"mangalik": "m", "mesh": "e", "azora": "a", "lavascans": "l"}
 _API_RESPONSE_CACHE = {}
 _API_CACHE_LOCK = threading.RLock()
 _API_CACHE_TTL = {
-    "sources": 3600, "latest": 300, "search": 90,
+    "sources": 30, "latest": 300, "search": 90,
     "genres": 3600, "genre-manga": 300, "details": 1800,
 }
 _API_CACHE_MAX_ITEMS = 1500
@@ -214,14 +214,11 @@ def source_code(source_id):
     source_id = str(source_id)
     if source_id in _SOURCE_CODES:
         return _SOURCE_CODES[source_id]
-    used = set(_SOURCE_CODES.values())
-    alphabet = "bcdfghjknopqrstuvwxyz0123456789"
-    for code in alphabet:
-        if code not in used:
-            _SOURCE_CODES[source_id] = code
-            return code
-    # Callback payloads stay short even if the registry grows unusually large.
-    return str(abs(hash(source_id)) % 10)
+    # Stable short IDs let any API-registered source use chapter/navigation
+    # callbacks without adding its ID to this bot's source-code table.
+    code = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
+    _SOURCE_CODES[source_id] = code
+    return code
 
 def source_from_code(code):
     for source_id in get_source_ids():
@@ -2792,7 +2789,7 @@ async def search_cmd(client,message,query_override=None):
         return
     user_data.setdefault(uid, {})["search_query"] = query
     try:
-        sources = await asyncio.to_thread(get_sources)
+        sources = await asyncio.to_thread(get_sources, True)
     except Exception as e:
         await message.reply_text(translate_ui_text(uid, f"❌ تعذر الاتصال بمحرك المانجا: {str(e)[:160]}")); return
     rows = []
